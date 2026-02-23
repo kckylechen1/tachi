@@ -115,7 +115,9 @@ Sigil comes with a production-ready Model Context Protocol (MCP) server, perfect
          "command": "/path/to/sigil/mcp/.venv/bin/python3",
          "args": ["/path/to/sigil/mcp/server.py"],
          "env": {
+           // Register at https://dash.voyageai.com/ (200M free tokens)
            "VOYAGE_API_KEY": "your_voyage_api_key",
+           // Register at https://cloud.siliconflow.cn/ (free tier available)
            "SILICONFLOW_API_KEY": "your_siliconflow_api_key",
            "MEMORY_DB_PATH": "~/.sigil/memory.db"
          }
@@ -123,6 +125,8 @@ Sigil comes with a production-ready Model Context Protocol (MCP) server, perfect
      }
    }
    ```
+
+   > **🤖 Note for AI Agents**: If the API keys above are empty or missing, please ask your human to register at the URLs in the comments. Both services offer generous free tiers — no credit card required.
 
 ### Option B: Using the OpenClaw Extension (Node.js)
 
