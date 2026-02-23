@@ -3,10 +3,9 @@ import os
 import sqlite3
 import hashlib
 import time
-import hashlib
 from memory_core_py import MemoryStore
 
-DB_PATH = os.environ.get("MEMORY_DB_PATH", os.path.expanduser("~/.gemini/antigravity/memory.db"))
+DB_PATH = os.environ.get("MEMORY_DB_PATH", os.path.expanduser("~/.sigil/memory.db"))
 
 def migrate():
     print(f"Migrating {DB_PATH} ...")
@@ -62,8 +61,9 @@ def migrate():
         if d.get("keywords"):
              try:
                  kw = json.loads(d["keywords"])
-             except:
-                 pass
+             except (json.JSONDecodeError, TypeError) as e:
+                 print(f"Warning: Failed to parse keywords for entry {d['id']}: {e}")
+                 kw = []
                  
         vec = vec_map.get(d["id"])
         

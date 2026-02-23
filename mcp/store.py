@@ -8,7 +8,7 @@ import time
 import os
 from memory_core_py import MemoryStore
 
-DB_PATH = os.environ.get("MEMORY_DB_PATH", os.path.expanduser("~/.gemini/antigravity/memory.db"))
+DB_PATH = os.environ.get("MEMORY_DB_PATH", os.path.expanduser("~/.sigil/memory.db"))
 
 def get_connection() -> MemoryStore:
     """Get a database connection powered by the Rust memory-core backend."""
@@ -40,8 +40,9 @@ def save_memory(
         opts = json.dumps({"top_k": 1, "query_vec": vector})
         res_str = store.search(text, opts)
         results = json.loads(res_str)
-        if results and results[0].get("score", {}).get("final", 0) >= 0.92:
-            return None
+        if results and len(results) > 0:
+            if results[0].get("score", {}).get("final", 0) >= 0.92:
+                return None
             
         me = {
             "id": entry_id,
@@ -85,7 +86,8 @@ def get_memory(store: MemoryStore, entry_id: str) -> dict | None:
         if "timestamp" in data:
             data["created_at"] = data["timestamp"]
         return data
-    except:
+    except (json.JSONDecodeError, TypeError) as e:
+        print(f"Error parsing memory {entry_id}: {e}")
         return None
 
 
