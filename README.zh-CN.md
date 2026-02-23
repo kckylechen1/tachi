@@ -81,7 +81,9 @@ cd sigil
 cp .env.example .env
 ```
 
-请确保在 `.env` 中填入必要的 API 密钥，用于向量嵌入（如 Voyage）和事实提取（如通过 SiliconFlow 调用 GLM-4/Qwen3）。
+请确保在 `.env` 中填入必要的 API 密钥：
+- **Voyage API** (`VOYAGE_API_KEY`)：用于向量嵌入(Embedding)和重排(Rerank)。[点击此处注册](https://dash.voyageai.com/) 即可获得 **2 亿免费 tokens**。
+- **提取 API** (`SILICONFLOW_API_KEY`)：用于事实提取和摘要。经过我们内部的大量横向对比测试，我们强烈建议使用 **GLM-4**（例如通过 SiliconFlow 调用 `THUDM/glm-4-9b-chat`），它在事实提取的速度和准确度上表现最为出色。
 
 ### 选项 A：作为 MCP Server 运行 (Python)
 

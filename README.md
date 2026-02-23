@@ -81,7 +81,9 @@ cd sigil
 cp .env.example .env
 ```
 
-Ensure you populate `.env` with the necessary API keys for embedding (e.g., Voyage) and extraction (e.g., GLM-4/Qwen3 via SiliconFlow).
+Ensure you populate `.env` with the necessary API keys:
+- **Voyage API** (`VOYAGE_API_KEY`): Used for embedding and reranking. [Register here](https://dash.voyageai.com/) to get **200 Million free tokens**.
+- **Extraction API** (`SILICONFLOW_API_KEY`): Used for fact extraction and summarization. After extensive internal benchmarking, we strongly recommend using **GLM-4** (e.g., `THUDM/glm-4-9b-chat` via SiliconFlow) as it has proven to be the fastest and most accurate model for structuring memory facts.
 
 ### Option A: Running as an MCP Server (Python)
 
