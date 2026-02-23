@@ -90,24 +90,22 @@ graph TD
 Help me set up Sigil — a local-first memory system for AI agents.
 
 1. Clone: git clone https://github.com/kckylechen1/sigil.git && cd sigil
-2. Setup MCP server:
+2. Configure API keys: cp .env.example .env, then fill in my keys.
+3. Setup MCP server:
    cd mcp && python3 -m venv .venv && source .venv/bin/activate
    cd ../crates/memory-python && pip install maturin && maturin develop --release
    cd ../../mcp && pip install -r requirements.txt
-3. Configure: Add to my mcp_config.json:
+4. Add to my mcp_config.json:
    {
      "mcpServers": {
        "memory": {
          "command": "<absolute-path-to>/sigil/mcp/.venv/bin/python3",
-         "args": ["<absolute-path-to>/sigil/mcp/server.py"],
-         "env": {
-           "VOYAGE_API_KEY": "<my_key>",
-           "SILICONFLOW_API_KEY": "<my_key>",
-           "MEMORY_DB_PATH": "~/.sigil/memory.db"
-         }
+         "args": ["<absolute-path-to>/sigil/mcp/server.py"]
        }
      }
    }
+
+The server auto-loads API keys from the .env file — no need to pass them in mcp_config.
 
 If I don't have API keys yet, help me register:
 - Voyage API (embedding + rerank): https://dash.voyageai.com/ — 200M free tokens, no credit card
@@ -122,17 +120,17 @@ If I don't have API keys yet, help me register:
 Help me install Sigil as an OpenClaw memory extension.
 
 1. Clone: git clone https://github.com/kckylechen1/sigil.git && cd sigil
-2. Build the NAPI-RS Rust binding:
+2. Configure API keys: cp .env.example .env, then fill in my keys.
+3. Build the NAPI-RS Rust binding:
    cd integrations/openclaw && npm install && npm run build
-3. Symlink into OpenClaw extensions:
+4. Symlink into OpenClaw extensions:
    ln -s $(pwd) ~/.openclaw/local-plugins/extensions/sigil-memory
-4. Set env vars (add to ~/.zshrc or ~/.bashrc):
-   export VOYAGE_API_KEY="<my_key>"
-   export SILICONFLOW_API_KEY="<my_key>"
 5. Set up cron jobs for automated memory curation — add to ~/.openclaw/cron/jobs.json:
    - Daily consolidation (03:40 AM): merge duplicates, extract causal chains
    - Incremental check (every 6h): detect causal gaps and contradictions
    See the "OpenClaw Cron Jobs" section in the README for copy-paste JSON.
+
+The extension auto-loads API keys from the .env file.
 
 If I don't have API keys yet, help me register:
 - Voyage API (embedding + rerank): https://dash.voyageai.com/ — 200M free tokens, no credit card
