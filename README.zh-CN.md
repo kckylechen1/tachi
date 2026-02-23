@@ -73,9 +73,9 @@ graph TD
 
 ## 🚀 快速开始
 
-### 🤖🦞 给你的 AI Agent
+### 🤖 给你的 Coding Agent (Claude / Cursor / Antigravity)
 
-> **把下面这段话整个复制粘贴给你的 AI Agent（Claude / Cursor / Antigravity / OpenClaw 等）：**
+> **复制以下内容粘贴给你的 AI 编程助手，让它帮你搭建 Sigil MCP 记忆服务器：**
 
 ```
 帮我安装配置 Sigil —— 一个 AI agent 本地记忆系统。
@@ -99,6 +99,31 @@ graph TD
        }
      }
    }
+
+如果我还没有 API Key，帮我注册：
+- Voyage API（向量嵌入+重排）: https://dash.voyageai.com/ — 免费 2 亿 tokens，无需信用卡
+- SiliconFlow（事实提取）: https://cloud.siliconflow.cn/ — 有免费额度
+```
+
+### 🦞 给你的 OpenClaw
+
+> **复制以下内容粘贴给你的 OpenClaw agent，让它帮你安装 Sigil 原生记忆扩展：**
+
+```
+帮我安装 Sigil 作为 OpenClaw 的记忆扩展。
+
+1. 克隆仓库: git clone https://github.com/kckylechen1/sigil.git && cd sigil
+2. 编译 NAPI-RS Rust 绑定:
+   cd integrations/openclaw && npm install && npm run build
+3. 软链接到 OpenClaw 扩展目录:
+   ln -s $(pwd) ~/.openclaw/local-plugins/extensions/sigil-memory
+4. 设置环境变量（添加到 ~/.zshrc 或 ~/.bashrc）:
+   export VOYAGE_API_KEY="<我的key>"
+   export SILICONFLOW_API_KEY="<我的key>"
+5. 设置定时任务自动整理记忆 —— 添加到 ~/.openclaw/cron/jobs.json:
+   - 每日整理（凌晨 03:40）: 合并重复条目，提取因果链
+   - 增量质检（每 6 小时）: 检测因果断裂和矛盾冲突
+   具体 JSON 配置见 README 的"OpenClaw 定时任务"章节。
 
 如果我还没有 API Key，帮我注册：
 - Voyage API（向量嵌入+重排）: https://dash.voyageai.com/ — 免费 2 亿 tokens，无需信用卡

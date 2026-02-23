@@ -73,12 +73,12 @@ graph TD
 
 ## 🚀 Quick Start
 
-### 🤖🦞 For Your AI Agent
+### 🤖 For Coding Agents (Claude / Cursor / Antigravity)
 
-> **Copy everything below and paste it to your AI agent (Claude, Cursor, Antigravity, etc.):**
+> **Copy this to your AI coding agent to set up Sigil as an MCP memory server:**
 
 ```
-I want you to help me set up Sigil — a local-first memory system for AI agents.
+Help me set up Sigil — a local-first memory system for AI agents.
 
 1. Clone: git clone https://github.com/kckylechen1/sigil.git && cd sigil
 2. Setup MCP server:
@@ -99,6 +99,31 @@ I want you to help me set up Sigil — a local-first memory system for AI agents
        }
      }
    }
+
+If I don't have API keys yet, help me register:
+- Voyage API (embedding + rerank): https://dash.voyageai.com/ — 200M free tokens, no credit card
+- SiliconFlow (fact extraction): https://cloud.siliconflow.cn/ — free tier available
+```
+
+### 🦞 For OpenClaw
+
+> **Copy this to your OpenClaw agent to install Sigil as a native memory extension:**
+
+```
+Help me install Sigil as an OpenClaw memory extension.
+
+1. Clone: git clone https://github.com/kckylechen1/sigil.git && cd sigil
+2. Build the NAPI-RS Rust binding:
+   cd integrations/openclaw && npm install && npm run build
+3. Symlink into OpenClaw extensions:
+   ln -s $(pwd) ~/.openclaw/local-plugins/extensions/sigil-memory
+4. Set env vars (add to ~/.zshrc or ~/.bashrc):
+   export VOYAGE_API_KEY="<my_key>"
+   export SILICONFLOW_API_KEY="<my_key>"
+5. Set up cron jobs for automated memory curation — add to ~/.openclaw/cron/jobs.json:
+   - Daily consolidation (03:40 AM): merge duplicates, extract causal chains
+   - Incremental check (every 6h): detect causal gaps and contradictions
+   See the "OpenClaw Cron Jobs" section in the README for copy-paste JSON.
 
 If I don't have API keys yet, help me register:
 - Voyage API (embedding + rerank): https://dash.voyageai.com/ — 200M free tokens, no credit card
