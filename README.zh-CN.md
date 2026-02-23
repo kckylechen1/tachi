@@ -2,12 +2,16 @@
   <h1>✧ Sigil</h1>
   <p><strong>专为 AI Agent 打造的本地优先、高性能混合上下文数据库</strong></p>
 
-  [English](README.md) | [简体中文](README.zh-CN.md)
+  <p>
+    <a href="README.md">English</a> | <a href="README.zh-CN.md">简体中文</a>
+  </p>
 
-  [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
-  [![Language: Rust](https://img.shields.io/badge/Language-Rust-orange)](https://rust-lang.org)
-  [![Integration: MCP](https://img.shields.io/badge/Integration-MCP_Server-purple)](#)
-  [![Integration: OpenClaw](https://img.shields.io/badge/Integration-OpenClaw-cyan)](#)
+  <p>
+    <a href="https://opensource.org/licenses/MIT"><img src="https://img.shields.io/badge/License-MIT-blue.svg" alt="License: MIT"></a>
+    <img src="https://img.shields.io/badge/Language-Rust-orange" alt="Language: Rust">
+    <img src="https://img.shields.io/badge/Integration-MCP_Server-purple" alt="Integration: MCP">
+    <img src="https://img.shields.io/badge/Integration-OpenClaw-cyan" alt="Integration: OpenClaw">
+  </p>
 </div>
 
 ---
