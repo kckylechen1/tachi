@@ -1,0 +1,28 @@
+{
+    "name": "@memory-core/node",
+    "version": "0.1.0",
+    "description": "High-performance memory storage & hybrid search engine (Rust native module)",
+    "main": "index.js",
+    "types": "index.d.ts",
+    "napi": {
+        "name": "memory-core",
+        "triples": {
+            "defaults": true
+        }
+    },
+    "scripts": {
+        "build": "napi build --platform --release --cargo-cwd .",
+        "build:debug": "napi build --platform --cargo-cwd .",
+        "artifacts": "napi artifacts",
+        "prepublishOnly": "napi prepublish -t npm"
+    },
+    "devDependencies": {
+        "@napi-rs/cli": "^2"
+    },
+    "license": "MIT",
+    "files": [
+        "index.js",
+        "index.d.ts",
+        "*.node"
+    ]
+}

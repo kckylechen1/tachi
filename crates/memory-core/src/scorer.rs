@@ -1,0 +1,261 @@
+// scorer.rs — Pure-Rust hybrid scoring engine (no I/O, no SQLite)
+//
+// Replaces JS `scorer.ts` (cosineSimilarity / hybridScore / rankHybrid)
+// and Python `store.py:hybrid_search` weighting logic.
+
+use std::collections::HashMap;
+use crate::types::{HybridScore, MemoryEntry};
+use chrono::Utc;
+
+// Half-life for the decay function: 30 days (ACT-R inspired, from Nowledge Mem)
+const HALF_LIFE_DAYS: f64 = 30.0;
+
+/// Normalise an f64 to [0, 1].
+#[inline]
+pub fn normalize(v: f64) -> f64 {
+    v.clamp(0.0, 1.0)
+}
+
+/// Cosine similarity between two equal-length f32 slices.
+/// Returns 0.0 if either vector is zero-magnitude.
+pub fn cosine_similarity(a: &[f32], b: &[f32]) -> f64 {
+    debug_assert_eq!(a.len(), b.len(), "vector dimension mismatch");
+    let mut dot = 0.0_f64;
+    let mut mag_a = 0.0_f64;
+    let mut mag_b = 0.0_f64;
+    for (x, y) in a.iter().zip(b.iter()) {
+        let x = *x as f64;
+        let y = *y as f64;
+        dot += x * y;
+        mag_a += x * x;
+        mag_b += y * y;
+    }
+    let mag = mag_a.sqrt() * mag_b.sqrt();
+    if mag == 0.0 { 0.0 } else { (dot / mag).clamp(-1.0, 1.0) }
+}
+
+/// Memory decay score (ACT-R Nowledge Mem formula).
+///
+/// `decay = max(recency × (1 + 0.2 × log10(1 + access_count)), importance × 0.3)`
+/// where `recency = exp(-0.693 × age_days / HALF_LIFE_DAYS)`
+pub fn decay_score(entry: &MemoryEntry) -> f64 {
+    let now = Utc::now();
+    let reference = entry
+        .last_access
+        .as_ref()
+        .and_then(|s| s.parse::<chrono::DateTime<Utc>>().ok())
+        .unwrap_or_else(|| {
+            entry
+                .timestamp
+                .parse::<chrono::DateTime<Utc>>()
+                .unwrap_or(now)
+        });
+    let age_days = (now - reference).num_seconds().max(0) as f64 / 86_400.0;
+
+    let recency = (-0.693 * age_days / HALF_LIFE_DAYS).exp();
+    let frequency = (1.0 + entry.access_count as f64).log10();
+    let importance_floor = entry.importance * 0.3;
+
+    (recency * (1.0 + 0.2 * frequency)).max(importance_floor)
+}
+
+/// Reciprocal Rank Fusion (RRF) score used to merge sorted lists.
+/// Standard k=60 constant. Reserved for future RRF-mode scoring.
+#[inline]
+#[allow(dead_code)]
+pub fn rrf(rank: usize) -> f64 {
+    1.0 / (60.0 + rank as f64 + 1.0)
+}
+
+/// Weights for the hybrid scoring formula.
+#[derive(Debug, Clone)]
+pub struct HybridWeights {
+    pub semantic: f64,
+    pub fts: f64,
+    pub symbolic: f64,
+    pub decay: f64,
+}
+
+impl Default for HybridWeights {
+    fn default() -> Self {
+        // Matches existing JS config defaults: semantic=0.4, lexical=0.3, symbolic=0.3
+        // Decay gets its own additive weight on top
+        Self {
+            semantic: 0.40,
+            fts: 0.30,
+            symbolic: 0.20,
+            decay: 0.10,
+        }
+    }
+}
+
+/// Merge several scored lists into a single HybridScore per doc-id.
+///
+/// `vec_scores`, `fts_scores`, `symbolic_scores` are maps from doc-id → normalised score [0,1].
+pub fn hybrid_score(
+    entries: &HashMap<String, &MemoryEntry>,
+    vec_scores: &HashMap<String, f64>,
+    fts_scores: &HashMap<String, f64>,
+    symbolic_scores: &HashMap<String, f64>,
+    weights: &HybridWeights,
+) -> HashMap<String, HybridScore> {
+    let all_ids: std::collections::HashSet<&String> = vec_scores
+        .keys()
+        .chain(fts_scores.keys())
+        .chain(symbolic_scores.keys())
+        .collect();
+
+    let mut out: HashMap<String, HybridScore> = HashMap::new();
+
+    for id in all_ids {
+        let vs = normalize(*vec_scores.get(id).unwrap_or(&0.0));
+        let fs = normalize(*fts_scores.get(id).unwrap_or(&0.0));
+        let ss = normalize(*symbolic_scores.get(id).unwrap_or(&0.0));
+
+        let ds = entries
+            .get(id.as_str())
+            .map(|e| decay_score(e))
+            .unwrap_or(0.0);
+
+        let final_score = weights.semantic * vs
+            + weights.fts * fs
+            + weights.symbolic * ss
+            + weights.decay * ds;
+
+        out.insert(
+            id.clone(),
+            HybridScore {
+                vector: vs,
+                fts: fs,
+                symbolic: ss,
+                decay: ds,
+                final_score,
+            },
+        );
+    }
+
+    out
+}
+
+/// Simple tokeniser for symbolic (bag-of-words) scoring.
+/// - Latin/ASCII: splits on non-alphanumeric, filters tokens < 2 chars.
+/// - CJK (Chinese/Japanese/Korean): emits each character as an individual token.
+pub fn tokenize(s: &str) -> Vec<String> {
+    let lower = s.to_lowercase();
+    let mut tokens = Vec::new();
+    let mut current = String::new();
+
+    for ch in lower.chars() {
+        if is_cjk(ch) {
+            // Flush any pending ASCII token
+            if current.len() >= 2 {
+                tokens.push(std::mem::take(&mut current));
+            } else {
+                current.clear();
+            }
+            // Emit each CJK character as its own token
+            tokens.push(ch.to_string());
+        } else if ch.is_alphanumeric() {
+            current.push(ch);
+        } else {
+            // Separator: flush pending ASCII token
+            if current.len() >= 2 {
+                tokens.push(std::mem::take(&mut current));
+            } else {
+                current.clear();
+            }
+        }
+    }
+    // Flush trailing
+    if current.len() >= 2 {
+        tokens.push(current);
+    }
+    tokens
+}
+
+/// Check if a character is in a CJK Unified Ideographs block.
+#[inline]
+fn is_cjk(c: char) -> bool {
+    matches!(c,
+        '\u{4E00}'..='\u{9FFF}'   // CJK Unified Ideographs
+        | '\u{3400}'..='\u{4DBF}' // CJK Extension A
+        | '\u{F900}'..='\u{FAFF}' // CJK Compatibility
+        | '\u{3040}'..='\u{309F}' // Hiragana
+        | '\u{30A0}'..='\u{30FF}' // Katakana
+        | '\u{AC00}'..='\u{D7AF}' // Hangul
+    )
+}
+
+/// Compute a normalised token-overlap (Jaccard-like) score [0, 1].
+pub fn symbolic_score(query: &str, entry_text: &str, keywords: &[String]) -> f64 {
+    let query_tokens: std::collections::HashSet<String> = tokenize(query).into_iter().collect();
+    if query_tokens.is_empty() {
+        return 0.0;
+    }
+
+    let mut text_tokens: std::collections::HashSet<String> =
+        tokenize(entry_text).into_iter().collect();
+    for kw in keywords {
+        text_tokens.extend(tokenize(kw));
+    }
+
+    let overlap = query_tokens.intersection(&text_tokens).count();
+    (overlap as f64) / (query_tokens.len() as f64)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cosine_identity() {
+        let v = vec![1.0_f32, 0.0, 0.0];
+        assert!((cosine_similarity(&v, &v) - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn cosine_orthogonal() {
+        let a = vec![1.0_f32, 0.0];
+        let b = vec![0.0_f32, 1.0];
+        assert!((cosine_similarity(&a, &b)).abs() < 1e-9);
+    }
+
+    #[test]
+    fn symbolic_exact_match() {
+        let score = symbolic_score("hello world", "hello world", &[]);
+        assert!(score > 0.9, "score={score}");
+    }
+
+    #[test]
+    fn decay_never_accessed() {
+        use chrono::Duration;
+        let mut entry = crate::types::MemoryEntry {
+            id: "test".into(),
+            path: "/".into(),
+            summary: "".into(),
+            text: "".into(),
+            importance: 0.7,
+            timestamp: (Utc::now() - Duration::days(60)).to_rfc3339(),
+            category: "fact".into(),
+            topic: "".into(),
+            keywords: vec![],
+            persons: vec![],
+            entities: vec![],
+            location: "".into(),
+            source: "".into(),
+            scope: "general".into(),
+            access_count: 0,
+            last_access: None,
+            metadata: serde_json::Value::Object(Default::default()),
+            vector: None,
+        };
+        let s = decay_score(&entry);
+        // 60-day old, no access → recency ~ exp(-0.693*2) ≈ 0.25, floor=0.7*0.3=0.21 → ~0.25
+        assert!(s > 0.1 && s < 0.5, "unexpected decay={s}");
+
+        // With importance floor
+        entry.importance = 1.0;
+        let s2 = decay_score(&entry);
+        assert!(s2 >= 0.3, "importance floor violated: {s2}");
+    }
+}

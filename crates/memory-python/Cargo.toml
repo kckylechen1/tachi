@@ -1,0 +1,15 @@
+[package]
+name = "memory-python"
+version = "0.1.0"
+edition = "2021"
+description = "PyO3 Python binding for memory-core (replaces sqlite3 in memory-mcp)"
+
+[lib]
+name = "memory_core_py"
+crate-type = ["cdylib"]
+
+[dependencies]
+memory-core = { path = "../memory-core" }
+pyo3 = { version = "0.23", features = ["extension-module", "abi3-py39"] }
+pythonize = "0.23"
+serde_json = { workspace = true }
