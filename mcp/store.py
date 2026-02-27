@@ -4,8 +4,9 @@ Now powered by Rust-based memory-core-py.
 """
 
 import json
-import time
 import os
+import uuid
+from datetime import datetime, timezone
 from memory_core_py import MemoryStore
 
 DB_PATH = os.environ.get("MEMORY_DB_PATH", os.path.expanduser("~/.sigil/memory.db"))
@@ -29,9 +30,8 @@ def save_memory(
     source: str = "manual",
 ) -> dict | None:
     """Save a memory entry. Returns None if duplicate detected by Rust core."""
-    import hashlib
-    entry_id = hashlib.sha256(text.encode()).hexdigest()[:16]
-    now = time.strftime("%Y-%m-%dT%H:%M:%S+08:00")
+    entry_id = str(uuid.uuid4())
+    now = datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
     
     # We pass duplicate checking and upsert fully to Rust backend processing
     try:
@@ -75,9 +75,9 @@ def save_memory(
         print(f"Failed to upsert memory: {e}")
         raise  # Re-raise so server.py can distinguish from dedup skip
 
-def get_memory(store: MemoryStore, entry_id: str) -> dict | None:
+def get_memory(store: MemoryStore, entry_id: str, include_archived: bool = False) -> dict | None:
     """Retrieve full memory by ID."""
-    res = store.get(entry_id)
+    res = store.get(entry_id, include_archived)
     if not res:
         return None
     try:
@@ -96,12 +96,14 @@ def search_by_vector(
     query_vec: list[float],
     top_k: int = 8,
     path_prefix: str = "",
+    include_archived: bool = False,
 ) -> list[dict]:
     """Fallback search by vector (pure vector search simulated by 0 lexical weights)."""
     opts = {
         "top_k": top_k,
         "query_vec": query_vec,
         "path_prefix": path_prefix,
+        "include_archived": include_archived,
         "weights": {
             "semantic": 1.0,
             "fts": 0.0,
@@ -137,11 +139,13 @@ def search_by_text(
     query: str, 
     top_k: int = 10,
     path_prefix: str = "",
+    include_archived: bool = False,
 ) -> list[dict]:
     """Fallback search by text (pure FTS search)."""
     opts = {
         "top_k": top_k,
         "path_prefix": path_prefix,
+        "include_archived": include_archived,
         "weights": {
             "semantic": 0.0,
             "fts": 1.0,
@@ -179,6 +183,7 @@ def hybrid_search(
     query_text: str,
     top_k: int = 6,
     path_prefix: str = "",
+    include_archived: bool = False,
     w_vec: float = 0.6,
     w_lex: float = 0.25,
     w_recency: float = 0.15,
@@ -188,6 +193,7 @@ def hybrid_search(
         "top_k": top_k,
         "query_vec": query_vec,
         "path_prefix": path_prefix,
+        "include_archived": include_archived,
         "weights": {
             "semantic": w_vec,
             "fts": w_lex,
@@ -219,7 +225,12 @@ def hybrid_search(
         print(f"Hybrid search failed: {e}")
         return []
 
-def list_by_path(store: MemoryStore, path_prefix: str) -> dict:
+def list_by_path(
+    store: MemoryStore,
+    path_prefix: str,
+    include_archived: bool = False,
+    limit: int = 5000,
+) -> dict:
     """List sub-paths and memories immediately under a given path."""
     if not path_prefix.startswith('/'):
         path_prefix = '/' + path_prefix
@@ -229,8 +240,8 @@ def list_by_path(store: MemoryStore, path_prefix: str) -> dict:
         query_prefix += '/'
 
     try:
-        # Load all from store. Rust layer provides search fallback. Here we just manually scan since limit is 200/500 usually
-        res_str = store.get_all(5000) 
+        # Push down path filter to Rust SQL query (no full table scan).
+        res_str = store.list_by_path(path_prefix, limit, include_archived)
         all_entries = json.loads(res_str)
         
         dirs = set()
@@ -268,10 +279,10 @@ def list_by_path(store: MemoryStore, path_prefix: str) -> dict:
         return { "path": path_prefix, "directories": [], "memories": [] }
 
 
-def get_stats(store: MemoryStore) -> dict:
+def get_stats(store: MemoryStore, include_archived: bool = False) -> dict:
     """Get memory db statistics."""
     try:
-        res_str = store.get_all(100000)
+        res_str = store.get_all(100000, include_archived)
         all_entries = json.loads(res_str)
         count = len(all_entries)
         

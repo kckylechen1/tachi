@@ -8,7 +8,7 @@
 
 use rusqlite::{params, Connection, Result as SqlResult};
 use std::collections::HashMap;
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, SecondsFormat, Utc};
 use serde_json;
 
 use crate::error::MemoryError;
@@ -39,6 +39,9 @@ pub fn init_schema(conn: &Connection) -> Result<(), MemoryError> {
             location     TEXT NOT NULL DEFAULT '',
             source       TEXT NOT NULL DEFAULT 'manual',
             scope        TEXT NOT NULL DEFAULT 'general',
+            archived     INTEGER NOT NULL DEFAULT 0,
+            created_at   TEXT NOT NULL DEFAULT '',
+            updated_at   TEXT NOT NULL DEFAULT '',
             access_count INTEGER NOT NULL DEFAULT 0,
             last_access  TEXT,
             metadata     TEXT NOT NULL DEFAULT '{}'
@@ -47,6 +50,7 @@ pub fn init_schema(conn: &Connection) -> Result<(), MemoryError> {
         CREATE INDEX IF NOT EXISTS idx_memories_path        ON memories(path);
         CREATE INDEX IF NOT EXISTS idx_memories_importance  ON memories(importance DESC);
         CREATE INDEX IF NOT EXISTS idx_memories_timestamp   ON memories(timestamp DESC);
+        CREATE INDEX IF NOT EXISTS idx_memories_archived    ON memories(archived);
         CREATE INDEX IF NOT EXISTS idx_memories_last_access ON memories(last_access DESC);
 
         -- Standalone FTS5 table with Chinese + Pinyin tokenizer.
@@ -61,6 +65,37 @@ pub fn init_schema(conn: &Connection) -> Result<(), MemoryError> {
             tokenize = 'simple'
         );
     "#)?;
+
+    // Forward-compatible migrations for existing DB files created before
+    // archived/created_at/updated_at columns existed.
+    ensure_column(
+        conn,
+        "memories",
+        "archived",
+        "INTEGER NOT NULL DEFAULT 0",
+    )?;
+    ensure_column(
+        conn,
+        "memories",
+        "created_at",
+        "TEXT NOT NULL DEFAULT ''",
+    )?;
+    ensure_column(
+        conn,
+        "memories",
+        "updated_at",
+        "TEXT NOT NULL DEFAULT ''",
+    )?;
+
+    // Backfill empty values for legacy rows.
+    conn.execute(
+        "UPDATE memories SET created_at = timestamp WHERE created_at IS NULL OR created_at = ''",
+        [],
+    )?;
+    conn.execute(
+        "UPDATE memories SET updated_at = created_at WHERE updated_at IS NULL OR updated_at = ''",
+        [],
+    )?;
 
     // NOTE: sqlite-vec virtual table (memories_vec) is created separately after
     // the extension is loaded by the caller via register_sqlite_vec().
@@ -99,11 +134,59 @@ pub fn serialize_f32(vec: &[f32]) -> Vec<u8> {
     buf
 }
 
+fn ensure_column(
+    conn: &Connection,
+    table: &str,
+    column: &str,
+    definition: &str,
+) -> Result<(), MemoryError> {
+    if has_column(conn, table, column)? {
+        return Ok(());
+    }
+
+    let sql = format!("ALTER TABLE {table} ADD COLUMN {column} {definition}");
+    conn.execute(&sql, [])?;
+    Ok(())
+}
+
+fn has_column(conn: &Connection, table: &str, column: &str) -> Result<bool, MemoryError> {
+    let pragma = format!("PRAGMA table_info({table})");
+    let mut stmt = conn.prepare(&pragma)?;
+    let mut rows = stmt.query([])?;
+    while let Some(row) = rows.next()? {
+        let name: String = row.get(1)?;
+        if name == column {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 // ─── Row mapping ──────────────────────────────────────────────────────────────
 
-fn parse_dt(s: &str) -> DateTime<Utc> {
-    s.parse::<DateTime<Utc>>()
-        .unwrap_or_else(|_| Utc::now())
+#[inline]
+fn now_utc_iso() -> String {
+    Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true)
+}
+
+#[inline]
+fn normalize_utc_iso(ts: &str) -> String {
+    let raw = ts.trim();
+    if raw.is_empty() {
+        return now_utc_iso();
+    }
+
+    if let Ok(dt) = DateTime::parse_from_rfc3339(raw) {
+        return dt
+            .with_timezone(&Utc)
+            .to_rfc3339_opts(SecondsFormat::Millis, true);
+    }
+
+    if let Ok(dt) = raw.parse::<DateTime<Utc>>() {
+        return dt.to_rfc3339_opts(SecondsFormat::Millis, true);
+    }
+
+    now_utc_iso()
 }
 
 fn row_to_entry(row: &rusqlite::Row<'_>) -> SqlResult<MemoryEntry> {
@@ -128,6 +211,7 @@ fn row_to_entry(row: &rusqlite::Row<'_>) -> SqlResult<MemoryEntry> {
         location: row.get("location")?,
         source: row.get("source")?,
         scope: row.get("scope")?,
+        archived: row.get("archived")?,
         access_count: row.get("access_count")?,
         last_access,
         metadata,
@@ -139,18 +223,30 @@ fn row_to_entry(row: &rusqlite::Row<'_>) -> SqlResult<MemoryEntry> {
 
 /// Insert or update a memory entry (and its embedding vector if provided).
 pub fn upsert(conn: &Connection, entry: &MemoryEntry, vec_available: bool) -> Result<(), MemoryError> {
+    if entry.id.trim().is_empty() {
+        return Err(MemoryError::InvalidArg("entry.id must be provided by caller".to_string()));
+    }
+
+    let timestamp_utc = normalize_utc_iso(&entry.timestamp);
+    let last_access_utc = entry.last_access.as_deref().map(normalize_utc_iso);
+    let write_time_utc = now_utc_iso();
+
     let metadata_json = serde_json::to_string(&entry.metadata)?;
     let kws_json = serde_json::to_string(&entry.keywords)?;
     let p_json = serde_json::to_string(&entry.persons)?;
     let e_json = serde_json::to_string(&entry.entities)?;
 
+    // All writes for one upsert must be atomic across main table + FTS + vec.
+    let tx = conn.unchecked_transaction()?;
+
     // Write to main table
-    conn.execute(
+    tx.execute(
         r#"INSERT INTO memories
               (id, path, summary, text, importance,
                timestamp, category, topic, keywords, persons, entities,
-               location, source, scope, access_count, last_access, metadata)
-           VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17)
+               location, source, scope, archived, created_at, updated_at,
+               access_count, last_access, metadata)
+           VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20)
            ON CONFLICT(id) DO UPDATE SET
                path         = excluded.path,
                summary      = excluded.summary,
@@ -165,6 +261,9 @@ pub fn upsert(conn: &Connection, entry: &MemoryEntry, vec_available: bool) -> Re
                location     = excluded.location,
                source       = excluded.source,
                scope        = excluded.scope,
+               archived     = excluded.archived,
+               created_at   = memories.created_at,
+               updated_at   = excluded.updated_at,
                access_count = excluded.access_count,
                last_access  = excluded.last_access,
                metadata     = excluded.metadata"#,
@@ -174,7 +273,7 @@ pub fn upsert(conn: &Connection, entry: &MemoryEntry, vec_available: bool) -> Re
             entry.summary,
             entry.text,
             entry.importance,
-            entry.timestamp,
+            timestamp_utc,
             entry.category,
             entry.topic,
             kws_json,
@@ -183,8 +282,11 @@ pub fn upsert(conn: &Connection, entry: &MemoryEntry, vec_available: bool) -> Re
             entry.location,
             entry.source,
             entry.scope,
+            entry.archived,
+            &write_time_utc,
+            &write_time_utc,
             entry.access_count,
-            entry.last_access,
+            last_access_utc,
             metadata_json,
         ],
     )?;
@@ -192,11 +294,11 @@ pub fn upsert(conn: &Connection, entry: &MemoryEntry, vec_available: bool) -> Re
     // Sync FTS: delete old row (if any) then re-insert
     let kws = entry.keywords.join(" ");
     let ents = entry.entities.join(" ");
-    conn.execute(
+    tx.execute(
         "DELETE FROM memories_fts WHERE id = ?1",
         params![entry.id],
     )?;
-    conn.execute(
+    tx.execute(
         "INSERT INTO memories_fts(id, path, summary, text, keywords, entities)
          VALUES (?1,?2,?3,?4,?5,?6)",
         params![entry.id, entry.path, entry.summary, entry.text, kws, ents],
@@ -207,17 +309,18 @@ pub fn upsert(conn: &Connection, entry: &MemoryEntry, vec_available: bool) -> Re
             let blob = serialize_f32(vec);
             // vec0 virtual tables do NOT support ON CONFLICT / UPSERT.
             // Use DELETE + INSERT (same pattern as FTS sync above).
-            conn.execute(
+            tx.execute(
                 "DELETE FROM memories_vec WHERE id = ?1",
                 params![entry.id],
             )?;
-            conn.execute(
+            tx.execute(
                 "INSERT INTO memories_vec(id, embedding) VALUES (?1, ?2)",
                 params![entry.id, blob],
             )?;
         }
     }
 
+    tx.commit()?;
     Ok(())
 }
 
@@ -231,17 +334,20 @@ pub fn search_vec(
     conn: &Connection,
     query_vec: &[f32],
     top_k: usize,
+    include_archived: bool,
 ) -> Result<HashMap<String, f64>, MemoryError> {
     let blob = serialize_f32(query_vec);
     let mut stmt = conn.prepare(
         r#"SELECT v.id, v.distance
            FROM memories_vec v
+           JOIN memories m ON m.id = v.id
            WHERE v.embedding MATCH ?1
+             AND (?2 = 1 OR m.archived = 0)
            ORDER BY v.distance
-           LIMIT ?2"#,
+           LIMIT ?3"#,
     )?;
 
-    let rows = stmt.query_map(params![blob, top_k as i64], |row| {
+    let rows = stmt.query_map(params![blob, include_archived as i64, top_k as i64], |row| {
         let id: String = row.get(0)?;
         let dist: f64 = row.get(1)?;
         Ok((id, dist))
@@ -266,6 +372,7 @@ pub fn search_fts(
     conn: &Connection,
     query: &str,
     limit: usize,
+    include_archived: bool,
 ) -> Result<HashMap<String, f64>, MemoryError> {
     // Sanitise query: remove potentially dangerous characters
     let safe_query: String = query
@@ -279,14 +386,16 @@ pub fn search_fts(
 
     // Use simple_query() for automatic CJK segmentation in MATCH clause
     let mut stmt = conn.prepare(
-        r#"SELECT id, -bm25(memories_fts) AS score
+        r#"SELECT memories_fts.id, -bm25(memories_fts) AS score
            FROM memories_fts
+           JOIN memories m ON m.id = memories_fts.id
            WHERE memories_fts MATCH simple_query(?1)
+             AND (?2 = 1 OR m.archived = 0)
            ORDER BY bm25(memories_fts)
-           LIMIT ?2"#,
+           LIMIT ?3"#,
     )?;
 
-    let rows = stmt.query_map(params![safe_query, limit as i64], |row| {
+    let rows = stmt.query_map(params![safe_query, include_archived as i64, limit as i64], |row| {
         let id: String = row.get(0)?;
         let score: f64 = row.get(1)?;
         Ok((id, score))
@@ -313,6 +422,7 @@ pub fn search_fts(
 pub fn fetch_by_ids(
     conn: &Connection,
     ids: &[String],
+    include_archived: bool,
 ) -> Result<HashMap<String, MemoryEntry>, MemoryError> {
     if ids.is_empty() {
         return Ok(HashMap::new());
@@ -320,11 +430,14 @@ pub fn fetch_by_ids(
 
     // Build a parameterised IN clause
     let placeholders = ids.iter().enumerate().map(|(i, _)| format!("?{}", i + 1)).collect::<Vec<_>>().join(",");
-    let sql = format!(
-        "SELECT id,path,summary,text,importance,timestamp,category,topic,keywords,persons,entities,location,source,scope,access_count,last_access,metadata
+    let mut sql = format!(
+        "SELECT id,path,summary,text,importance,timestamp,category,topic,keywords,persons,entities,location,source,scope,archived,access_count,last_access,metadata
          FROM memories WHERE id IN ({})",
         placeholders
     );
+    if !include_archived {
+        sql.push_str(" AND archived = 0");
+    }
 
     let mut stmt = conn.prepare(&sql)?;
     let rows = stmt.query_map(rusqlite::params_from_iter(ids.iter()), row_to_entry)?;
@@ -338,9 +451,18 @@ pub fn fetch_by_ids(
 }
 
 /// Fetch the most recent entries, up to `limit`. Returns sorted dynamically by inserted time.
-pub fn get_all(conn: &Connection, limit: usize) -> Result<Vec<MemoryEntry>, MemoryError> {
-    let sql = "SELECT id,path,summary,text,importance,timestamp,category,topic,keywords,persons,entities,location,source,scope,access_count,last_access,metadata
-               FROM memories ORDER BY timestamp DESC LIMIT ?";
+pub fn get_all(
+    conn: &Connection,
+    limit: usize,
+    include_archived: bool,
+) -> Result<Vec<MemoryEntry>, MemoryError> {
+    let sql = if include_archived {
+        "SELECT id,path,summary,text,importance,timestamp,category,topic,keywords,persons,entities,location,source,scope,archived,access_count,last_access,metadata
+         FROM memories ORDER BY timestamp DESC LIMIT ?"
+    } else {
+        "SELECT id,path,summary,text,importance,timestamp,category,topic,keywords,persons,entities,location,source,scope,archived,access_count,last_access,metadata
+         FROM memories WHERE archived = 0 ORDER BY timestamp DESC LIMIT ?"
+    };
     let mut stmt = conn.prepare(sql)?;
     let rows = stmt.query_map(params![limit], row_to_entry)?;
     
@@ -351,15 +473,69 @@ pub fn get_all(conn: &Connection, limit: usize) -> Result<Vec<MemoryEntry>, Memo
     Ok(out)
 }
 
+/// Fetch entries under a path prefix using SQL pushdown instead of full-table scans.
+pub fn list_by_path(
+    conn: &Connection,
+    path_prefix: &str,
+    limit: usize,
+    include_archived: bool,
+) -> Result<Vec<MemoryEntry>, MemoryError> {
+    let mut normalized = path_prefix.trim().to_string();
+    if normalized.is_empty() {
+        normalized = "/".to_string();
+    }
+    if !normalized.starts_with('/') {
+        normalized = format!("/{normalized}");
+    }
+    if normalized.len() > 1 {
+        normalized = normalized.trim_end_matches('/').to_string();
+    }
+    let like_prefix = if normalized == "/" {
+        "/%".to_string()
+    } else {
+        format!("{normalized}/%")
+    };
+
+    let sql = if include_archived {
+        "SELECT id,path,summary,text,importance,timestamp,category,topic,keywords,persons,entities,location,source,scope,archived,access_count,last_access,metadata
+         FROM memories
+         WHERE path = ?1 OR path LIKE ?2
+         ORDER BY path ASC, timestamp DESC
+         LIMIT ?3"
+    } else {
+        "SELECT id,path,summary,text,importance,timestamp,category,topic,keywords,persons,entities,location,source,scope,archived,access_count,last_access,metadata
+         FROM memories
+         WHERE (path = ?1 OR path LIKE ?2) AND archived = 0
+         ORDER BY path ASC, timestamp DESC
+         LIMIT ?3"
+    };
+
+    let mut stmt = conn.prepare(sql)?;
+    let rows = stmt.query_map(params![normalized, like_prefix, limit], row_to_entry)?;
+    let mut out = Vec::new();
+    for r in rows {
+        out.push(r?);
+    }
+    Ok(out)
+}
+
 /// Bump access_count and last_access for a list of IDs (called after every search).
 pub fn record_access(conn: &Connection, ids: &[String]) -> Result<(), MemoryError> {
-    let now = Utc::now().to_rfc3339();
+    if ids.is_empty() {
+        return Ok(());
+    }
+
+    let now = now_utc_iso();
+    let tx = conn.unchecked_transaction()?;
     for id in ids {
-        conn.execute(
-            "UPDATE memories SET access_count = access_count + 1, last_access = ?1 WHERE id = ?2",
-            params![now, id],
+        tx.execute(
+            "UPDATE memories
+             SET access_count = access_count + 1, last_access = ?1, updated_at = ?1
+             WHERE id = ?2",
+            params![&now, id],
         )?;
     }
+    tx.commit()?;
     Ok(())
 }
 
@@ -394,6 +570,7 @@ mod tests {
             location: "".into(),
             source: "".into(),
             scope: "general".into(),
+            archived: false,
             access_count: 0,
             last_access: None,
             metadata: json!({ "keywords": ["test"], "entities": [] }),
@@ -407,7 +584,7 @@ mod tests {
         let e = make_entry("abc", "Rust is a systems programming language");
         upsert(&conn, &e, false).unwrap();
 
-        let results = search_fts(&conn, "systems programming", 5).unwrap();
+        let results = search_fts(&conn, "systems programming", 5, false).unwrap();
         assert!(results.contains_key("abc"), "expected 'abc' in FTS results");
     }
 
@@ -419,7 +596,7 @@ mod tests {
         e.text = "updated text".into();
         upsert(&conn, &e, false).unwrap();
 
-        let results = search_fts(&conn, "updated", 5).unwrap();
+        let results = search_fts(&conn, "updated", 5, false).unwrap();
         assert!(results.contains_key("dup"));
     }
 }
