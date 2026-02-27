@@ -90,7 +90,7 @@ class ConsolidatorWorker(BaseWorker):
         merged_summary = await extractor.generate_summary(merged_text)
         merged_vec = await embedding.embed(merged_text, input_type="document")
 
-        store.merge_memory_with_revision(
+        ok = store.merge_memory_with_revision(
             db_path=self.db_path,
             target_id=target_id,
             expected_revision=int(target_row.get("revision", 1)),
@@ -99,3 +99,7 @@ class ConsolidatorWorker(BaseWorker):
             merged_vector=merged_vec,
             archive_id=memory_id,
         )
+        if not ok:
+            raise RuntimeError(
+                f"Revision conflict merging {memory_id} into {target_id}, will retry"
+            )

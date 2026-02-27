@@ -78,8 +78,10 @@ def claim(db_path: str, worker_type: str, lock_seconds: int = 60) -> dict[str, A
     lock_until = _utc_after(lock_seconds)
 
     conn = _connect(db_path)
+    transaction_started = False
     try:
         conn.execute("BEGIN IMMEDIATE")
+        transaction_started = True
         row = conn.execute(
             """
             SELECT id, event_id, worker_type, status, payload,
@@ -113,7 +115,8 @@ def claim(db_path: str, worker_type: str, lock_seconds: int = 60) -> dict[str, A
         task["locked_until"] = lock_until
         return task
     except Exception:
-        conn.execute("ROLLBACK")
+        if transaction_started:
+            conn.execute("ROLLBACK")
         raise
     finally:
         conn.close()

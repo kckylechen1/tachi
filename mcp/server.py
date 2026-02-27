@@ -369,7 +369,7 @@ async def _ingest_event(args: dict) -> list[TextContent]:
     if not isinstance(messages, list):
         return [TextContent(type="text", text="Error: messages must be an array")]
 
-    event_id = hashlib.sha256(f"{conversation_id}{turn_id}".encode("utf-8")).hexdigest()
+    event_id = hashlib.sha256(f"{conversation_id}|{turn_id}".encode("utf-8")).hexdigest()
     payload = {
         "event_id": event_id,
         "conversation_id": conversation_id,

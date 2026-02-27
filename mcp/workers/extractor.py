@@ -10,25 +10,11 @@ import store
 from event_queue import enqueue
 
 from .base import BaseWorker
+from .utils import messages_to_text
 
 
 class ExtractorWorker(BaseWorker):
     worker_type = "extractor"
-
-    @staticmethod
-    def _messages_to_text(messages: list[Any]) -> str:
-        lines: list[str] = []
-        for msg in messages:
-            if isinstance(msg, dict):
-                role = str(msg.get("role", "unknown"))
-                content = str(msg.get("content", "")).strip()
-                if content:
-                    lines.append(f"{role}: {content}")
-            elif isinstance(msg, str):
-                text = msg.strip()
-                if text:
-                    lines.append(text)
-        return "\n".join(lines)
 
     async def process(self, payload: dict[str, Any]) -> None:
         messages = payload.get("messages") or []
@@ -36,7 +22,7 @@ class ExtractorWorker(BaseWorker):
             return
 
         event_id = str(payload.get("event_id", "")).strip()
-        text = self._messages_to_text(messages)
+        text = messages_to_text(messages)
         if not text:
             return
 

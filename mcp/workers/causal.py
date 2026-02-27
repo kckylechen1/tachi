@@ -10,6 +10,7 @@ import extractor
 import store
 
 from .base import BaseWorker
+from .utils import messages_to_text
 
 CAUSAL_PROMPT = (
     "检查用户是否纠正了AI。提取 JSON: context, wrong_action, correct_action。"
@@ -19,21 +20,6 @@ CAUSAL_PROMPT = (
 
 class CausalWorker(BaseWorker):
     worker_type = "causal"
-
-    @staticmethod
-    def _messages_to_text(messages: list[Any]) -> str:
-        lines: list[str] = []
-        for msg in messages:
-            if isinstance(msg, dict):
-                role = str(msg.get("role", "unknown"))
-                content = str(msg.get("content", "")).strip()
-                if content:
-                    lines.append(f"{role}: {content}")
-            elif isinstance(msg, str):
-                text = msg.strip()
-                if text:
-                    lines.append(text)
-        return "\n".join(lines)
 
     @staticmethod
     def _parse_json_array(content: str) -> list[dict[str, Any]]:
@@ -54,7 +40,7 @@ class CausalWorker(BaseWorker):
             return
 
         event_id = str(payload.get("event_id", "")).strip()
-        conversation_text = self._messages_to_text(messages)
+        conversation_text = messages_to_text(messages)
         if not conversation_text:
             return
 
