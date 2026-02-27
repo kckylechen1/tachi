@@ -65,8 +65,17 @@ impl MemoryStore {
 
     /// Fetch a single entry by ID.
     pub fn get(&self, id: &str) -> Result<Option<MemoryEntry>, MemoryError> {
+        self.get_with_options(id, false)
+    }
+
+    /// Fetch a single entry by ID with archive visibility control.
+    pub fn get_with_options(
+        &self,
+        id: &str,
+        include_archived: bool,
+    ) -> Result<Option<MemoryEntry>, MemoryError> {
         let ids = vec![id.to_string()];
-        let mut map = db::fetch_by_ids(&self.conn, &ids)?;
+        let mut map = db::fetch_by_ids(&self.conn, &ids, include_archived)?;
         Ok(map.remove(id))
     }
 
@@ -77,6 +86,25 @@ impl MemoryStore {
 
     /// Fetch multiple newest entries up to a limit (used for dedup).
     pub fn get_all(&self, limit: usize) -> Result<Vec<MemoryEntry>, MemoryError> {
-        db::get_all(&self.conn, limit)
+        self.get_all_with_options(limit, false)
+    }
+
+    /// Fetch newest entries with archive visibility control.
+    pub fn get_all_with_options(
+        &self,
+        limit: usize,
+        include_archived: bool,
+    ) -> Result<Vec<MemoryEntry>, MemoryError> {
+        db::get_all(&self.conn, limit, include_archived)
+    }
+
+    /// List entries under a path (exact + descendants) with SQL pushdown.
+    pub fn list_by_path(
+        &self,
+        path_prefix: &str,
+        limit: usize,
+        include_archived: bool,
+    ) -> Result<Vec<MemoryEntry>, MemoryError> {
+        db::list_by_path(&self.conn, path_prefix, limit, include_archived)
     }
 }

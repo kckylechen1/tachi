@@ -29,6 +29,8 @@ pub struct SearchOptions {
     pub vec_available: bool,
     /// Whether to bump access_count after retrieval (disable in bulk/bench mode).
     pub record_access: bool,
+    /// Whether to include archived entries in query results.
+    pub include_archived: bool,
 }
 
 impl Default for SearchOptions {
@@ -41,6 +43,7 @@ impl Default for SearchOptions {
             query_vec: None,
             vec_available: false,
             record_access: true,
+            include_archived: false,
         }
     }
 }
@@ -63,7 +66,7 @@ pub fn hybrid_search(
     // ── Channel 1: Vector ─────────────────────────────────────────────────────
     let vec_scores: HashMap<String, f64> = if opts.vec_available {
         if let Some(qv) = &opts.query_vec {
-            search_vec(conn, qv, n)?
+            search_vec(conn, qv, n, opts.include_archived)?
         } else {
             HashMap::new()
         }
@@ -72,7 +75,7 @@ pub fn hybrid_search(
     };
 
     // ── Channel 2: FTS5 ───────────────────────────────────────────────────────
-    let fts_scores = search_fts(conn, query, n)?;
+    let fts_scores = search_fts(conn, query, n, opts.include_archived)?;
 
     // ── Collect all candidate IDs ──────────────────────────────────────────────
     let candidate_ids: Vec<String> = vec_scores
@@ -88,7 +91,7 @@ pub fn hybrid_search(
     }
 
     // ── Bulk-fetch entries ─────────────────────────────────────────────────────
-    let entries_map = fetch_by_ids(conn, &candidate_ids)?;
+    let entries_map = fetch_by_ids(conn, &candidate_ids, opts.include_archived)?;
 
     // ── Channel 3: Symbolic ───────────────────────────────────────────────────
     let symbolic_scores: HashMap<String, f64> = entries_map
@@ -110,6 +113,10 @@ pub fn hybrid_search(
         entries_map.iter().map(|(k, v)| (k.clone(), v)).collect()
     };
 
+    if entries_ref.is_empty() {
+        return Ok(vec![]);
+    }
+
     // ── Hybrid scoring ─────────────────────────────────────────────────────────
     let scores = hybrid_score(
         &entries_ref,
@@ -122,6 +129,7 @@ pub fn hybrid_search(
     // ── Sort and take top K ───────────────────────────────────────────────────
     let mut ranked: Vec<(&String, f64)> = scores
         .iter()
+        .filter(|(id, _)| entries_ref.contains_key(*id))
         .map(|(id, hs)| (id, hs.final_score))
         .collect();
     ranked.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
@@ -184,6 +192,7 @@ mod tests {
             location: "".into(),
             source: "".into(),
             scope: "general".into(),
+            archived: false,
             access_count: 0,
             last_access: None,
             metadata: json!({ "keywords": keywords, "entities": [] }),

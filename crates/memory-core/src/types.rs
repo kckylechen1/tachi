@@ -8,7 +8,6 @@
 // Design: serde only, NO binding-specific macros (#[napi], #[pyclass]).
 // Bindings use JSON string serialization for maximum compatibility.
 
-use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 // ─── Core Entry ──────────────────────────────────────────────────────────────
@@ -76,6 +75,10 @@ pub struct MemoryEntry {
     /// Scope: "user" | "project" | "general"
     #[serde(default = "default_scope")]
     pub scope: String,
+
+    /// Soft-delete marker. Archived entries are excluded by default from queries.
+    #[serde(default)]
+    pub archived: bool,
 
     /// Number of times this entry has been retrieved
     #[serde(default)]

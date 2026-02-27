@@ -9,9 +9,7 @@
 //!     store.upsert({"id": "...", "text": "...", ...})
 //!     results = store.search("query text", {"top_k": 6})
 use pyo3::prelude::*;
-use pyo3::types::PyDict;
 use memory_core::{MemoryStore as RustStore, SearchOptions, MemoryEntry};
-use serde_json::Value;
 
 use std::sync::{Arc, Mutex};
 
@@ -65,6 +63,9 @@ impl PyMemoryStore {
                 if let Some(b) = val.get("record_access").and_then(|v| v.as_bool()) {
                     opts.record_access = b;
                 }
+                if let Some(b) = val.get("include_archived").and_then(|v| v.as_bool()) {
+                    opts.include_archived = b;
+                }
                 if let Some(arr) = val.get("query_vec").and_then(|v| v.as_array()) {
                     let mut qv = Vec::with_capacity(arr.len());
                     for item in arr {
@@ -105,13 +106,13 @@ impl PyMemoryStore {
     }
 
     /// Fetch a single memory by ID. Returns JSON string or None.
-    #[pyo3(signature = (id))]
-    fn get(&self, id: &str) -> PyResult<Option<String>> {
+    #[pyo3(signature = (id, include_archived=false))]
+    fn get(&self, id: &str, include_archived: bool) -> PyResult<Option<String>> {
         let entry = self
             .inner
             .lock()
             .unwrap()
-            .get(id)
+            .get_with_options(id, include_archived)
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
 
         match entry {
@@ -125,14 +126,34 @@ impl PyMemoryStore {
     }
 
     /// Get most recent entries up to `limit`. Returns JSON string of MemoryEntry[].
-    #[pyo3(signature = (limit=None))]
-    fn get_all(&self, limit: Option<u32>) -> PyResult<String> {
+    #[pyo3(signature = (limit=None, include_archived=false))]
+    fn get_all(&self, limit: Option<u32>, include_archived: bool) -> PyResult<String> {
         let lim = limit.unwrap_or(200) as usize;
         let entries = self
             .inner
             .lock()
             .unwrap()
-            .get_all(lim)
+            .get_all_with_options(lim, include_archived)
+            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+
+        serde_json::to_string(&entries)
+            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
+    }
+
+    /// List entries under one path (exact + descendants). Returns MemoryEntry[] JSON.
+    #[pyo3(signature = (path_prefix, limit=None, include_archived=false))]
+    fn list_by_path(
+        &self,
+        path_prefix: &str,
+        limit: Option<u32>,
+        include_archived: bool,
+    ) -> PyResult<String> {
+        let lim = limit.unwrap_or(5000) as usize;
+        let entries = self
+            .inner
+            .lock()
+            .unwrap()
+            .list_by_path(path_prefix, lim, include_archived)
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
 
         serde_json::to_string(&entries)

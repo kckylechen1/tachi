@@ -7,11 +7,14 @@ Tools:
   - search_memory: Hybrid search (vector + FTS5 + recency), supports path filtering
   - get_memory: Get full memory text by ID (L2 layer)
   - list_memories: Browse memory paths hierarchically (like ls)
+  - ingest_event: Enqueue conversation events for async extractor/causal workers
   - extract_facts: Extract facts from text via GLM-5 and save them
   - memory_stats: Get memory database statistics
+  - get_pipeline_status: Check async pipeline health and cutover readiness
 """
 
 import asyncio
+import hashlib
 import json
 import logging
 import os
@@ -32,11 +35,102 @@ import store
 import embedding
 import extractor
 import reranker
+from event_queue import enqueue, init_event_queue
+from shadow.consistency_check import build_pipeline_health
+from workers.launcher import WorkerLauncher
 
 logging.basicConfig(level=logging.INFO, stream=sys.stderr)
 logger = logging.getLogger("memory-mcp")
 
 app = Server("antigravity-memory")
+_STORE_CONN = store.get_connection()
+
+
+def _validate_args(tool_name: str, args: dict | None) -> dict:
+    """Validate MCP tool arguments with lightweight schema checks."""
+    if args is None:
+        args = {}
+    if not isinstance(args, dict):
+        raise ValueError(f"invalid arguments for {tool_name}: body must be a JSON object")
+
+    errors: list[str] = []
+
+    def _require_str(field: str) -> None:
+        if field not in args:
+            errors.append(f"missing required field '{field}'")
+            return
+        value = args.get(field)
+        if not isinstance(value, str):
+            errors.append(f"'{field}' must be a string")
+            return
+        if not value.strip():
+            errors.append(f"'{field}' must be a non-empty string")
+
+    def _optional_str(field: str) -> None:
+        if field in args and not isinstance(args.get(field), str):
+            errors.append(f"'{field}' must be a string")
+
+    def _optional_int(field: str, min_value: int | None = None) -> None:
+        if field not in args:
+            return
+        value = args.get(field)
+        if not isinstance(value, int) or isinstance(value, bool):
+            errors.append(f"'{field}' must be an integer")
+            return
+        if min_value is not None and value < min_value:
+            op = ">=" if min_value == 0 else ">"
+            bound = min_value if min_value == 0 else min_value - 1
+            errors.append(f"'{field}' must be {op} {bound}")
+
+    def _optional_number_range(field: str, low: float, high: float) -> None:
+        if field not in args:
+            return
+        value = args.get(field)
+        if not isinstance(value, (int, float)) or isinstance(value, bool):
+            errors.append(f"'{field}' must be a number")
+            return
+        fv = float(value)
+        if fv < low or fv > high:
+            errors.append(f"'{field}' must be between {low} and {high}")
+
+    if tool_name == "save_memory":
+        _require_str("text")
+        _optional_str("path")
+        _optional_str("topic")
+        _optional_str("scope")
+        _optional_number_range("importance", 0.0, 1.0)
+        if "keywords" in args:
+            keywords = args.get("keywords")
+            if not isinstance(keywords, list):
+                errors.append("'keywords' must be an array of strings")
+            elif any(not isinstance(k, str) for k in keywords):
+                errors.append("'keywords' must contain only strings")
+    elif tool_name == "search_memory":
+        _require_str("query")
+        _optional_int("top_k", min_value=1)
+        _optional_str("path_prefix")
+    elif tool_name in {"get_memory", "delete_memory"}:
+        _require_str("id")
+    elif tool_name == "list_memories":
+        _optional_str("path")
+        _optional_int("offset", min_value=0)
+        _optional_int("limit", min_value=1)
+    elif tool_name == "extract_facts":
+        _require_str("text")
+        _optional_str("source")
+    elif tool_name == "ingest_event":
+        _require_str("conversation_id")
+        _require_str("turn_id")
+        if "messages" not in args:
+            errors.append("missing required field 'messages'")
+        elif not isinstance(args.get("messages"), list):
+            errors.append("'messages' must be an array")
+    elif tool_name == "get_pipeline_status":
+        _optional_int("period_hours", min_value=1)
+
+    if errors:
+        raise ValueError(f"invalid arguments for {tool_name}: {'; '.join(errors)}")
+    return args
 
 
 @app.list_tools()
@@ -89,6 +183,8 @@ async def list_tools() -> list[Tool]:
                 "type": "object",
                 "properties": {
                     "path": {"type": "string", "description": "The path directory to list, e.g. / or /project", "default": "/"},
+                    "offset": {"type": "integer", "description": "Offset for pagination", "default": 0, "minimum": 0},
+                    "limit": {"type": "integer", "description": "Maximum results for pagination", "default": 100, "minimum": 1},
                 },
                 "required": [],
             },
@@ -106,6 +202,35 @@ async def list_tools() -> list[Tool]:
             },
         ),
         Tool(
+            name="ingest_event",
+            description="Ingest one conversation turn and enqueue async worker tasks.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "conversation_id": {"type": "string", "description": "Conversation/session ID"},
+                    "turn_id": {"type": "string", "description": "Turn ID within conversation"},
+                    "messages": {
+                        "type": "array",
+                        "description": "Turn messages, usually [{role, content}, ...]",
+                        "items": {
+                            "anyOf": [
+                                {"type": "string"},
+                                {
+                                    "type": "object",
+                                    "properties": {
+                                        "role": {"type": "string"},
+                                        "content": {"type": "string"},
+                                    },
+                                    "required": ["content"],
+                                },
+                            ]
+                        },
+                    },
+                },
+                "required": ["conversation_id", "turn_id", "messages"],
+            },
+        ),
+        Tool(
             name="memory_stats",
             description="Get memory database statistics.",
             inputSchema={
@@ -113,26 +238,52 @@ async def list_tools() -> list[Tool]:
                 "properties": {},
             },
         ),
+        Tool(
+            name="get_pipeline_status",
+            description="Get async pipeline health and cutover gate status.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "period_hours": {"type": "integer", "description": "Event stats window in hours", "default": 24},
+                },
+            },
+        ),
     ]
 
 
 @app.call_tool()
-async def call_tool(name: str, arguments: dict) -> list[TextContent]:
+async def call_tool(name: str, arguments: dict | None) -> list[TextContent]:
     try:
+        if name not in {
+            "save_memory",
+            "search_memory",
+            "get_memory",
+            "list_memories",
+            "extract_facts",
+            "ingest_event",
+            "memory_stats",
+            "get_pipeline_status",
+        }:
+            return [TextContent(type="text", text=f"Unknown tool: {name}")]
+
+        validated_args = _validate_args(name, arguments)
+
         if name == "save_memory":
-            return await _save_memory(arguments)
+            return await _save_memory(validated_args)
         elif name == "search_memory":
-            return await _search_memory(arguments)
+            return await _search_memory(validated_args)
         elif name == "get_memory":
-            return await _get_memory(arguments)
+            return await _get_memory(validated_args)
         elif name == "list_memories":
-            return await _list_memories(arguments)
+            return await _list_memories(validated_args)
         elif name == "extract_facts":
-            return await _extract_facts(arguments)
+            return await _extract_facts(validated_args)
+        elif name == "ingest_event":
+            return await _ingest_event(validated_args)
         elif name == "memory_stats":
             return await _memory_stats()
-        else:
-            return [TextContent(type="text", text=f"Unknown tool: {name}")]
+        elif name == "get_pipeline_status":
+            return await _get_pipeline_status(validated_args)
     except Exception as e:
         logger.exception(f"Error in {name}")
         return [TextContent(type="text", text=f"Error: {e}")]
@@ -156,7 +307,7 @@ async def _save_memory(args: dict) -> list[TextContent]:
     summary = await extractor.generate_summary(text)
     vec = await embedding.embed(text, input_type="document")
     
-    conn = store.get_connection()
+    conn = _STORE_CONN
     try:
         result = store.save_memory(
             conn, text, vec,
@@ -185,7 +336,7 @@ async def _search_memory(args: dict) -> list[TextContent]:
     path_prefix = args.get("path_prefix", "")
     
     vec = await embedding.embed(query, input_type="query")
-    conn = store.get_connection()
+    conn = _STORE_CONN
     try:
         # Pull 2x candidates for reranker
         candidates = store.hybrid_search(conn, vec, query, top_k=top_k * 2, path_prefix=path_prefix)
@@ -211,7 +362,7 @@ async def _get_memory(args: dict) -> list[TextContent]:
     if not id_:
         return [TextContent(type="text", text="Error: empty id")]
 
-    conn = store.get_connection()
+    conn = _STORE_CONN
     try:
         mem = store.get_memory(conn, id_)
         if not mem:
@@ -228,7 +379,7 @@ async def _get_memory(args: dict) -> list[TextContent]:
 async def _list_memories(args: dict) -> list[TextContent]:
     path = args.get("path", "/")
     
-    conn = store.get_connection()
+    conn = _STORE_CONN
     try:
         res = store.list_by_path(conn, path)
         
@@ -273,7 +424,7 @@ async def _extract_facts(args: dict) -> list[TextContent]:
         s = await extractor.generate_summary(t)
         summaries.append(s)
 
-    conn = store.get_connection()
+    conn = _STORE_CONN
     saved, skipped = 0, 0
     try:
         for fact, vec, summ in zip(facts, vectors, summaries):
@@ -307,8 +458,35 @@ async def _extract_facts(args: dict) -> list[TextContent]:
     return [TextContent(type="text", text="\n".join(summary_lines))]
 
 
+async def _ingest_event(args: dict) -> list[TextContent]:
+    conversation_id = str(args.get("conversation_id", "")).strip()
+    turn_id = str(args.get("turn_id", "")).strip()
+    messages = args.get("messages", [])
+
+    if not conversation_id:
+        return [TextContent(type="text", text="Error: empty conversation_id")]
+    if not turn_id:
+        return [TextContent(type="text", text="Error: empty turn_id")]
+    if not isinstance(messages, list):
+        return [TextContent(type="text", text="Error: messages must be an array")]
+
+    event_id = hashlib.sha256(f"{conversation_id}|{turn_id}".encode("utf-8")).hexdigest()
+    payload = {
+        "event_id": event_id,
+        "conversation_id": conversation_id,
+        "turn_id": turn_id,
+        "messages": messages,
+    }
+
+    init_event_queue(store.DB_PATH)
+    enqueue(store.DB_PATH, event_id, "extractor", payload)
+    enqueue(store.DB_PATH, event_id, "causal", payload)
+
+    return [TextContent(type="text", text=json.dumps({"event_id": event_id}, ensure_ascii=False))]
+
+
 async def _memory_stats() -> list[TextContent]:
-    conn = store.get_connection()
+    conn = _STORE_CONN
     try:
         stats = store.get_stats(conn)
         return [TextContent(type="text", text=json.dumps(stats, indent=2, ensure_ascii=False))]
@@ -317,10 +495,34 @@ async def _memory_stats() -> list[TextContent]:
         return [TextContent(type="text", text=f"Error: {e}")]
 
 
+async def _get_pipeline_status(args: dict) -> list[TextContent]:
+    raw_period = args.get("period_hours", 24)
+    try:
+        period_hours = int(raw_period)
+    except (TypeError, ValueError):
+        return [TextContent(type="text", text="Error: period_hours must be an integer")]
+
+    if period_hours <= 0:
+        return [TextContent(type="text", text="Error: period_hours must be > 0")]
+
+    try:
+        health = build_pipeline_health(period_hours=period_hours, db_path=store.DB_PATH)
+        return [TextContent(type="text", text=json.dumps(health, indent=2, ensure_ascii=False))]
+    except Exception as e:
+        logger.exception("Error in get_pipeline_status")
+        return [TextContent(type="text", text=f"Error: {e}")]
+
+
 async def main():
     logger.info("Starting Antigravity Memory MCP server (v2)...")
-    async with stdio_server() as (read_stream, write_stream):
-        await app.run(read_stream, write_stream, app.create_initialization_options())
+    launcher = WorkerLauncher(db_path=store.DB_PATH, conn=_STORE_CONN)
+    launcher.start()
+    try:
+        init_event_queue(store.DB_PATH)
+        async with stdio_server() as (read_stream, write_stream):
+            await app.run(read_stream, write_stream, app.create_initialization_options())
+    finally:
+        await launcher.stop()
 
 
 if __name__ == "__main__":
