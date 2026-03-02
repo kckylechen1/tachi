@@ -47,9 +47,11 @@ Whether you are building a Model Context Protocol (MCP) server or extending an a
 - **🗂️ Filesystem Paradigm**: Context is not a flat list. Memories are organized hierarchically by `path` (e.g., `/user/preferences`, `/project/architecture`).
 - **🔍 4-Channel Hybrid Search**:
   - **Semantic**: Built-in Voyage-4 vector embedding search (`sqlite-vec` KNN).
-  - **Lexical**: Native CJK (Chinese, Japanese, Korean) full-text search (`libsimple` + `FTS5`).
+  - **Lexical**: Native CJK full-text search (`libsimple` + `FTS5`).
   - **Symbolic**: Exact keyword and entity matching.
   - **Decay**: ACT-R cognitive architecture-inspired recency decay.
+  - **Precision Reranking**: Voyage Rerank-2.5 on top of hybrid candidates.
+- **🧠 Advanced Entity Extraction**: Extracts memories into strictly typed categories (`preference`, `decision`, `entity`, `fact`, `other`) for rigorous schema validation.
 - **🧠 3-Tier Context Loading**: Auto-extracts `L0` (Abstract), `L1` (Overview), and `L2` (Full Text) to save tokens.
 - **🔌 Zero Ops**: Packaged as a single SQLite file (`memory.db`), completely embedded. No Redis, no Neo4j, no ChromaDB required.
 
@@ -138,20 +140,12 @@ If I don't have API keys yet, help me register:
 > **Copy this to your OpenClaw agent to install Sigil as a native memory extension:**
 
 ```
-Help me install Sigil as an OpenClaw memory extension.
+Help me install Sigil as an OpenClaw memory extension using the one-click script.
 
-1. Clone: git clone https://github.com/kckylechen1/sigil.git && cd sigil
-2. Configure API keys: cp .env.example .env, then fill in my keys.
-3. Build the NAPI-RS Rust binding:
-   cd integrations/openclaw && npm install && npm run build
-4. Symlink into OpenClaw extensions:
-   ln -s $(pwd) ~/.openclaw/local-plugins/extensions/sigil-memory
-5. Set up cron jobs for automated memory curation — add to ~/.openclaw/cron/jobs.json:
-   - Daily consolidation (03:40 AM): merge duplicates, extract causal chains
-   - Incremental check (every 6h): detect causal gaps and contradictions
-   See the "OpenClaw Cron Jobs" section in the README for copy-paste JSON.
+1. Run the auto-installer:
+   bash -c "$(curl -fsSL https://raw.githubusercontent.com/kckylechen1/sigil/main/scripts/install_openclaw_ext.sh)"
 
-The extension auto-loads API keys from the .env file.
+2. The script will set up the repository, build the NAPI-RS bindings, symlink to your OpenClaw plugins, and optionally configure your API keys.
 
 If I don't have API keys yet, help me register:
 - Voyage API (embedding + rerank): https://dash.voyageai.com/ — 200M free tokens, no credit card

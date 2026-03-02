@@ -50,6 +50,8 @@ npx tsx benchmark_extraction.ts
   - **词法检索**：原生 CJK（中日韩文）全文检索支持 (`libsimple` + `FTS5`)。
   - **符号匹配**：精确的关键词与实体匹配。
   - **时间衰减**：基于 ACT-R 认知架构启发的记忆近期衰减算法。
+  - **精排重排**：混合召回后经 Voyage Rerank-2.5 交叉编码器精排。
+- **🧠 强类型记忆提取**：将记忆严格分类为 `preference`（偏好）、`decision`（决策）、`entity`（实体）、`fact`（事实）、`other`（其他）五种类型，支持 Schema 校验。
 - **🧠 3 级上下文加载**：自动提取 `L0`（摘要）、`L1`（概览）和 `L2`（全文），大幅节省 Token 开销。
 - **🔌 零运维负担**：所有数据打包在单一的 SQLite 文件 (`memory.db`) 中，完全内嵌。不需要启动 Redis、Neo4j 或 ChromaDB。
 
@@ -138,20 +140,12 @@ graph TD
 > **复制以下内容粘贴给你的 OpenClaw agent，让它帮你安装 Sigil 原生记忆扩展：**
 
 ```
-帮我安装 Sigil 作为 OpenClaw 的记忆扩展。
+帮我用一键脚本安装 Sigil 作为 OpenClaw 的记忆扩展。
 
-1. 克隆仓库: git clone https://github.com/kckylechen1/sigil.git && cd sigil
-2. 配置 API Key: cp .env.example .env，然后填入我的 key。
-3. 编译 NAPI-RS Rust 绑定:
-   cd integrations/openclaw && npm install && npm run build
-4. 软链接到 OpenClaw 扩展目录:
-   ln -s $(pwd) ~/.openclaw/local-plugins/extensions/sigil-memory
-5. 设置定时任务自动整理记忆 —— 添加到 ~/.openclaw/cron/jobs.json:
-   - 每日整理（凌晨 03:40）: 合并重复条目，提取因果链
-   - 增量质检（每 6 小时）: 检测因果断裂和矛盾冲突
-   具体 JSON 配置见 README 的"OpenClaw 定时任务"章节。
+1. 运行自动安装脚本:
+   bash -c "$(curl -fsSL https://raw.githubusercontent.com/kckylechen1/sigil/main/scripts/install_openclaw_ext.sh)"
 
-扩展会自动从项目根目录的 .env 文件加载 API Key。
+2. 脚本会自动克隆仓库、编译 NAPI-RS 绑定、建立插件软链接，并提示你配置 API Key。
 
 如果我还没有 API Key，帮我注册：
 - Voyage API（向量嵌入+重排）: https://dash.voyageai.com/ — 免费 2 亿 tokens，无需信用卡
