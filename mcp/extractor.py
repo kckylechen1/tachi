@@ -28,6 +28,42 @@ EXTRACTION_PROMPT = """你是一个记忆提取代理。从以下对话/文档�
 输出格式: [{...}, {...}]"""
 
 
+def _strip_code_fence(text: str) -> str:
+    clean = text.strip()
+    if clean.startswith("```"):
+        clean = clean.split("\n", 1)[1].rsplit("```", 1)[0]
+    return clean.strip()
+
+
+async def _call_llm(
+    messages: list[dict],
+    model: str | None = None,
+    temperature: float = 0.1,
+    max_tokens: int = 4000,
+    timeout: float = 120,
+) -> str:
+    """Shared LLM caller used by extractors/workers."""
+    if not ZHIPU_API_KEY:
+        raise ValueError("ZHIPU_API_KEY not set")
+
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        r = await client.post(
+            f"{ZHIPU_BASE_URL}/chat/completions",
+            headers={
+                "Authorization": f"Bearer {ZHIPU_API_KEY}",
+                "Content-Type": "application/json",
+            },
+            json={
+                "model": model or ZHIPU_MODEL,
+                "temperature": temperature,
+                "max_tokens": max_tokens,
+                "messages": messages,
+            },
+        )
+        r.raise_for_status()
+        return r.json()["choices"][0]["message"]["content"]
+
+
 async def extract_facts(text: str) -> list[dict]:
     """
     Extract structured facts from text using GLM-5.
@@ -39,30 +75,19 @@ async def extract_facts(text: str) -> list[dict]:
     if len(text.strip()) < 50:
         return []
 
-    async with httpx.AsyncClient(timeout=120) as client:
-        r = await client.post(
-            f"{ZHIPU_BASE_URL}/chat/completions",
-            headers={
-                "Authorization": f"Bearer {ZHIPU_API_KEY}",
-                "Content-Type": "application/json",
-            },
-            json={
-                "model": ZHIPU_MODEL,
-                "temperature": 0.1,
-                "max_tokens": 4000,
-                "messages": [
-                    {"role": "system", "content": EXTRACTION_PROMPT},
-                    {"role": "user", "content": text},
-                ],
-            },
-        )
-        r.raise_for_status()
-        content = r.json()["choices"][0]["message"]["content"]
+    content = await _call_llm(
+        messages=[
+            {"role": "system", "content": EXTRACTION_PROMPT},
+            {"role": "user", "content": text},
+        ],
+        model=ZHIPU_MODEL,
+        temperature=0.1,
+        max_tokens=4000,
+        timeout=120,
+    )
 
     # Parse JSON (handle markdown wrapping)
-    clean = content.strip()
-    if clean.startswith("```"):
-        clean = clean.split("\n", 1)[1].rsplit("```", 1)[0]
+    clean = _strip_code_fence(content)
 
     try:
         facts = json.loads(clean.strip())
@@ -94,25 +119,16 @@ async def generate_summary(text: str) -> str:
         return text.strip()
 
     try:
-        async with httpx.AsyncClient(timeout=30) as client:
-            r = await client.post(
-                f"{ZHIPU_BASE_URL}/chat/completions",
-                headers={
-                    "Authorization": f"Bearer {ZHIPU_API_KEY}",
-                    "Content-Type": "application/json",
-                },
-                json={
-                    "model": "glm-4v-flash",
-                    "temperature": 0.1,
-                    "max_tokens": 100,
-                    "messages": [
-                        {"role": "system", "content": "You are a summarization agent. Compress the given text into a single precisely worded sentence that captures the core fact or point. Do not use conversational filler, quotes, or markdown. Use the same language as the input text."},
-                        {"role": "user", "content": text},
-                    ],
-                },
-            )
-            r.raise_for_status()
-            content = r.json()["choices"][0]["message"]["content"]
+        content = await _call_llm(
+            messages=[
+                {"role": "system", "content": "You are a summarization agent. Compress the given text into a single precisely worded sentence that captures the core fact or point. Do not use conversational filler, quotes, or markdown. Use the same language as the input text."},
+                {"role": "user", "content": text},
+            ],
+            model="glm-4v-flash",
+            temperature=0.1,
+            max_tokens=100,
+            timeout=30,
+        )
         return content.strip()
     except Exception:
         # Fallback

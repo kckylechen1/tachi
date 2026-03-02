@@ -1,8 +1,7 @@
 import json
 import os
 import sqlite3
-import hashlib
-import time
+from datetime import datetime, timezone
 from memory_core_py import MemoryStore
 
 DB_PATH = os.environ.get("MEMORY_DB_PATH", os.path.expanduser("~/.sigil/memory.db"))
@@ -77,7 +76,8 @@ def migrate():
             "summary": d.get("summary") or d["text"][:100],
             "text": d["text"],
             "importance": d.get("importance", 0.7),
-            "timestamp": d.get("created_at") or time.strftime("%Y-%m-%dT%H:%M:%S+08:00"),
+            "timestamp": d.get("created_at")
+            or datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z"),
             "category": "fact",
             "topic": d.get("topic") or "",
             "keywords": kw,

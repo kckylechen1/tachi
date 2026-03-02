@@ -244,6 +244,7 @@ mod tests {
             location: "".into(),
             source: "".into(),
             scope: "general".into(),
+            archived: false,
             access_count: 0,
             last_access: None,
             metadata: serde_json::Value::Object(Default::default()),
