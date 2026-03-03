@@ -347,9 +347,9 @@ pub fn search_vec(
            FROM memories_vec v
            JOIN memories m ON m.id = v.id
            WHERE v.embedding MATCH ?1
+             AND k = ?3
              AND (?2 = 1 OR m.archived = 0)
-           ORDER BY v.distance
-           LIMIT ?3"#,
+           ORDER BY v.distance"#,
     )?;
 
     let rows = stmt.query_map(params![blob, include_archived as i64, top_k as i64], |row| {
@@ -603,5 +603,28 @@ mod tests {
 
         let results = search_fts(&conn, "updated", 5, false).unwrap();
         assert!(results.contains_key("dup"));
+    }
+
+    #[test]
+    fn search_vec_knn_with_k_constraint() {
+        let conn = make_conn();
+        let has_vec: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE name = 'memories_vec'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap_or(0);
+        if has_vec == 0 {
+            return;
+        }
+
+        let mut e = make_entry("vec-1", "vector memory entry");
+        e.vector = Some(vec![0.1_f32; 1024]);
+        upsert(&conn, &e, true).unwrap();
+
+        let query = vec![0.1_f32; 1024];
+        let results = search_vec(&conn, &query, 3, false).unwrap();
+        assert!(results.contains_key("vec-1"));
     }
 }

@@ -95,19 +95,34 @@ export const memoryHybridBridgePlugin = {
 
       // Pull more candidates for reranking (3× topK), then rerank down to topK
       const candidates = topK * 3;
-      const { docs, scores } = store.search(
-        query,
-        queryVector,
-        {
-          top_k: candidates,
-          weights: config.weights
-        }
-      );
+      try {
+        const { docs, scores } = store.search(
+          query,
+          queryVector ?? undefined,
+          {
+            top_k: candidates,
+            weights: config.weights
+          }
+        );
 
-      const hybridResults = docs.map((doc) => ({ final_score: scores[doc.id] ?? 0, entry: doc }));
+        const hybridResults = docs.map((doc) => ({ final_score: scores[doc.id] ?? 0, entry: doc }));
 
-      // Rerank via Voyage rerank-2.5 (falls back to hybrid order on failure)
-      return rerank({ config, query, results: hybridResults, topK, logger: api.logger });
+        // Rerank via Voyage rerank-2.5 (falls back to hybrid order on failure)
+        return rerank({ config, query, results: hybridResults, topK, logger: api.logger });
+      } catch (err) {
+        // Fallback path: keep memory search available if vector channel fails.
+        api.logger.warn(`memory-hybrid-bridge: hybrid search failed, fallback to FTS: ${String(err)}`);
+        const { docs, scores } = store.search(
+          query,
+          undefined,
+          {
+            top_k: candidates,
+            weights: config.weights
+          }
+        );
+        const hybridResults = docs.map((doc) => ({ final_score: scores[doc.id] ?? 0, entry: doc }));
+        return rerank({ config, query, results: hybridResults, topK, logger: api.logger });
+      }
     }
 
     // FTS-only search — zero network calls, used for automatic context injection.
@@ -347,7 +362,16 @@ export const memoryHybridBridgePlugin = {
         // >= mergeThreshold (0.85): related, merge via LLM
         // < mergeThreshold: new entry, insert directly
         if (extracted.vector && extracted.vector.length > 0) {
-          const similar = store.findSimilar(extracted.vector, 1);
+          let similar: Array<{ entry: MemoryEntry; similarity: number }> = [];
+          try {
+            similar = store.findSimilar(extracted.vector, 1);
+          } catch (similarErr) {
+            // sqlite-vec KNN can fail across vec0 versions.
+            // Dedup is best-effort; don't block memory writes.
+            api.logger.warn(
+              `memory-hybrid-bridge [${agentId}]: findSimilar failed; skip dedup: ${String(similarErr)}`,
+            );
+          }
           if (similar.length > 0) {
             const top = similar[0];
             if (top.similarity >= config.dedupThreshold) {

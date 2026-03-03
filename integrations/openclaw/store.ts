@@ -76,6 +76,7 @@ export class MemoryStore {
     const optionsJson = JSON.stringify({
       query_vec: queryVec,
       top_k: topK,
+      candidates: topK,
       record_access: false,
     });
     // Empty query string → FTS returns nothing, only vector channel fires
