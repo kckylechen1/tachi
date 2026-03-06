@@ -145,7 +145,9 @@ graph TD
 1. 运行自动安装脚本:
    bash -c "$(curl -fsSL https://raw.githubusercontent.com/kckylechen1/sigil/main/scripts/install_openclaw_ext.sh)"
 
-2. 脚本会自动克隆仓库、编译 NAPI-RS 绑定、建立插件软链接，并提示你配置 API Key。
+2. 脚本会自动克隆或更新仓库、构建 Rust NAPI 模块、编译 OpenClaw 插件、执行一次加载冒烟测试，并建立到 OpenClaw 扩展目录的软链接。
+
+3. 脚本完成后，请在 `plugins.allow` 中启用 `memory-hybrid-bridge`；如果你使用 `plugins.slots.memory`，也把它指向 `memory-hybrid-bridge`；最后再补齐 `.env` 中尚未导出的 API Key。
 
 如果我还没有 API Key，帮我注册：
 - Voyage API（向量嵌入+重排）: https://dash.voyageai.com/ — 免费 2 亿 tokens，无需信用卡
@@ -225,9 +227,20 @@ Sigil 可以作为原生的 OpenClaw 插件运行，以极低的延迟管理 Age
    ```
 2. **安装到 OpenClaw**：软链接到你的 Agent 扩展目录：
    ```bash
-   ln -s $(pwd) ~/.openclaw/local-plugins/extensions/sigil-memory
+   ln -s $(pwd) ~/.openclaw/local-plugins/extensions/memory-hybrid-bridge
    ```
-3. **设置环境变量**（添加到 `.zshrc` / `.bashrc`）：
+3. **在 `openclaw.json` 里启用插件**：
+   ```jsonc
+   {
+     "plugins": {
+       "allow": ["memory-hybrid-bridge"],
+       "slots": {
+         "memory": "memory-hybrid-bridge"
+       }
+     }
+   }
+   ```
+4. **设置环境变量**（添加到 `.zshrc` / `.bashrc`）：
    ```bash
    export VOYAGE_API_KEY="你的_voyage_api_key"
    export SILICONFLOW_API_KEY="你的_siliconflow_api_key"

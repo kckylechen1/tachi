@@ -6,7 +6,10 @@
   "type": "module",
   "main": "./index.js",
   "scripts": {
-    "typecheck": "tsc --noEmit --target ES2022 --module NodeNext --moduleResolution NodeNext index.ts config.ts scorer.ts extractor.ts"
+    "build:native": "npm --prefix ../../crates/memory-node install && npm --prefix ../../crates/memory-node run build",
+    "build:ts": "tsc --target ES2022 --module NodeNext --moduleResolution NodeNext index.ts config.ts scorer.ts extractor.ts store.ts",
+    "build": "npm run build:native && npm run build:ts",
+    "typecheck": "tsc --noEmit --target ES2022 --module NodeNext --moduleResolution NodeNext index.ts config.ts scorer.ts extractor.ts store.ts"
   },
   "dependencies": {
     "@memory-core/node": "file:../../crates/memory-node",

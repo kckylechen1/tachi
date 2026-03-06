@@ -145,7 +145,9 @@ Help me install Sigil as an OpenClaw memory extension using the one-click script
 1. Run the auto-installer:
    bash -c "$(curl -fsSL https://raw.githubusercontent.com/kckylechen1/sigil/main/scripts/install_openclaw_ext.sh)"
 
-2. The script will set up the repository, build the NAPI-RS bindings, symlink to your OpenClaw plugins, and optionally configure your API keys.
+2. The script will clone or update the repository, build the Rust NAPI module, compile the OpenClaw plugin, run a load smoke test, and symlink it into your OpenClaw extensions directory.
+
+3. After the script finishes, enable `memory-hybrid-bridge` in `plugins.allow`, point `plugins.slots.memory` to `memory-hybrid-bridge` if you use memory slots, and fill in API keys in `.env` if they are not already exported.
 
 If I don't have API keys yet, help me register:
 - Voyage API (embedding + rerank): https://dash.voyageai.com/ — 200M free tokens, no credit card
@@ -225,9 +227,20 @@ Sigil can run as a native OpenClaw extension to manage contextual memory.
    ```
 2. **Install to OpenClaw**: symlink into your agent's extensions directory:
    ```bash
-   ln -s $(pwd) ~/.openclaw/local-plugins/extensions/sigil-memory
+   ln -s $(pwd) ~/.openclaw/local-plugins/extensions/memory-hybrid-bridge
    ```
-3. **Set environment variables** in your shell profile (`.zshrc` / `.bashrc`):
+3. **Enable the plugin** in `openclaw.json`:
+   ```jsonc
+   {
+     "plugins": {
+       "allow": ["memory-hybrid-bridge"],
+       "slots": {
+         "memory": "memory-hybrid-bridge"
+       }
+     }
+   }
+   ```
+4. **Set environment variables** in your shell profile (`.zshrc` / `.bashrc`):
    ```bash
    export VOYAGE_API_KEY="your_voyage_api_key"
    export SILICONFLOW_API_KEY="your_siliconflow_api_key"
