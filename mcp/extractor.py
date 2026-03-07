@@ -6,26 +6,28 @@ Aligned with OpenClaw memory-hybrid-bridge extraction prompt.
 import os
 import json
 import httpx
+from dotenv import load_dotenv
 
-ZHIPU_API_KEY = os.environ.get("SILICONFLOW_API_KEY", "") or os.environ.get("ZHIPU_API_KEY", "")
-ZHIPU_BASE_URL = os.environ.get("EXTRACTOR_BASE_URL", "https://api.siliconflow.cn/v1")
-ZHIPU_MODEL = os.environ.get("EXTRACTOR_MODEL", "THUDM/glm-4-9b-chat")
+load_dotenv(os.path.expanduser("~/.secrets/master.env"))
 
-EXTRACTION_PROMPT = """你是一个记忆提取代理。从以下对话/文档中提取值得长期记忆的离散事实。
+SILICONFLOW_API_KEY = os.environ.get("SILICONFLOW_API_KEY", "") or os.environ.get("ZHIPU_API_KEY", "")
+SILICONFLOW_BASE_URL = os.environ.get("SILICONFLOW_BASE_URL", os.environ.get("EXTRACTOR_BASE_URL", "https://api.siliconflow.cn/v1"))
+SILICONFLOW_MODEL = os.environ.get("SILICONFLOW_MODEL", os.environ.get("EXTRACTOR_MODEL", "Qwen/Qwen3.5-27B"))
 
-对每个事实输出 JSON 对象:
-- "text": 完整、精确的事实复述（与原文同语言）
-- "topic": 简短主题标签
-- "keywords": 2-5个关键词数组
-- "scope": "user"（关于用户）/ "project"（关于技术工作）/ "general"（其他）
-- "importance": 0.0-1.0（用户偏好/决策 > 0.8，一般事实 0.5-0.7，闲聊 < 0.3）
+EXTRACTION_PROMPT = """你是一个记忆提取代理。从对话/文档中提取值得**长期记忆**的离散事实。
 
-规则:
-1) 不编造信息，只提取原文中明确存在的事实
-2) 跳过问候、模糊陈述、格式标记
-3) 仅输出 JSON 数组，不要 markdown 包装
+输出 JSON 数组，每个元素:
+- "text": 极简事实（主谓宾，≤30字，删除"刚才/之前/舰长"等口语词）
+- "topic": 主题标签
+- "keywords": 2-5个关键词
+- "scope": "user" / "project" / "general"
+- "importance": 0.0-1.0
 
-输出格式: [{...}, {...}]"""
+核心规则:
+1) 合并同类：同一根因的多个描述合并为一条，但不同根因保留为独立事实
+2) 只留结论：忽略过程描述，保留最终状态/决策/根因
+3) 宁少勿多：一段话通常1-3条，但技术上独立的问题不应强行合并
+4) 不编造，仅输出 JSON 数组"""
 
 
 def _strip_code_fence(text: str) -> str:
@@ -43,18 +45,18 @@ async def _call_llm(
     timeout: float = 120,
 ) -> str:
     """Shared LLM caller used by extractors/workers."""
-    if not ZHIPU_API_KEY:
-        raise ValueError("ZHIPU_API_KEY not set")
+    if not SILICONFLOW_API_KEY:
+        raise ValueError("SILICONFLOW_API_KEY not set")
 
     async with httpx.AsyncClient(timeout=timeout) as client:
         r = await client.post(
-            f"{ZHIPU_BASE_URL}/chat/completions",
+            f"{SILICONFLOW_BASE_URL}/chat/completions",
             headers={
-                "Authorization": f"Bearer {ZHIPU_API_KEY}",
+                "Authorization": f"Bearer {SILICONFLOW_API_KEY}",
                 "Content-Type": "application/json",
             },
             json={
-                "model": model or ZHIPU_MODEL,
+                "model": model or SILICONFLOW_MODEL,
                 "temperature": temperature,
                 "max_tokens": max_tokens,
                 "messages": messages,
@@ -69,8 +71,8 @@ async def extract_facts(text: str) -> list[dict]:
     Extract structured facts from text using GLM-5.
     Returns list of fact dicts with text, topic, keywords, scope, importance.
     """
-    if not ZHIPU_API_KEY:
-        raise ValueError("ZHIPU_API_KEY not set")
+    if not SILICONFLOW_API_KEY:
+        raise ValueError("SILICONFLOW_API_KEY not set")
 
     if len(text.strip()) < 50:
         return []
@@ -80,7 +82,7 @@ async def extract_facts(text: str) -> list[dict]:
             {"role": "system", "content": EXTRACTION_PROMPT},
             {"role": "user", "content": text},
         ],
-        model=ZHIPU_MODEL,
+        model=SILICONFLOW_MODEL,
         temperature=0.1,
         max_tokens=4000,
         timeout=120,
@@ -113,7 +115,7 @@ async def extract_facts(text: str) -> list[dict]:
 
 async def generate_summary(text: str) -> str:
     """Generate a one-sentence L0 summary using GLM-5/4-flash."""
-    if not ZHIPU_API_KEY:
+    if not SILICONFLOW_API_KEY:
         return text[:80] + "..." if len(text) > 80 else text
     if len(text.strip()) < 30:
         return text.strip()

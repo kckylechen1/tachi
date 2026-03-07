@@ -61,7 +61,7 @@ Whether you are building a Model Context Protocol (MCP) server or extending an a
 |------|-------|-----|
 | **Embedding** | [Voyage-4](https://voyageai.com/) | 1024d vectors, top-tier multilingual retrieval. **200M free tokens** on signup. |
 | **Reranking** | [Voyage Rerank-2.5](https://voyageai.com/) | Cross-encoder precision boost after hybrid recall. Same API key as embedding. |
-| **Extraction** | [GLM-4-9B](https://cloud.siliconflow.cn/) via SiliconFlow | Fastest + most accurate for structured fact extraction (tested against Qwen3-8B, Llama, etc.). Free tier. |
+| **Extraction** | [Qwen3.5-27B](https://cloud.siliconflow.cn/) via SiliconFlow | High accuracy for structured fact processing, robust instruction following, and causal extraction. Free tier. |
 | **Summarization** | GLM-4V-Flash | Ultra-fast L0 one-sentence abstract generation. |
 
 ---
@@ -168,7 +168,7 @@ cp .env.example .env
 
 Ensure you populate `.env` with the necessary API keys:
 - **Voyage API** (`VOYAGE_API_KEY`): Used for embedding and reranking. [Register here](https://dash.voyageai.com/) to get **200 Million free tokens**.
-- **Extraction API** (`SILICONFLOW_API_KEY`): Used for fact extraction and summarization. After extensive internal benchmarking, we strongly recommend using **GLM-4** (e.g., `THUDM/glm-4-9b-chat` via SiliconFlow) as it has proven to be the fastest and most accurate model for structuring memory facts.
+- **Extraction API** (`SILICONFLOW_API_KEY`): Used for fact extraction and summarization. After extensive internal benchmarking, we strongly recommend using **Qwen3.5-27B** (e.g., `Qwen/Qwen3.5-27B` via SiliconFlow) as it provides the best balance of context comprehension and instruction-following for structured facts and causal relationships.
 
 ### Option A: Running as an MCP Server (Python)
 

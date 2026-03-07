@@ -49,7 +49,7 @@ class CausalWorker(BaseWorker):
                 {"role": "system", "content": CAUSAL_PROMPT},
                 {"role": "user", "content": conversation_text},
             ],
-            model=extractor.ZHIPU_MODEL,
+            model=extractor.SILICONFLOW_MODEL,
             temperature=0.1,
             max_tokens=1000,
             timeout=90,

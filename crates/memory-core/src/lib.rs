@@ -5,14 +5,16 @@
 
 pub mod db;
 pub mod error;
+pub mod noise;
 pub mod scorer;
 pub mod search;
 pub mod types;
 
 pub use error::MemoryError;
-pub use types::{HybridScore, MemoryEntry, SearchResult};
+pub use types::{HybridScore, MemoryEntry, SearchResult, StatsResult};
 pub use search::{SearchOptions, hybrid_search};
 pub use scorer::HybridWeights;
+pub use noise::{is_noise_text, should_skip_query};
 
 use rusqlite::Connection;
 
@@ -106,5 +108,15 @@ impl MemoryStore {
         include_archived: bool,
     ) -> Result<Vec<MemoryEntry>, MemoryError> {
         db::list_by_path(&self.conn, path_prefix, limit, include_archived)
+    }
+
+    /// Delete a memory entry by ID. Returns true if found and deleted.
+    pub fn delete(&self, id: &str) -> Result<bool, MemoryError> {
+        db::delete(&self.conn, id, self.vec_available)
+    }
+
+    /// Get aggregate statistics about the memory store.
+    pub fn stats(&self, include_archived: bool) -> Result<StatsResult, MemoryError> {
+        db::stats(&self.conn, include_archived)
     }
 }

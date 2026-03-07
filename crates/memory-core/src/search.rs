@@ -9,7 +9,7 @@ use std::collections::HashMap;
 use crate::{
     db::{fetch_by_ids, record_access, search_fts, search_vec},
     error::MemoryError,
-    scorer::{hybrid_score, symbolic_score, HybridWeights},
+    scorer::{cosine_similarity, hybrid_score, symbolic_score, HybridWeights},
     types::{MemoryEntry, SearchResult},
 };
 
@@ -31,6 +31,9 @@ pub struct SearchOptions {
     pub record_access: bool,
     /// Whether to include archived entries in query results.
     pub include_archived: bool,
+    /// MMR diversity threshold: cosine similarity > threshold → defer to end.
+    /// Set to None to disable MMR. Default: Some(0.85).
+    pub mmr_threshold: Option<f64>,
 }
 
 impl Default for SearchOptions {
@@ -44,8 +47,61 @@ impl Default for SearchOptions {
             vec_available: false,
             record_access: true,
             include_archived: false,
+            mmr_threshold: Some(0.85),
         }
     }
+}
+
+/// MMR-inspired diversity filter: greedily select results that are both
+/// relevant (high score) and diverse (low similarity to already-selected).
+///
+/// Candidates with cosine similarity > `threshold` to any already-selected
+/// entry are deferred to the end rather than dropped entirely.
+///
+/// Ported from memory-lancedb-pro's `applyMMRDiversity()`.
+fn apply_mmr_diversity(
+    ranked: &[(&String, f64)],
+    entries: &HashMap<String, MemoryEntry>,
+    threshold: f64,
+    needed: usize,
+) -> Vec<String> {
+    if ranked.len() <= 1 {
+        return ranked.iter().map(|(id, _)| id.to_string()).collect();
+    }
+
+    let mut selected: Vec<String> = Vec::new();
+    let mut deferred: Vec<String> = Vec::new();
+
+    for (idx, (id, _)) in ranked.iter().enumerate() {
+        if selected.len() >= needed {
+            deferred.extend(ranked[idx..].iter().map(|(rest_id, _)| (*rest_id).to_string()));
+            break;
+        }
+
+        let candidate = entries.get(*id);
+        let c_vec = candidate.and_then(|e| e.vector.as_ref());
+
+        let too_similar = selected.iter().any(|sel_id| {
+            let sel_entry = entries.get(sel_id);
+            let s_vec = sel_entry.and_then(|e| e.vector.as_ref());
+
+            match (s_vec, c_vec) {
+                (Some(sv), Some(cv)) if !sv.is_empty() && !cv.is_empty() => {
+                    cosine_similarity(sv, cv) > threshold
+                }
+                _ => false, // can't compare without vectors
+            }
+        });
+
+        if too_similar {
+            deferred.push(id.to_string());
+        } else {
+            selected.push(id.to_string());
+        }
+    }
+
+    selected.extend(deferred);
+    selected
 }
 
 /// Execute a full hybrid search, returning ranked `SearchResult`s.
@@ -125,7 +181,6 @@ pub fn hybrid_search(
         &symbolic_scores,
         &opts.weights,
     );
-
     // ── Sort and take top K ───────────────────────────────────────────────────
     let mut ranked: Vec<(&String, f64)> = scores
         .iter()
@@ -133,14 +188,21 @@ pub fn hybrid_search(
         .map(|(id, hs)| (id, hs.final_score))
         .collect();
     ranked.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-    ranked.truncate(opts.top_k);
+
+    // ── MMR diversity: defer near-duplicate entries to end ─────────────────────
+    let ranked_ids: Vec<String> = if let Some(threshold) = opts.mmr_threshold {
+        apply_mmr_diversity(&ranked, &entries_map, threshold, opts.top_k)
+    } else {
+        ranked.iter().map(|(id, _)| id.to_string()).collect()
+    };
 
     // ── Build output ──────────────────────────────────────────────────────────
-    let mut results: Vec<SearchResult> = ranked
+    let mut results: Vec<SearchResult> = ranked_ids
         .iter()
-        .filter_map(|(id, _)| {
-            let entry = entries_map.get(*id)?.clone();
-            let score = scores.get(*id)?.clone();
+        .take(opts.top_k)
+        .filter_map(|id| {
+            let entry = entries_map.get(id)?.clone();
+            let score = scores.get(id)?.clone();
             Some(SearchResult { entry, score })
         })
         .collect();
@@ -149,7 +211,6 @@ pub fn hybrid_search(
     if opts.record_access {
         let accessed_ids: Vec<String> = results.iter().map(|r| r.entry.id.clone()).collect();
         record_access(conn, &accessed_ids)?;
-        // Reflect the bump in returned entries
         for r in &mut results {
             r.entry.access_count += 1;
         }

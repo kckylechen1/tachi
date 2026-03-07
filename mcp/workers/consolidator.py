@@ -29,7 +29,7 @@ class ConsolidatorWorker(BaseWorker):
                     "content": f"旧记忆:\n{old_text}\n\n新记忆:\n{new_text}",
                 },
             ],
-            model=extractor.ZHIPU_MODEL,
+            model=extractor.SILICONFLOW_MODEL,
             temperature=0.1,
             max_tokens=800,
             timeout=90,

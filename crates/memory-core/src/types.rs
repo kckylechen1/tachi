@@ -132,6 +132,15 @@ pub struct SearchResult {
     pub score: HybridScore,
 }
 
+/// Aggregate statistics about the memory store.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StatsResult {
+    pub total: u64,
+    pub by_scope: std::collections::HashMap<String, u64>,
+    pub by_category: std::collections::HashMap<String, u64>,
+    pub by_root_path: std::collections::HashMap<String, u64>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

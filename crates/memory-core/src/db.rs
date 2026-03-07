@@ -50,8 +50,6 @@ pub fn init_schema(conn: &Connection) -> Result<(), MemoryError> {
         CREATE INDEX IF NOT EXISTS idx_memories_path        ON memories(path);
         CREATE INDEX IF NOT EXISTS idx_memories_importance  ON memories(importance DESC);
         CREATE INDEX IF NOT EXISTS idx_memories_timestamp   ON memories(timestamp DESC);
-        CREATE INDEX IF NOT EXISTS idx_memories_archived    ON memories(archived);
-        CREATE INDEX IF NOT EXISTS idx_memories_last_access ON memories(last_access DESC);
 
         -- Standalone FTS5 table with Chinese + Pinyin tokenizer.
         -- Uses wangfenjin/simple for CJK segmentation.
@@ -86,6 +84,13 @@ pub fn init_schema(conn: &Connection) -> Result<(), MemoryError> {
         "updated_at",
         "TEXT NOT NULL DEFAULT ''",
     )?;
+
+    // Indexes on migrated columns — MUST come after ensure_column so the
+    // columns exist on legacy databases that were created without them.
+    conn.execute_batch(r#"
+        CREATE INDEX IF NOT EXISTS idx_memories_archived    ON memories(archived);
+        CREATE INDEX IF NOT EXISTS idx_memories_last_access ON memories(last_access DESC);
+    "#)?;
 
     // Backfill empty values for legacy rows.
     conn.execute(
@@ -424,6 +429,7 @@ pub fn search_fts(
 // ─── BULK FETCH ───────────────────────────────────────────────────────────────
 
 /// Fetch multiple entries by their IDs in one query.
+/// Also hydrates vectors from memories_vec if available.
 pub fn fetch_by_ids(
     conn: &Connection,
     ids: &[String],
@@ -452,6 +458,37 @@ pub fn fetch_by_ids(
         let entry = r?;
         out.insert(entry.id.clone(), entry);
     }
+
+    // Hydrate vectors from memories_vec (best-effort: table may not exist)
+    let vec_sql = format!(
+        "SELECT id, embedding FROM memories_vec WHERE id IN ({})",
+        placeholders
+    );
+    if let Ok(mut vec_stmt) = conn.prepare(&vec_sql) {
+        if let Ok(vec_rows) = vec_stmt.query_map(
+            rusqlite::params_from_iter(ids.iter()),
+            |row| {
+                let id: String = row.get(0)?;
+                let blob: Vec<u8> = row.get(1)?;
+                Ok((id, blob))
+            },
+        ) {
+            for r in vec_rows.flatten() {
+                let (id, blob) = r;
+                if let Some(entry) = out.get_mut(&id) {
+                    // Deserialize f32 vector from blob
+                    if blob.len() % 4 == 0 {
+                        let vec: Vec<f32> = blob
+                            .chunks_exact(4)
+                            .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+                            .collect();
+                        entry.vector = Some(vec);
+                    }
+                }
+            }
+        }
+    }
+
     Ok(out)
 }
 
@@ -544,6 +581,116 @@ pub fn record_access(conn: &Connection, ids: &[String]) -> Result<(), MemoryErro
     Ok(())
 }
 
+// ─── DELETE ───────────────────────────────────────────────────────────────────
+
+/// Delete a memory entry by ID from main table, FTS index, and vector table.
+/// Returns true if an entry was found and deleted.
+pub fn delete(conn: &Connection, id: &str, vec_available: bool) -> Result<bool, MemoryError> {
+    let trimmed = id.trim();
+    if trimmed.is_empty() {
+        return Err(MemoryError::InvalidArg("empty ID".to_string()));
+    }
+
+    let tx = conn.unchecked_transaction()?;
+
+    // Delete from main table and check if anything was actually removed
+    tx.execute("DELETE FROM memories WHERE id = ?1", params![trimmed])?;
+    let deleted = tx.changes() > 0;
+
+    if deleted {
+        // Clean up FTS index
+        tx.execute("DELETE FROM memories_fts WHERE id = ?1", params![trimmed])?;
+
+        // Clean up vector table (best-effort)
+        if vec_available {
+            let _ = tx.execute("DELETE FROM memories_vec WHERE id = ?1", params![trimmed]);
+        }
+    }
+
+    tx.commit()?;
+    Ok(deleted)
+}
+
+// ─── STATS ────────────────────────────────────────────────────────────────────
+
+/// Get aggregate statistics about the memory store.
+pub fn stats(conn: &Connection, include_archived: bool) -> Result<crate::types::StatsResult, MemoryError> {
+    fn i64_to_u64(value: i64, label: &str) -> Result<u64, MemoryError> {
+        u64::try_from(value)
+            .map_err(|_| MemoryError::InvalidArg(format!("negative aggregate count for {label}")))
+    }
+
+    fn aggregate_counts(
+        conn: &Connection,
+        sql: &str,
+        include_archived: bool,
+        label: &str,
+    ) -> Result<HashMap<String, u64>, MemoryError> {
+        let mut stmt = conn.prepare(sql)?;
+        let rows = stmt.query_map(params![include_archived as i64], |row| {
+            let key: String = row.get(0)?;
+            let count: i64 = row.get(1)?;
+            Ok((key, count))
+        })?;
+
+        let mut out = HashMap::new();
+        for row in rows {
+            let (key, count) = row?;
+            out.insert(key, i64_to_u64(count, label)?);
+        }
+        Ok(out)
+    }
+
+    fn root_path(path: &str) -> String {
+        let mut parts = path.split('/').filter(|part| !part.is_empty());
+        match parts.next() {
+            Some(root) => format!("/{root}"),
+            None => "/".to_string(),
+        }
+    }
+
+    let total_i64: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM memories WHERE (?1 = 1 OR archived = 0)",
+        params![include_archived as i64],
+        |row| row.get(0),
+    )?;
+    let total = i64_to_u64(total_i64, "total")?;
+
+    let by_scope = aggregate_counts(
+        conn,
+        "SELECT scope, COUNT(*) FROM memories
+         WHERE (?1 = 1 OR archived = 0)
+         GROUP BY scope",
+        include_archived,
+        "scope",
+    )?;
+    let by_category = aggregate_counts(
+        conn,
+        "SELECT category, COUNT(*) FROM memories
+         WHERE (?1 = 1 OR archived = 0)
+         GROUP BY category",
+        include_archived,
+        "category",
+    )?;
+
+    let mut stmt = conn.prepare(
+        "SELECT path FROM memories WHERE (?1 = 1 OR archived = 0)"
+    )?;
+    let rows = stmt.query_map(params![include_archived as i64], |row| row.get::<_, String>(0))?;
+    let mut by_root_path: HashMap<String, u64> = HashMap::new();
+    for row in rows {
+        let path = row?;
+        *by_root_path.entry(root_path(&path)).or_insert(0) += 1;
+    }
+
+    Ok(crate::types::StatsResult {
+        total,
+        by_scope,
+        by_category,
+        by_root_path,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -626,5 +773,65 @@ mod tests {
         let query = vec![0.1_f32; 1024];
         let results = search_vec(&conn, &query, 3, false).unwrap();
         assert!(results.contains_key("vec-1"));
+    }
+
+    #[test]
+    fn delete_existing() {
+        let conn = make_conn();
+        let e = make_entry("del-1", "to be deleted");
+        upsert(&conn, &e, false).unwrap();
+
+        let deleted = delete(&conn, "del-1", false).unwrap();
+        assert!(deleted, "should return true for existing entry");
+
+        // Verify it's gone from main table
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM memories WHERE id = 'del-1'", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(count, 0);
+
+        // Verify it's gone from FTS
+        let fts_results = search_fts(&conn, "deleted", 5, false).unwrap();
+        assert!(!fts_results.contains_key("del-1"));
+    }
+
+    #[test]
+    fn delete_nonexistent() {
+        let conn = make_conn();
+        let deleted = delete(&conn, "nonexistent-id", false).unwrap();
+        assert!(!deleted, "should return false for non-existent entry");
+    }
+
+    #[test]
+    fn stats_aggregation() {
+        let conn = make_conn();
+
+        let mut e1 = make_entry("s1", "fact entry");
+        e1.scope = "general".into();
+        e1.category = "fact".into();
+        e1.path = "/project/alpha".into();
+        upsert(&conn, &e1, false).unwrap();
+
+        let mut e2 = make_entry("s2", "decision entry");
+        e2.scope = "project".into();
+        e2.category = "decision".into();
+        e2.path = "/project/beta".into();
+        upsert(&conn, &e2, false).unwrap();
+
+        let mut e3 = make_entry("s3", "user preference");
+        e3.scope = "user".into();
+        e3.category = "preference".into();
+        e3.path = "/user/settings".into();
+        upsert(&conn, &e3, false).unwrap();
+
+        let s = stats(&conn, false).unwrap();
+        assert_eq!(s.total, 3);
+        assert_eq!(s.by_scope.get("general"), Some(&1_u64));
+        assert_eq!(s.by_scope.get("project"), Some(&1_u64));
+        assert_eq!(s.by_scope.get("user"), Some(&1_u64));
+        assert_eq!(s.by_category.get("fact"), Some(&1_u64));
+        assert_eq!(s.by_category.get("decision"), Some(&1_u64));
+        assert_eq!(s.by_root_path.get("/project"), Some(&2_u64));
+        assert_eq!(s.by_root_path.get("/user"), Some(&1_u64));
     }
 }

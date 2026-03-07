@@ -8,7 +8,13 @@
 #![deny(clippy::all)]
 
 use napi_derive::napi;
-use memory_core::{MemoryStore as RustStore, SearchOptions, MemoryEntry};
+use memory_core::{
+    is_noise_text,
+    should_skip_query,
+    MemoryEntry,
+    MemoryStore as RustStore,
+    SearchOptions,
+};
 use std::sync::{Arc, Mutex};
 
 /// Thread-safe wrapper around the Rust MemoryStore.
@@ -62,6 +68,9 @@ impl JsMemoryStore {
                 if let Some(ra) = val.get("record_access").and_then(|v| v.as_bool()) {
                     opts.record_access = ra;
                 }
+                if val.get("mmr_threshold").is_some() {
+                    opts.mmr_threshold = val.get("mmr_threshold").and_then(|v| v.as_f64());
+                }
                 if let Some(arr) = val.get("query_vec").and_then(|v| v.as_array()) {
                     let mut qv = Vec::with_capacity(arr.len());
                     for item in arr {
@@ -97,6 +106,28 @@ impl JsMemoryStore {
             .map_err(|e| napi::Error::from_reason(e.to_string()))?;
 
         serde_json::to_string(&results)
+            .map_err(|e| napi::Error::from_reason(e.to_string()))
+    }
+
+    /// Delete a memory by ID.
+    #[napi]
+    pub fn delete(&self, id: String) -> napi::Result<bool> {
+        self.inner
+            .lock().unwrap_or_else(|e| e.into_inner())
+            .delete(&id)
+            .map_err(|e| napi::Error::from_reason(e.to_string()))
+    }
+
+    /// Get aggregate stats. Returns JSON string.
+    #[napi]
+    pub fn stats(&self, include_archived: Option<bool>) -> napi::Result<String> {
+        let stats = self
+            .inner
+            .lock().unwrap_or_else(|e| e.into_inner())
+            .stats(include_archived.unwrap_or(false))
+            .map_err(|e| napi::Error::from_reason(e.to_string()))?;
+
+        serde_json::to_string(&stats)
             .map_err(|e| napi::Error::from_reason(e.to_string()))
     }
 
@@ -136,4 +167,16 @@ impl JsMemoryStore {
     pub fn vec_available(&self) -> bool {
         self.inner.lock().unwrap_or_else(|e| e.into_inner()).vec_available
     }
+}
+
+/// Check if text is noise.
+#[napi]
+pub fn is_noise(text: String) -> bool {
+    is_noise_text(&text)
+}
+
+/// Check if query should skip retrieval.
+#[napi]
+pub fn should_skip(query: String) -> bool {
+    should_skip_query(&query)
 }

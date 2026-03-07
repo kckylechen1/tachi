@@ -310,6 +310,8 @@ if (!nativeBinding) {
   throw new Error(`Failed to load native binding`)
 }
 
-const { JsMemoryStore } = nativeBinding
+const { JsMemoryStore, isNoise, shouldSkip } = nativeBinding
 
 module.exports.JsMemoryStore = JsMemoryStore
+module.exports.isNoise = isNoise
+module.exports.shouldSkip = shouldSkip

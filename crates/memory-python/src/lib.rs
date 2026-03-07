@@ -9,7 +9,13 @@
 //!     store.upsert({"id": "...", "text": "...", ...})
 //!     results = store.search("query text", {"top_k": 6})
 use pyo3::prelude::*;
-use memory_core::{MemoryStore as RustStore, SearchOptions, MemoryEntry};
+use memory_core::{
+    is_noise_text,
+    should_skip_query,
+    MemoryEntry,
+    MemoryStore as RustStore,
+    SearchOptions,
+};
 
 use std::sync::{Arc, Mutex};
 
@@ -66,6 +72,9 @@ impl PyMemoryStore {
                 if let Some(b) = val.get("include_archived").and_then(|v| v.as_bool()) {
                     opts.include_archived = b;
                 }
+                if val.get("mmr_threshold").is_some() {
+                    opts.mmr_threshold = val.get("mmr_threshold").and_then(|v| v.as_f64());
+                }
                 if let Some(arr) = val.get("query_vec").and_then(|v| v.as_array()) {
                     let mut qv = Vec::with_capacity(arr.len());
                     for item in arr {
@@ -103,6 +112,42 @@ impl PyMemoryStore {
 
         serde_json::to_string(&results)
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
+    }
+
+    /// Delete a memory by ID. Returns true if deleted, false if not found.
+    #[pyo3(signature = (id,))]
+    fn delete(&self, id: &str) -> PyResult<bool> {
+        self.inner
+            .lock()
+            .unwrap()
+            .delete(id)
+            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
+    }
+
+    /// Get aggregate stats. Returns JSON string of StatsResult.
+    #[pyo3(signature = (include_archived=false))]
+    fn stats(&self, include_archived: bool) -> PyResult<String> {
+        let stats = self
+            .inner
+            .lock()
+            .unwrap()
+            .stats(include_archived)
+            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+
+        serde_json::to_string(&stats)
+            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
+    }
+
+    /// Check if text is noise (should not be stored). Pure Rust, no I/O.
+    #[staticmethod]
+    fn is_noise(text: &str) -> bool {
+        is_noise_text(text)
+    }
+
+    /// Check if query should skip retrieval. Pure Rust, no I/O.
+    #[staticmethod]
+    fn should_skip(query: &str) -> bool {
+        should_skip_query(query)
     }
 
     /// Fetch a single memory by ID. Returns JSON string or None.

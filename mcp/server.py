@@ -21,9 +21,11 @@ import os
 import sys
 from pathlib import Path
 
+from dotenv import load_dotenv
+load_dotenv(os.path.expanduser("~/.secrets/master.env"))
+
 # Load .env from project root (two levels up from mcp/server.py)
 # Must happen BEFORE importing modules that read os.environ at import time.
-from dotenv import load_dotenv
 _project_root = Path(__file__).resolve().parent.parent
 load_dotenv(_project_root / ".env")
 
@@ -515,10 +517,10 @@ async def _get_pipeline_status(args: dict) -> list[TextContent]:
 
 async def main():
     logger.info("Starting Antigravity Memory MCP server (v2)...")
+    init_event_queue(store.DB_PATH)
     launcher = WorkerLauncher(db_path=store.DB_PATH, conn=_STORE_CONN)
     launcher.start()
     try:
-        init_event_queue(store.DB_PATH)
         async with stdio_server() as (read_stream, write_stream):
             await app.run(read_stream, write_stream, app.create_initialization_options())
     finally:
