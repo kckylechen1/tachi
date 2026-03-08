@@ -1,10 +1,10 @@
 <div align="center">
   <img src="assets/banner.png" alt="Sigil Banner" width="800" style="margin-bottom: 20px;" />
-  <h1>✧ 符文（Sigil）记事</h1>
-  <p><strong>专为自主灵核（AI Agents）所筑之本地首储、凌波疾行之混合识海阵法</strong></p>
+  <h1>✧ Sigil</h1>
+  <p><strong>A Fast, Local-First Context & Memory Database for Autonomous AI Agents</strong></p>
 
   <p>
-    <a href="README.en.md">English</a> | <a href="README.zh-CN.md">简体中文</a> | <a href="README.md"><b>文言文</b></a>
+    <a href="README.md"><b>English</b></a> | <a href="README.zh-CN.md">简体中文</a> | <a href="README.lzh.md">文言文</a>
   </p>
 
   <p>
@@ -19,152 +19,152 @@
 
 ---
 
-## 📖 卷首目录
+## 📖 Table of Contents
 
-- [一、 概览](#一-概览)
-- [二、 开宗明义：辅佐灵核 (MCP)](#二-开宗明义-辅佐灵核-mcp)
-- [三、 别派旁支：外挂外丹 (OpenClaw)](#三-别派旁支-外挂外丹-openclaw)
-- [四、 镇派绝学](#四-镇派绝学)
-- [五、 因果织机与羁绊拓扑](#五-因果织机与羁绊拓扑)
-- [六、 阵法图解](#六-阵法图解)
-- [七、 丹炉器皿](#七-丹炉器皿)
-- [八、 吐纳心法与典籍](#八-吐纳心法与典籍-apis)
-- [九、 天地灵气配置](#九-天地灵气配置-env)
-- [十、 试剑台](#十-试剑台)
-- [十一、 广纳贤才](#十一-广纳贤才)
-- [十二、 门规](#十二-门规)
-
----
-
-## 💡 一、 概览
-
-**符文（Sigil）** 者，乃专为机巧巨构（Autonomous AI Agents）所塑之潜渊识海也。
-
-今世之造物，多以片语金石（向量数据库）碎藏执念。然此法极易致其神识胀乱（上下文膨胀），久之则前因后果尽皆遗忘。
-
-符文本库弃平铺之法，取其**层峦叠嶂、如藏经阁之规制（层级化文件系统范式）**，辅以**经脉羁绊（图谱级因果关联）**。其底座由玄铁（Rust）百炼而成。不论化作 [MCP](https://modelcontextprotocol.io/) 法器独善其身，亦或寄魂于 OpenClaw 等奇巧宗门，皆可施展须臾即至之多系搜魂（亚毫秒级混合语义检索），且**皆不假外物（无需外部数据库）**。
+- [Overview](#-overview)
+- [Quick Start: Coding Agents (MCP)](#-quick-start-coding-agents-mcp)
+- [Quick Start: Frameworks (OpenClaw)](#-quick-start-frameworks-openclaw)
+- [Key Features](#-key-features)
+- [Causal Worker Pipeline & Memory Relations](#-causal-worker-pipeline--memory-relations)
+- [Architecture](#-architecture)
+- [Model Stack](#-model-stack)
+- [Manual Installation & APIs](#-manual-installation--apis)
+- [Environment Configuration](#-environment-configuration)
+- [Benchmarks](#-benchmarks)
+- [Contributing](#-contributing)
+- [License](#-license)
 
 ---
 
-## 🤖 二、 开宗明义：辅佐灵核 (MCP 协议)
+## 💡 Overview
 
-若君以 Claude Desktop, Cursor 亦或 AutoGen 为伴，均可唤 Sigil 依 MCP 之约降世。
+**Sigil** is an embedded, unified context and memory management database engineered for Autonomous AI Agents.
 
-**以符诏（Prompt）令你的 AI 剑童执行：**
+Standard memory models often rely on flat vector stores, leading to bloated context windows and a loss of temporal and causal relationships. Sigil addresses this by utilizing a **hierarchical, file-system-like paradigm** combined with **graph-based causal relations**, powered by a highly optimized Rust core. 
+
+Whether integrated as a [Model Context Protocol (MCP)](https://modelcontextprotocol.io/) server or used as a native extension in frameworks like OpenClaw, Sigil delivers sub-millisecond, multi-modal semantic retrieval with **zero external database dependencies**.
+
+---
+
+## 🤖 Quick Start: Coding Agents (MCP)
+
+For environments like Claude Desktop, Cursor, or AutoGen, Sigil operates natively as an MCP server.
+
+**Prompt your Assistant with the following instructions:**
 
 ```text
-请协助我开炉铸造 Sigil (MCP 记忆服务器)：
+Please configure the Sigil local memory MCP server:
 
-1. 拓印真经: git clone https://github.com/kckylechen1/sigil.git && cd sigil
-2. 辟谷筑基（构建服务端与环境）:
+1. Clone repository: git clone https://github.com/kckylechen1/sigil.git && cd sigil
+2. Initialize environment:
    cd mcp && python3 -m venv .venv && source .venv/bin/activate
    cd ../crates/memory-python && pip install maturin && maturin develop --release
    cd ../../mcp && pip install -r requirements.txt
-3. 将此心法刻入 mcp_config.json 命宫:
+3. Append to my mcp_config.json:
    {
      "mcpServers": {
        "memory": {
-         "command": "<绝对仙路指引>/sigil/mcp/.venv/bin/python3",
-         "args": ["<绝对仙路指引>/sigil/mcp/server.py"]
+         "command": "<absolute-path-to>/sigil/mcp/.venv/bin/python3",
+         "args": ["<absolute-path-to>/sigil/mcp/server.py"]
        }
      }
    }
 
-法阵将自觅 .env 灵石。
-所需供奉之主（依赖服务）：
-- 航星阁 (Voyage API - 向量与重排): https://dash.voyageai.com/
-- 硅基流 (SiliconFlow - 结构抽取): https://cloud.siliconflow.cn/
+The server loads API keys automatically from the `.env` file in the project root.
+Required providers:
+- Voyage API (Embedding + Rerank): https://dash.voyageai.com/
+- SiliconFlow (Extraction): https://cloud.siliconflow.cn/
 ```
 
 ---
 
-## 🦞 三、 别派旁支：外挂外丹 (OpenClaw 框架)
+## 🦞 Quick Start: Frameworks (OpenClaw)
 
-Sigil 亦化身为 OpenClaw 气海之元婴法宝。
+Sigil can be integrated as a native OpenClaw extension plugin.
 
-**颁下此旨，着 OpenClaw 内阁自理：**
+**Prompt your OpenClaw IDE Assistant with the following instructions:**
 
 ```text
-速速施展连环符，将 Sigil 融入 OpenClaw 奇经八脉。
+Please install the Sigil memory extension for OpenClaw:
 
-1. 直起法阵：
+1. Execute the installation script:
    bash -c "$(curl -fsSL https://raw.githubusercontent.com/kckylechen1/sigil/main/scripts/install_openclaw_ext.sh)"
 
-2. 此咒自动寻脉夺宝、熔铸 Rust NAPI 金丹、试演锋芒，并于 extensions 洞府打下虚空烙印（软链接）。
+2. The script automates cloning, building the Rust NAPI module, compiling the extension, and symlinking to the OpenClaw plugin directory.
 
-3. 事毕，解开 `plugins.allow` 禁制，将 `plugins.slots.memory` 皈依为 `memory-hybrid-bridge`。终以 `.env` 补齐灵气。
+3. Enable `memory-hybrid-bridge` in `plugins.allow`, assign `plugins.slots.memory` to `memory-hybrid-bridge`, and configure API keys in `.env`.
 ```
 
 ---
 
-## ✨ 四、 镇派绝学
+## ✨ Key Features
 
-- **⚡ 玄铁剑心 (`memory-core`)**：计分、储纳、探囊取物等心法尽为 Rust 纯血铸就。辅以内丹于 Node.js (`NAPI-RS`) 与 Python (`PyO3`) 以应变千万。
-- **🗂️ 藏经阁流**：摒弃散沙。以 `path` 路径（如 `/user/preferences`, `/project/architecture`）作阁楼卷宗之分期，互不沾染走火入魔。
-- **🔍 四象绝杀阵（混合搜索引擎）**：
-  - **太阴（语义）**：基于 `sqlite-vec` 与 Voyage-4 之聚类（KNN）。
-  - **太阳（词法）**：由 `libsimple` 借 `FTS5` 成势之中原文字（CJK）索骥全书。
-  - **少阴（真言）**：严密匹配决绝签言。
-  - **少阳（忘机）**：顺应天地盈虚之理（ACT-R，时间衰减惩罚），旧事随风。
-- **🎯 乾坤大挪移（交叉重排）**：四路偏锋夺宝而出后，祭出 Voyage Rerank-2.5 以明察秋毫。
-- **🧠 三花聚顶（自适应上下文）**：录入之时即炼为三转：`L0`（浮光掠影）, `L1`（骨肉梗概）, 及 `L2`（大千界体）。由主将择轻重以借之，免费真元。
-- **🔌 一气化三清（零部署负担）**：海纳百川，尽归一介微尘 SQLite 血印（`memory.db`）。Redis、Neo4j 乃至 ChromaDB 等异教门派，一概不需。
-
----
-
-## ⚙️ 五、 因果织机与羁绊拓扑
-
-为求造物道心长存，以免走火入魔，Sigil 独创如下天机：
-
-### 1. 天理昭昭（因果提取管道）
-当 Agent 施法落局，九霄之上之暗卫（异步工作站）便由 SiliconFlow 请神 **Qwen3.5-27B** 入阵。它将从前尘旧梦中拆解：
-*   `Causes`（缘起）：何事乱了因果？
-*   `Decisions`（决断）：为何如此拔剑？
-*   `Results`（尘埃）：落花流淌至何方？
-*   `Impacts`（余音）：江湖百年或可有变数？
-
-治 “不记初心症”，知其然，更知其所以然。
-
-### 2. 千丝万缕（原生拓扑）
-底层法器中，蛛丝隐连千条暗线。待大衍模型（LLM）溯流而上之时，无须纵览全界，循藤摸瓜即可。
+- **⚡ High-Performance Rust Core (`memory-core`)**: The foundational scoring, storage, entity extraction, and retrieval engines are written in Rust, featuring dynamic bindings for Node.js (`NAPI-RS`) and Python (`PyO3`).
+- **🗂️ Filesystem Paradigm**: Context is managed hierarchically via a `path` parameter (e.g., `/user/preferences`, `/project/architecture`), allowing precise isolation and contextual scoping.
+- **🔍 4-Channel Hybrid Search Engine**:
+  - **Semantic**: Built-in vector embedding search via `sqlite-vec` (KNN).
+  - **Lexical**: Native CJK-optimized full-text search utilizing `libsimple` and `FTS5`.
+  - **Symbolic**: Exact keyword and categorical entity matching.
+  - **Decay**: Temporal relevance degradation inspired by the ACT-R cognitive architecture.
+- **🎯 Cross-Encoder Reranking**: Applies advanced reranking top of candidate sets to maximize retrieval precision.
+- **🧠 3-Tier Context Extraction**: Automatically parses ingestion into three tiers: `L0` (Abstract Summary), `L1` (Overview), and `L2` (Full Text). Agents dynamically retrieve the appropriate depth based on context constraints.
+- **🔌 Embedded Architecture**: All data is efficiently stored within a single SQLite file (`memory.db`). No external services (Redis, Neo4j, ChromaDB) are required.
 
 ---
 
-## 🏗️ 六、 阵法图解
+## ⚙️ Causal Worker Pipeline & Memory Relations
+
+Sigil incorporates advanced reasoning components to maintain long-term logical consistency:
+
+### 1. The Causal Extraction Pipeline
+When an agent submits execution logs, an asynchronous worker utilizes **Qwen3.5-27B** via SiliconFlow to analyze the interaction and extract:
+*   `Causes`: The events triggering the action.
+*   `Decisions`: The reasoning pathway and logic applied.
+*   `Results`: The concrete outcomes.
+*   `Impacts`: Long-term consequences within the workspace.
+
+This prevents "Agent Amnesia," ensuring agents retain the rationale behind historical decisions rather than just the resultant code changes.
+
+### 2. Native Memory Relations
+The storage layer implicitly links connected entities and facts into a native topological graph. This allows language models to traverse dependencies and understand inherited context without expanding the primary context window.
+
+---
+
+## 🏗️ Architecture
 
 ```mermaid
 graph TD
-    subgraph Clients["四方来客"]
-        MCP["MCP 使节 (Python 3.10+)"]
-        OC["OpenClaw 分舵 (Node.js)"]
-        NATIVE["玄铁器宗 (Rust Crates)"]
+    subgraph Clients["Supported Integrations"]
+        MCP["MCP Server (Python 3.10+)"]
+        OC["OpenClaw Extension (Node.js)"]
+        NATIVE["Native Rust Crates"]
     end
 
-    subgraph Operations["暗卫司 (Python/Node)"]
-        EXTRACT["照妖镜 (Qwen)"]
-        DISTILL["化骨炉 (Qwen)"]
-        CAUSAL["天机枢"]
-        CONSOLIDATE["拾荒人"]
+    subgraph Operations["Async Workers (Python/Node)"]
+        EXTRACT["Fact Extractor (Qwen)"]
+        DISTILL["Context Distiller (Qwen)"]
+        CAUSAL["Causal Worker"]
+        CONSOLIDATE["Session Consolidator"]
     end
 
-    subgraph Core["Sigil 剑冢 (Rust 'memory-core')"]
-        NAPI["NAPI 皮囊"]
-        PYO3["PyO3 皮囊"]
+    subgraph Core["Sigil Core (Rust 'memory-core')"]
+        NAPI["NAPI Binding"]
+        PYO3["PyO3 Binding"]
         
-        NAPI --- LIB[/"lib.rs (心经)"/]
+        NAPI --- LIB[/"lib.rs (Store API)"/]
         PYO3 --- LIB
         
-        LIB --> SEARCH["四象绝杀阵"]
-        LIB --> GRAPH["因果千丝网"]
+        LIB --> SEARCH["Hybrid Search Engine (4 Channels)"]
+        LIB --> GRAPH["Memory Relations & Causal Maps"]
         
-        SEARCH --> SQLITE[("袖里乾坤 SQLite + vec0")]
+        SEARCH --> SQLITE[("Embedded SQLite + vec0")]
         GRAPH --> SQLITE
     end
 
     MCP --> PYO3
     OC --> NAPI
-    MCP -. 飞鸽传书 .-> Operations
-    Operations -. 斩金截铁 .-> PYO3
+    MCP -. Async Event Queue .-> Operations
+    Operations -. Write Events .-> PYO3
     
     classDef client fill:#3b2e5a,stroke:#8a5cf5,stroke-width:2px,color:#fff;
     classDef worker fill:#5a4f2e,stroke:#f5cw5a,stroke-width:2px,color:#fff;
@@ -179,84 +179,84 @@ graph TD
 
 ---
 
-## 🧩 七、 丹炉器皿
+## 🧩 Model Stack
 
-百世历劫，唯有下述真火得以担承炼化之重：
+The following model stack is optimized to balance latency, quality, and cost for internal asynchronous workers:
 
-| 司职 | 仙班首座 | 荐书 |
+| Role | Recommended Model | Rationale |
 |------|-------------------|------------------|
-| **搜神引（Embedding）** | [Voyage-4](https://voyageai.com/) | 千维道标，八荒九州语皆可探明。 |
-| **点金判（Reranking）** | [Voyage Rerank-2.5](https://voyageai.com/) | 乱花渐欲迷人眼时，一锤定音。与搜神引共符印。 |
-| **抽丝剥茧（抽取）** | [Qwen3.5-27B](https://cloud.siliconflow.cn/i/QwFqsLF1) | 断文识字、破空捉影，在硅基流（SiliconFlow）中威震八方，香火充裕。 |
-| **大造化（全局蒸馏）** | [Qwen3.5-27B](https://cloud.siliconflow.cn/i/QwFqsLF1) | 以同源之智凝练万里乾坤总纲。 |
+| **Embedding** | [Voyage-4](https://voyageai.com/) | 1024d vectors offering top-tier multilingual retrieval capabilities. |
+| **Reranking** | [Voyage Rerank-2.5](https://voyageai.com/) | Cross-encoder precision boost applied post-retrieval. Shares API key with embedding. |
+| **Extraction & Summarization** | [Qwen3.5-27B](https://cloud.siliconflow.cn/) (SiliconFlow) | High accuracy for structured JSON parsing, causal reasoning, and L0 fast-summarization. |
+| **Distillation** | [Qwen3.5-27B](https://cloud.siliconflow.cn/) (SiliconFlow) | Unified model implementation for periodic global schema and rule derivation. |
 
 ---
 
-## 💻 八、 吐纳心法与典籍 (APIs)
+## 💻 Manual Installation & APIs
 
-愿纳芥子于须弥之匠人，请观此诀：
+For direct integration of `memory-core` into custom Python applications:
 
-### ⚙️ Python 幻术 (`mcp/server.py` 范例)
+### ⚙️ Python Environment (`mcp/server.py`)
 ```python
 from memory_core_py import MemoryStore, SearchParams, MemoryEntry
 
-# 开辟洞府
+# Initialize embedded store
 store = MemoryStore("~/.sigil/memory.db")
 
-# 烙下禁咒
+# Ingest structured memory
 store.save_memory(MemoryEntry(
-    text="前端项目强制使用 React 与 Vite 构建，严禁混入 Webpack 相关生态配置。支持 Tailwind。",
+    text="The user prefers React frontend with Vite, no Webpack. Tailwind is permitted.",
     path="/user/project_preferences",
     importance=0.8,
     keywords=["react", "vite", "webpack", "tailwind"]
 ))
 
-# 四象阵起
+# Execute multi-channel Hybrid Search
 results = store._search(SearchParams(
-    query="针对当前工程构建工具的禁忌有哪些？",
+    query="What is the preferred bundler?",
     path_prefix="/user",
     top_k=3
 ))
 
-# 浮取 L0 真水
+# Access optimized tier
 print(results[0].l0_summary)
 ```
 
-### ⚙️ 九、 天地灵气配置 (`.env`)
-取 `.env.example` 洗髓得 `.env`：
+### ⚙️ Environment Configuration (`.env`)
+Copy `.env.example` to `.env` in the root directory.
 ```bash
-# 航星阁通天玉佩
+# Core Embedding and Retrieval
 VOYAGE_API_KEY="your_voyage_key_here"
 
-# 硅基流御赐金牌
+# LLM Extractor & Distiller
 SILICONFLOW_API_KEY="your_siliconflow_key_here"
 
-# 须弥纳子之地 (机选)
+# Database path (Optional)
 MEMORY_DB_PATH="~/.sigil/memory.db"
 ```
 
 ---
 
-## 🏎️ 十、 试剑台 (Benchmarks)
+## 🏎️ Benchmarks
 
-- **缩地成寸（原生延迟）**：剑出无影，十之八九断于 `< 1.2ms` 之间。
-- **身外化身（并发剥离）**：暗卫司以灵游太虚（ThreadPool）解构因果，毫不惊动主尊真身（无阻塞）。
-- **聚沙成塔（真元利用）**：以三花聚顶（`L0` → `L1` → `L2`）破妄，省下八万五千劫（85%）之无用功，模型从命若流云。
-
----
-
-## 🤝 十一、 广纳贤才
-
-八百里青云，盼君共乘。以本地筑基法：
-1. 请自备玄铁熔炉 (`rustc>=1.75`)。
-2. 携法器 `maturin` 乃至 `cargo-watch` 足矣。
-3. 万物之始于：`crates/memory-core/src/lib.rs`。
-4. 渡劫冲关前，务必自省周身：`cargo test --all`。
-
-交书上谏需遵古训体例（[Conventional Commits](https://www.conventionalcommits.org/)）。
+- **P95 Latency (Rust Core)**: `< 1.2ms` for localized hybrid lookups.
+- **Extraction Parallelism**: Background thread pools manage extraction with strict isolation from the main event loop.
+- **Token Efficiency**: The hierarchical `L0` → `L1` → `L2` context tiering reduces prompt context bloat by up to **85%** compared to standard RAG chunking, significantly enhancing instruction adherence.
 
 ---
 
-## 📜 十二、 门规
+## 🤝 Contributing
 
-尊奉 [AGPLv3 License](LICENSE) 誓约 © 2026 Sigil Authors 保其长青。
+Contributions to Sigil are welcome. To establish a local development environment:
+1. Ensure Rust (`rustc>=1.75`) is installed.
+2. Install build utilities: `cargo install maturin cargo-watch`.
+3. The core storage API is located at `crates/memory-core/src/lib.rs`.
+4. Validate changes utilizing `cargo test --all` prior to submitting a pull request.
+
+Commit messages must conform to the [Conventional Commits](https://www.conventionalcommits.org/) specification.
+
+---
+
+## 📜 License
+
+[AGPLv3 License](LICENSE) © 2026 Sigil Authors.

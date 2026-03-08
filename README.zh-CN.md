@@ -4,7 +4,7 @@
   <p><strong>专为自主智能体（AI Agents）打造的本地优先、高性能混合上下文数据库</strong></p>
 
   <p>
-    <a href="README.en.md">English</a> | <a href="README.zh-CN.md"><b>简体中文</b></a> | <a href="README.md">文言文</a>
+    <a href="README.md">English</a> | <a href="README.zh-CN.md"><b>简体中文</b></a> | <a href="README.lzh.md">文言文</a>
   </p>
 
   <p>
