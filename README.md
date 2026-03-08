@@ -54,6 +54,8 @@ Whether you are building a Model Context Protocol (MCP) server or extending an a
 - **🧠 Advanced Entity Extraction**: Extracts memories into strictly typed categories (`preference`, `decision`, `entity`, `fact`, `other`) for rigorous schema validation.
 - **🧠 3-Tier Context Loading**: Auto-extracts `L0` (Abstract), `L1` (Overview), and `L2` (Full Text) to save tokens.
 - **🔌 Zero Ops**: Packaged as a single SQLite file (`memory.db`), completely embedded. No Redis, no Neo4j, no ChromaDB required.
+- **🔗 Memory Relations**: Built-in support for linking and traversing related memory fragments natively within the database.
+- **⚙️ Causal Worker Pipeline**: Asynchronously extracts structured cause-and-effect event chains directly from raw interaction logs.
 
 ### 🧩 Model Stack
 

@@ -54,6 +54,8 @@ npx tsx benchmark_extraction.ts
 - **🧠 强类型记忆提取**：将记忆严格分类为 `preference`（偏好）、`decision`（决策）、`entity`（实体）、`fact`（事实）、`other`（其他）五种类型，支持 Schema 校验。
 - **🧠 3 级上下文加载**：自动提取 `L0`（摘要）、`L1`（概览）和 `L2`（全文），大幅节省 Token 开销。
 - **🔌 零运维负担**：所有数据打包在单一的 SQLite 文件 (`memory.db`) 中，完全内嵌。不需要启动 Redis、Neo4j 或 ChromaDB。
+- **🔗 记忆关联 (Memory Relations)**：原生支持内部记录关联，构建真正的图谱状上下文关联记忆网络。
+- **⚙️ 因果工作台 (Causal Worker)**：异步提取并处理用户交互记录，自动提炼深层结构化的因果事件链。
 
 ### 🧩 模型栈
 
