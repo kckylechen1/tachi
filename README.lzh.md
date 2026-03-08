@@ -53,27 +53,27 @@
 **以符诏（Prompt）令你的 AI 剑童执行：**
 
 ```text
-请协助我开炉铸造 Sigil (MCP 记忆服务器)：
+请协助我配置安装 Sigil (MCP 记忆服务器)：
 
-1. 拓印真经: git clone https://github.com/kckylechen1/sigil.git && cd sigil
-2. 辟谷筑基（构建服务端与环境）:
+1. 克隆仓库: git clone https://github.com/kckylechen1/sigil.git && cd sigil
+2. 构建服务端与环境:
    cd mcp && python3 -m venv .venv && source .venv/bin/activate
    cd ../crates/memory-python && pip install maturin && maturin develop --release
    cd ../../mcp && pip install -r requirements.txt
-3. 将此心法刻入 mcp_config.json 命宫:
+3. 将以下配置追加至 mcp_config.json 配置文件中:
    {
      "mcpServers": {
        "memory": {
-         "command": "<绝对仙路指引>/sigil/mcp/.venv/bin/python3",
-         "args": ["<绝对仙路指引>/sigil/mcp/server.py"]
+         "command": "<使用绝对路径指向>/sigil/mcp/.venv/bin/python3",
+         "args": ["<使用绝对路径指向>/sigil/mcp/server.py"]
        }
      }
    }
 
-法阵将自觅 .env 灵石。
-所需供奉之主（依赖服务）：
-- 航星阁 (Voyage API - 向量与重排): https://dash.voyageai.com/
-- 硅基流 (SiliconFlow - 结构抽取): https://cloud.siliconflow.cn/
+程序将依据主目录的 .env 文件挂载环境变量。
+依赖服务清单：
+- Voyage API (向量与重排): https://dash.voyageai.com/
+- SiliconFlow (结构化抽取): https://cloud.siliconflow.cn/
 ```
 
 ---
@@ -85,14 +85,14 @@ Sigil 亦化身为 OpenClaw 气海之元婴法宝。
 **颁下此旨，着 OpenClaw 内阁自理：**
 
 ```text
-速速施展连环符，将 Sigil 融入 OpenClaw 奇经八脉。
+请协助执行自动化安装流，在 OpenClaw 中扩展部署 Sigil 组件。
 
-1. 直起法阵：
+1. 直接运行部署脚本：
    bash -c "$(curl -fsSL https://raw.githubusercontent.com/kckylechen1/sigil/main/scripts/install_openclaw_ext.sh)"
 
-2. 此咒自动寻脉夺宝、熔铸 Rust NAPI 金丹、试演锋芒，并于 extensions 洞府打下虚空烙印（软链接）。
+2. 此脚本将负责拉取代码与编译原生的 Rust NAPI 库，进行集成验证并在 extensions 库中建立软链接。
 
-3. 事毕，解开 `plugins.allow` 禁制，将 `plugins.slots.memory` 皈依为 `memory-hybrid-bridge`。终以 `.env` 补齐灵气。
+3. 执行完成后请打开 `plugins.allow` 参数权限，并将 `plugins.slots.memory` 设置为 `memory-hybrid-bridge`。最后通过 `.env` 追加相关 Token。
 ```
 
 ---
@@ -200,10 +200,10 @@ graph TD
 ```python
 from memory_core_py import MemoryStore, SearchParams, MemoryEntry
 
-# 开辟洞府
+# 初始化持久化存储节点
 store = MemoryStore("~/.sigil/memory.db")
 
-# 烙下禁咒
+# 写入结构化知识与关系
 store.save_memory(MemoryEntry(
     text="前端项目强制使用 React 与 Vite 构建，严禁混入 Webpack 相关生态配置。支持 Tailwind。",
     path="/user/project_preferences",
@@ -211,27 +211,27 @@ store.save_memory(MemoryEntry(
     keywords=["react", "vite", "webpack", "tailwind"]
 ))
 
-# 四象阵起
+# 调用原生多路混合检索
 results = store._search(SearchParams(
     query="针对当前工程构建工具的禁忌有哪些？",
     path_prefix="/user",
     top_k=3
 ))
 
-# 浮取 L0 真水
+# 输出提纯后的精简概要
 print(results[0].l0_summary)
 ```
 
 ### ⚙️ 九、 天地灵气配置 (`.env`)
-取 `.env.example` 洗髓得 `.env`：
+取 `.env.example` 为 `.env`：
 ```bash
-# 航星阁通天玉佩
+# Core 向量查询底座
 VOYAGE_API_KEY="your_voyage_key_here"
 
-# 硅基流御赐金牌
+# 大模型抽取层与清洗归置
 SILICONFLOW_API_KEY="your_siliconflow_key_here"
 
-# 须弥纳子之地 (机选)
+# 本地 SQLite 文件路径 (可选配置)
 MEMORY_DB_PATH="~/.sigil/memory.db"
 ```
 
