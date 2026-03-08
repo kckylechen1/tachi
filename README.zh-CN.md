@@ -26,8 +26,8 @@
 - [因果工作台与记忆关联](#-因果工作台与记忆关联)
 - [系统架构](#-系统架构)
 - [模型栈](#-模型栈)
-- [快速开始: 面向 Coding Agents (MCP)](#-快速开始-面向-coding-agents-mcp)
-- [快速开始: 面向 OpenClaw 框架](#-快速开始-面向-openclaw-框架)
+- [快速开始: Coding Agents (MCP)](#-快速开始-coding-agents-mcp)
+- [快速开始: OpenClaw 框架](#-快速开始-openclaw-框架)
 - [代码接入与 APIs](#-代码接入与-apis)
 - [环境变量配置](#-环境变量配置)
 - [性能基准](#-性能基准)
@@ -38,44 +38,44 @@
 
 ## 💡 概览
 
-**Sigil**（魔法刻印/符文）是一个专门为纯自主智能体（Autonomous AI Agents）设计的一体化上下文和记忆管理系统。
+**Sigil** 是一个专为全自主智能体（Autonomous AI Agents）设计的嵌入式上下文与记忆管理数据库系统。
 
-目前主流的 AI 智能体记忆模型严重依赖于简单向量数据库和扁平化的片段列表。这不仅会让上下文视窗迅速膨胀导致响应变慢，还会失去长时期的逻辑因果联系。
+当前的 AI 记忆模型大多依赖于向量数据库存储扁平化的文本片段。这种设计极易导致 Agent 的上下文视窗膨胀，并在长时间运行中丢失关键的因果和时间联系。
 
-Sigil 摒弃了简单扁平化的数据结构，转而采用由高度优化的 Rust 代码支撑的**层次化、类似文件系统的管理范式**，并内建了图谱式的因果节点追踪。无论你是搭建标准的 [Model Context Protocol (MCP)](https://modelcontextprotocol.io/) 服务器，还是扩展如 OpenClaw 这样的智能平台，Sigil 都能提供亚毫秒级的并行多通道混合语义检索能力——且**完全不需要依赖任何外部独立数据库**。
+Sigil 引入了由 Rust 高度优化的**层级化、类文件系统管理范式**与**图谱级因果关联**。无论是作为 [Model Context Protocol (MCP)](https://modelcontextprotocol.io/) 服务器独立运行，还是内嵌于 OpenClaw 等原生框架中，Sigil 均能提供亚毫秒级的多模态混合语义检索，且**无需任何外部独立数据库依赖**。
 
 ---
 
 ## ✨ 核心特性
 
-- **⚡ 极速 Rust 内核 (`memory-core`)**：整个检索框架、数据存储、分级提取底层架构完全由 Rust 实现。支持了面向 Node.js (`NAPI-RS`) 和 Python (`PyO3`) 的多边环境原生绑定。
-- **🗂️ 文件系统命名空间范式**：记忆信息会根据层级逻辑进行分治存放。通过 `path` 参数（例如：`/user/preferences`, `/project/architecture`）对记忆块进行结构化约束隔离。
+- **⚡ 高性能 Rust 内核 (`memory-core`)**：计分、存储、实体提取与检索等底层引擎完全由 Rust 实现，并为 Node.js (`NAPI-RS`) 和 Python (`PyO3`) 提供原生高性能绑定。
+- **🗂️ 文件系统命名空间**：记忆信息摒弃扁平存储，采用 `path` 路径参数（如 `/user/preferences`, `/project/architecture`）进行拓扑层级管理，有效实现业务数据的隔离与精准定向。
 - **🔍 四通道混合搜索引擎**：
-  - **语义级（Semantic）**：内置 Voyage-4 向量处理，通过 `sqlite-vec` 形成 KNN 精准网络。
-  - **词法级（Lexical）**：C 级别构建的 CJK（中日韩文）专用分词，由 `libsimple` + `FTS5` 双生执行。
-  - **符号级（Symbolic）**：结构化的属性匹配（针对精确实体、参数、关键字配置）。
-  - **遗忘曲线（Decay）**：启发自 ACT-R 经典认知模型的时间惩罚衰减。
-- **🎯 交叉重排序（Reranking）**：在四个通道并行召回信息后，会自动激活行业顶尖的 Voyage Rerank-2.5 交叉编码器对混合候选结果实施最终调配。
-- **🧠 三级自适应上下文坍缩**：自主把内容抽取出三个级别：`L0` (一句话核心), `L1` (段落摘要),  和 `L2` (完全内容备份)，极致节省模型的重复阅读成本与 Tokens 开销。
-- **🔌 零运维负担体系**：所有数据闭环封装在一个单一的 SQLite 文件内 (`memory.db`)。不需要 Redis、不需要 Neo4j 分图、也不需要起个 ChromaDB。
+  - **语义级（Semantic）**：内建基于 `sqlite-vec` 的 Voyage-4 向量聚类查询（KNN）。
+  - **词法级（Lexical）**：基于 `libsimple` 和 `FTS5` 构建优化的 CJK（中日韩文）全文索引库。
+  - **符号级（Symbolic）**：精准的关键字匹配与分类标签查询。
+  - **遗忘曲线（Decay）**：借鉴 ACT-R 经典认知模型的时间惩罚衰减机制。
+- **🎯 交叉重排（Reranking）**：在四个检索通道输出候选后，系统自动调用 Voyage Rerank-2.5 交叉编码器进行深度重排，最大化命中精度。
+- **🧠 三级自适应上下文分层**：数据接入时将自动被提纯为三个深度：`L0`（摘要提要）, `L1`（段落概览）, 与 `L2`（完整内容）。Agent 可根据当前操作紧急度选取最低成本的维度读取。
+- **🔌 零外部依赖部署**：所有数据被安全封装于单一的 SQLite 原生文件库（`memory.db`）中。无需部署 Redis、Neo4j 或 ChromaDB 等中间组件。
 
 ---
 
 ## ⚙️ 因果工作台与记忆关联
 
-自 `0.2.0` 版本起，Sigil 引入了过往仅在企业级图数据库中存在的深度推理管道组件：
+为保证 Agent 系统级别的长期逻辑稳定性，Sigil 引入了深度推理组件：
 
 ### 1. 结构化因果提取管道 (The Causal Extraction Pipeline)
-当 Agent 抛下大量单轮执行记录给后台时，完全异步挂载的因果工作台将启动。通过 SiliconFlow 平台接入 **Qwen3.5-27B** 智算框架，它深度解构 Agent 本次的输出以提取：
-*   `Causes`：本次交互操作的直接触发动机和原场景。
-*   `Decisions`：采取该方案背后的思考路径。
-*   `Results`：坚实的执行结果结语。
-*   `Impacts`：对此前历史或工作空间可能存在的长远波及影响。
+当 Agent 完成一轮复杂交互后，Sigil 的完全异步工作站将被唤醒。利用通过 SiliconFlow 接入的 **Qwen3.5-27B** 模型，工具站将解构 Agent 的日志并提取：
+*   `Causes`：触发本次操作的根本起因。
+*   `Decisions`：采取方案背后的推演逻辑。
+*   `Results`：落地的具体结果状态。
+*   `Impacts`：对空间可能存在的前置及后置波及影响。
 
-这就彻底解决了所谓的 “Agent 遗忘症”—— 现有很多 AI 可能会记住“它改了什么代码”，但过两天它就会忘记“它为什么当初要这么改”。
+有效防范“AI 失忆症”，让 Agent 记住制定架构变更背后的宏观逻辑，而非仅仅是局部的代码改动点。
 
-### 2. 原生记忆拓扑关联 (Memory Relations)
-底层 SQLite 表格中会显式挂载节点链接网络。从底层逻辑建立相互依存的事实网。即使 AI 只提及了子分支的问题线索，它也能平滑顺藤摸瓜地回溯整个依赖架构。
+### 2. 原生记忆关联拓扑 (Memory Relations)
+底层存储层通过图谱数据模型隐式链接独立的事实卡片。这一设计使得 LLM 能够平滑顺藤摸瓜地回溯整个依赖架构与历史背景，而不会使得单次请求超过有限的 Token 支持上限。
 
 ---
 
@@ -91,7 +91,7 @@ graph TD
 
     subgraph Operations["异步工作站 (Python/Node)"]
         EXTRACT["事实提取器 (Qwen)"]
-        DISTILL["上下文蒸馏器 (GLM-4V)"]
+        DISTILL["上下文蒸馏器 (Qwen)"]
         CAUSAL["因果关系流水线"]
         CONSOLIDATE["记忆碎片合并清理站"]
     end
@@ -130,103 +130,108 @@ graph TD
 
 ## 🧩 模型栈
 
-历经上千次内部测试与实打实的研发应用消耗对抗，在此为您奉上我们所推崇的选型推荐：
+经过严苛测试，以下是系统默认推荐的组件栈模型，能够在延迟、质量与计算成本中取得最佳平衡：
 
-| 职位角色 | 推荐选用方案 | 选型原由底气 |
+| 职位角色 | 推荐选用方案 | 原理说明 |
 |------|-------------------|------------------|
-| **特征向量 (Embedding)** | [Voyage-4](https://voyageai.com/) | 1024高维度向量呈现，其多语种文本匹配程度当下一流。**注册后直接享受 200M 免费基础分账额度**。 |
-| **打分重排序 (Reranking)** | [Voyage Rerank-2.5](https://voyageai.com/) | 在海量基础检索后的深度互注意力校验提峰利器。和前一项共用一条 API Key。 |
-| **因果关系提取中枢** | [Qwen3.5-27B](https://cloud.siliconflow.cn/i/QwFqsLF1) 分片部署 | 经过针对 JSON 数据校验、深度从句抽取极高鲁棒性对比的脱颖胜出者！其在硅基流动的注册即赠额度绝对亲民。 |
-| **句级快摄 (Summarization)** | [Qwen3.5-27B](https://cloud.siliconflow.cn/i/QwFqsLF1) | 极速 L0 级一句话摘要生成。 |
-| **全局蒸馏 (Distillation)** | [Qwen3.5-27B](https://cloud.siliconflow.cn/i/QwFqsLF1) | 周期性全局图谱与规则蒸馏衍生。 |
+| **特征向量 (Embedding)** | [Voyage-4](https://voyageai.com/) | 1024 高维度向量输出，提供领先的多语种文本检索能力。 |
+| **打分重排 (Reranking)** | [Voyage Rerank-2.5](https://voyageai.com/) | 检索引擎初筛后的深度交叉验证，共用 Voyage 密钥环境。 |
+| **逻辑提取与快摄 (Extraction & Summarization)** | [Qwen3.5-27B](https://cloud.siliconflow.cn/i/QwFqsLF1) 分片部署 | 面向高精度 JSON 数据集校验、L0 简要提取提供的强大因果推理能力。 |
+| **全局蒸馏 (Distillation)** | [Qwen3.5-27B](https://cloud.siliconflow.cn/i/QwFqsLF1) 分片部署 | 用于梳理高层级跨场景行为图谱及全局规则统一沉淀。 |
 
 ---
 
-## 🤖 快速开始: 面向 Coding Agents (MCP 协议)
+## 🤖 快速开始: Coding Agents (MCP 协议)
 
-如果你使用的是 Claude Desktop, Cursor, 或 AutoGen 等开发伴侣，可以直接使用全自动封装好的 MCP 服务器。**给 AI 发送以下指令让他自行搭建：**
+对于使用 Claude Desktop, Cursor, 或是 AutoGen 等框架的用户，Sigil 提供了基于模型上下文协议（MCP）的开箱即用支持。
+
+**将以下系统指令输入给你的个人 AI Assistant 进行自动部署：**
 
 ```text
-帮我安装配置 Sigil —— 一个 AI agent 本地记忆系统。
+请协助我配置安装 Sigil (MCP 记忆服务器)：
 
 1. 克隆仓库: git clone https://github.com/kckylechen1/sigil.git && cd sigil
-2. 搭建 MCP server (执行虚拟环境与构建):
+2. 构建服务端与环境:
    cd mcp && python3 -m venv .venv && source .venv/bin/activate
    cd ../crates/memory-python && pip install maturin && maturin develop --release
    cd ../../mcp && pip install -r requirements.txt
-3. 在我的 mcp_config.json 里追加:
+3. 将以下配置追加至 mcp_config.json 配置文件中:
    {
      "mcpServers": {
        "memory": {
-         "command": "<绝对路径指向>/sigil/mcp/.venv/bin/python3",
-         "args": ["<绝对路径指向>/sigil/mcp/server.py"]
+         "command": "<使用绝对路径指向>/sigil/mcp/.venv/bin/python3",
+         "args": ["<使用绝对路径指向>/sigil/mcp/server.py"]
        }
      }
    }
 
-程序会在其主目录读取 .env 文件的变量体系参数，所以你无需在上面的 json 书写复杂的 env 对象。
-如果本人尚未有 Voyage 或 SiliconFlow 的相关参数，请协助用户前去开户：
-- Voyage API（向量嵌入+重排）: https://dash.voyageai.com/ — 免费 2 亿 tokens，无需信用卡绑定限制
-- SiliconFlow（事实提取）: https://cloud.siliconflow.cn/i/QwFqsLF1 — 新注册即有免费调用量
+程序将依据主目录的 .env 文件挂载环境变量。
+依赖服务清单：
+- Voyage API (向量与重排): https://dash.voyageai.com/
+- SiliconFlow (结构化抽取): https://cloud.siliconflow.cn/
 ```
 
 ---
 
-## 🦞 快速开始: 面向 OpenClaw 框架
+## 🦞 快速开始: OpenClaw 框架
 
-Sigil 作为最核心的记忆力外壳插件运行于您的节点架构之内。**将其发至终端或是对话窗交由 Agent：**
+Sigil 支持以外部扩展插件的形式桥接运行于 OpenClaw 内核。
+
+**将以下指令发送至你的 OpenClaw 对话窗交由 Agent 处理：**
 
 ```text
-帮我用一键脚本安装 Sigil 作为 OpenClaw 的本地扩展。
+请协助执行自动化安装流，在 OpenClaw 中扩展部署 Sigil 组件。
 
-1. 直接唤起仓库部署流：
+1. 直接运行部署脚本：
    bash -c "$(curl -fsSL https://raw.githubusercontent.com/kckylechen1/sigil/main/scripts/install_openclaw_ext.sh)"
 
-2. 此套安装链将接替全管包下载、构建 NAPI-RS 高层封装库映射，完成基本冒烟测试（Smoke-test）并通过 Symlink 对齐到主进程下的 extensions 目标库。
+2. 此脚本将负责拉取代码与编译原生的 Rust NAPI 库，进行集成验证并在 extensions 库中建立软链接。
 
-3. 执行无误之后记得追加开启权限开关 `plugins.allow` 并在 `plugins.slots.memory` 设置指定节点为 `memory-hybrid-bridge`。最后完善 `.env` 各项钥匙串值。
+3. 执行完成后请打开 `plugins.allow` 参数权限，并将 `plugins.slots.memory` 设置为 `memory-hybrid-bridge`。最后通过 `.env` 追加相关 Token。
 ```
 
 ---
 
 ## 💻 代码接入与 APIs
 
-倘若您想在原生应用中内嵌本存储矩阵引擎：
+供开发者在原生环境中直接内嵌使用核心引流层：
 
-### ⚙️ Python Environment (`mcp/server.py` 同效类)
+### ⚙️ Python Environment (`mcp/server.py` 示例)
 ```python
 from memory_core_py import MemoryStore, SearchParams, MemoryEntry
 
-# 根基生成
+# 初始化持久化存储节点
 store = MemoryStore("~/.sigil/memory.db")
 
-# 单条压入记录信息
+# 写入结构化知识与关系
 store.save_memory(MemoryEntry(
-    text="项目选用了带有 Vite 支撑特性的非典前端 React。禁止向业务掺离 Webpack 代码。可以准入 Tailwind 等样式生成器。",
+    text="前端项目强制使用 React 与 Vite 构建，严禁混入 Webpack 相关生态配置。支持 Tailwind。",
     path="/user/project_preferences",
     importance=0.8,
     keywords=["react", "vite", "webpack", "tailwind"]
 ))
 
-# 实施高维度联合查询检索
+# 调用原生多路混合检索
 results = store._search(SearchParams(
-    query="这个项目的打包工具有什么特别的倾向吗？",
+    query="针对当前工程构建工具的禁忌有哪些？",
     path_prefix="/user",
     top_k=3
 ))
-print(results[0].l0_summary) # 只输出极致凝炼的中心要义点
+
+# 输出提纯后的精简概要版本
+print(results[0].l0_summary)
 ```
 
 ### ⚙️ 环境变量配置 (`.env`)
-通过拷贝根目录下 `.env.example` 为 `.env` 实现：
+通过拷贝根目录下 `.env.example` 文件作为 `.env` 参数映射。
 ```bash
-# 此处支撑整个大矩阵寻路检索及精确化纠偏
-VOYAGE_API_KEY="您的_voyage_api_密钥"
+# Core 向量查询底座
+VOYAGE_API_KEY="your_voyage_key_here"
 
-# 面向推理、结构关系抽离，或段落切片
-SILICONFLOW_API_KEY="您的_silicon_flow_密钥"
+# 大模型抽取层与清洗归置
+SILICONFLOW_API_KEY="your_siliconflow_key_here"
 
-# 数据库生成绝对地址
+# 本地 SQLite 文件相对绝对部署区 (可选配置)
 MEMORY_DB_PATH="~/.sigil/memory.db"
 ```
 
@@ -234,21 +239,21 @@ MEMORY_DB_PATH="~/.sigil/memory.db"
 
 ## 🏎️ 性能基准 (Benchmarks)
 
-- **原生执行 P95 查询延迟线 (Rust)**：绝大查询将不触发 `1.2ms` 障碍墙。
-- **并发抽取分离**：经设计打磨完毕的线程池（ThreadPool）完美隔离计算节点对主网流与核心数据检索链的堵车隐患。
-- **极度降低废弃 Token 率**：我们所自研的分级切块策略（`L0` → `L1` → `L2`）横向实测相较于一般传统长文本死板的 RAG 挂载法大幅缩减超 **85%** 上下文环境包袱累赘。使得大型 LLM 返回更稳定、遵循度表现直线上升。
+- **原生核心响应 (P95)**：单一混合调度的检索耗时保持在 `< 1.2ms` 范畴。
+- **并发提取剥离**：底层的 Python ThreadPool 与协程彻底屏蔽在提取计算时的网络瓶颈，消除对于主事件循环的任何 IO 干扰。
+- **Token 保真与利用率**：分层策略 (`L0` → `L1` → `L2`) 搭配严格剪枝，相较传统基于死板文本块的 RAG 设计可大幅降低近 **85%** 的上下文冗余，显著提高大语言模型的指令依从性。
 
 ---
 
 ## 🤝 贡献指南
 
-任何开源的 PRs 或建设意见都是我们求之不得的财富。若是需要在本地构建起开发基线：
-1. 你的电脑上最起码应该需要含有新世代版本的 Rust 链条 (`rustc>=1.75`)。
-2. 安装对应所需的依赖工具库 `maturin` 以及 `cargo-watch` 提供辅助。
-3. 可于主脉核心部分 `crates/memory-core/src/lib.rs` 切入。
-4. 提供最终合拢合并之前请务必要确保证过掉全部基础检查：`cargo test --all`。
+我们期待社区的代码提交与架构优化方案。要在本地设立核心开发构建环境：
+1. 请确保系统中安装了支持最新版规范的 Rust 编译器 (`rustc>=1.75`)。
+2. 安装环境所需的 `maturin` 以及 `cargo-watch` 库。
+3. 数据基石入口请查阅：`crates/memory-core/src/lib.rs`。
+4. 在任何变更提报前，请落实通过全部编译时断言与代码检查：`cargo test --all`。
 
-提交纪要格式务必迎合 [Conventional Commits](https://www.conventionalcommits.org/) 的基本规范准则。
+请确保所有提交日志遵循 [Conventional Commits](https://www.conventionalcommits.org/) 的基本规范准则。
 
 ---
 
