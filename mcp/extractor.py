@@ -13,6 +13,7 @@ load_dotenv(os.path.expanduser("~/.secrets/master.env"))
 SILICONFLOW_API_KEY = os.environ.get("SILICONFLOW_API_KEY", "") or os.environ.get("ZHIPU_API_KEY", "")
 SILICONFLOW_BASE_URL = os.environ.get("SILICONFLOW_BASE_URL", os.environ.get("EXTRACTOR_BASE_URL", "https://api.siliconflow.cn/v1"))
 SILICONFLOW_MODEL = os.environ.get("SILICONFLOW_MODEL", os.environ.get("EXTRACTOR_MODEL", "Qwen/Qwen3.5-27B"))
+SUMMARY_MODEL = os.environ.get("SUMMARY_MODEL", SILICONFLOW_MODEL)
 
 EXTRACTION_PROMPT = """你是一个记忆提取代理。从对话/文档中提取值得**长期记忆**的离散事实。
 
@@ -126,7 +127,7 @@ async def generate_summary(text: str) -> str:
                 {"role": "system", "content": "You are a summarization agent. Compress the given text into a single precisely worded sentence that captures the core fact or point. Do not use conversational filler, quotes, or markdown. Use the same language as the input text."},
                 {"role": "user", "content": text},
             ],
-            model="glm-4v-flash",
+            model=SUMMARY_MODEL,
             temperature=0.1,
             max_tokens=100,
             timeout=30,

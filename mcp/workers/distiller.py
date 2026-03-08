@@ -37,7 +37,7 @@ class DistillerWorker(BaseWorker):
         conn: MemoryStore | None = None,
     ) -> None:
         super().__init__(db_path=db_path, poll_interval=poll_interval, conn=conn)
-        self.model = os.environ.get("DISTILLER_MODEL", "THUDM/glm-5")
+        self.model = os.environ.get("DISTILLER_MODEL", extractor.SILICONFLOW_MODEL)
 
     @staticmethod
     def _parse_rules(content: str) -> list[str]:
