@@ -4,7 +4,7 @@
   <p><strong>A Fast, Local-First Context & Memory Database for Autonomous AI Agents</strong></p>
 
   <p>
-    <a href="README.md"><b>English</b></a> | <a href="README.zh-CN.md">简体中文</a>
+    <a href="README.md"><b>English</b></a> | <a href="README.zh-CN.md">简体中文</a> | <a href="README.lzh.md">文言文</a>
   </p>
 
   <p>
