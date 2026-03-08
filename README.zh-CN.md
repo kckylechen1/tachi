@@ -8,7 +8,7 @@
   </p>
 
   <p>
-    <a href="https://www.gnu.org/licenses/gpl-3.0"><img src="https://img.shields.io/badge/License-GPLv3-blue.svg" alt="License: GPLv3"></a>
+    <a href="https://www.gnu.org/licenses/agpl-3.0"><img src="https://img.shields.io/badge/License-AGPLv3-blue.svg" alt="License: AGPLv3"></a>
     <img src="https://img.shields.io/badge/Language-Rust_Edition_2021-orange.svg" alt="Language: Rust">
     <img src="https://img.shields.io/badge/Python-3.10%2B-blue.svg" alt="Python Version">
     <img src="https://img.shields.io/badge/Integration-MCP_Server-purple" alt="Integration: MCP">
@@ -253,4 +253,4 @@ MEMORY_DB_PATH="~/.sigil/memory.db"
 
 ## 📜 开源协议
 
-基于 [GPLv3 License](LICENSE) © 2026 Sigil Authors。
+基于 [AGPLv3 License](LICENSE) © 2026 Sigil Authors。
