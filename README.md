@@ -137,8 +137,8 @@ We have tested countless models to find the perfect tradeoff between latency, qu
 | **Embedding** | [Voyage-4](https://voyageai.com/) | 1024d vectors, top-tier multilingual retrieval. **200M free tokens** on signup. |
 | **Reranking** | [Voyage Rerank-2.5](https://voyageai.com/) | Cross-encoder precision boost after hybrid recall. Same API key as embedding. |
 | **Fact/Causal Extraction** | [Qwen3.5-27B](https://cloud.siliconflow.cn/) (SiliconFlow) | Phenomenal accuracy for structured JSON parsing and causal reasoning. Generous free tier. |
-| **Summarization** | GLM-4V-Flash | Ultra-fast L0 one-sentence abstract generation (Fallbacks to `SILICONFLOW_MODEL`). |
-| **Distillation** | GLM-5 | Periodic global schema & rule derivation (Fallbacks to `SILICONFLOW_MODEL`). |
+| **Summarization** | [Qwen3.5-27B](https://cloud.siliconflow.cn/) | Ultra-fast L0 one-sentence abstract generation. |
+| **Distillation** | [Qwen3.5-27B](https://cloud.siliconflow.cn/) | Periodic global schema & rule derivation. |
 
 ---
 

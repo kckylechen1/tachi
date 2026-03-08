@@ -137,8 +137,8 @@ graph TD
 | **特征向量 (Embedding)** | [Voyage-4](https://voyageai.com/) | 1024高维度向量呈现，其多语种文本匹配程度当下一流。**注册后直接享受 200M 免费基础分账额度**。 |
 | **打分重排序 (Reranking)** | [Voyage Rerank-2.5](https://voyageai.com/) | 在海量基础检索后的深度互注意力校验提峰利器。和前一项共用一条 API Key。 |
 | **因果关系提取中枢** | [Qwen3.5-27B](https://cloud.siliconflow.cn/i/QwFqsLF1) 分片部署 | 经过针对 JSON 数据校验、深度从句抽取极高鲁棒性对比的脱颖胜出者！其在硅基流动的注册即赠额度绝对亲民。 |
-| **句级快摄 (Summarization)** | GLM-4V-Flash (或自动降级为主模型 Qwen) | 极速 L0 级一句话摘要生成。 |
-| **全局蒸馏 (Distillation)** | GLM-5 (或自动降级为主模型 Qwen) | 周期性全局图谱与规则蒸馏衍生。 |
+| **句级快摄 (Summarization)** | [Qwen3.5-27B](https://cloud.siliconflow.cn/i/QwFqsLF1) | 极速 L0 级一句话摘要生成。 |
+| **全局蒸馏 (Distillation)** | [Qwen3.5-27B](https://cloud.siliconflow.cn/i/QwFqsLF1) | 周期性全局图谱与规则蒸馏衍生。 |
 
 ---
 
