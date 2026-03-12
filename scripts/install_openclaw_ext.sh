@@ -66,10 +66,13 @@ node -e "import('node:url').then(({ pathToFileURL }) => import(pathToFileURL(pro
 
 echo ""
 # 4. Symlink to OpenClaw
-OPENCLAW_EXT_DIR="$HOME/.openclaw/local-plugins/extensions"
+OPENCLAW_EXT_DIR="$HOME/.openclaw/extensions"
+LEGACY_OPENCLAW_EXT_DIR="$HOME/.openclaw/local-plugins/extensions"
 EXT_NAME="memory-hybrid-bridge"
 SYMLINK_PATH="$OPENCLAW_EXT_DIR/$EXT_NAME"
 LEGACY_SYMLINK_PATH="$OPENCLAW_EXT_DIR/sigil-memory"
+OLD_DISCOVERY_PATH="$LEGACY_OPENCLAW_EXT_DIR/$EXT_NAME"
+OLD_LEGACY_DISCOVERY_PATH="$LEGACY_OPENCLAW_EXT_DIR/sigil-memory"
 
 echo ">> Setting up OpenClaw extension..."
 mkdir -p "$OPENCLAW_EXT_DIR"
@@ -83,10 +86,24 @@ elif [ -e "$SYMLINK_PATH" ]; then
 fi
 
 if [ -L "$LEGACY_SYMLINK_PATH" ]; then
-    echo "   Removing legacy symlink $LEGACY_SYMLINK_PATH..."
-    rm "$LEGACY_SYMLINK_PATH"
+  echo "   Removing legacy symlink $LEGACY_SYMLINK_PATH..."
+  rm "$LEGACY_SYMLINK_PATH"
 elif [ -e "$LEGACY_SYMLINK_PATH" ]; then
-    echo "   Leaving existing legacy path untouched: $LEGACY_SYMLINK_PATH"
+  echo "   Leaving existing legacy path untouched: $LEGACY_SYMLINK_PATH"
+fi
+
+if [ -L "$OLD_DISCOVERY_PATH" ]; then
+  echo "   Removing deprecated discovery symlink $OLD_DISCOVERY_PATH..."
+  rm "$OLD_DISCOVERY_PATH"
+elif [ -e "$OLD_DISCOVERY_PATH" ]; then
+  echo "   Leaving existing deprecated path untouched: $OLD_DISCOVERY_PATH"
+fi
+
+if [ -L "$OLD_LEGACY_DISCOVERY_PATH" ]; then
+  echo "   Removing deprecated legacy symlink $OLD_LEGACY_DISCOVERY_PATH..."
+  rm "$OLD_LEGACY_DISCOVERY_PATH"
+elif [ -e "$OLD_LEGACY_DISCOVERY_PATH" ]; then
+  echo "   Leaving existing deprecated legacy path untouched: $OLD_LEGACY_DISCOVERY_PATH"
 fi
 
 ln -s "$OPENCLAW_PLUGIN_DIR" "$SYMLINK_PATH"

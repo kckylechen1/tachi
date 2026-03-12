@@ -31,6 +31,8 @@
 - `data/shadow-store.jsonl`：记忆存储（运行时）
 - `data/audit-log.jsonl`：审计日志（运行时）
 
+默认情况下，运行时数据现在固定落在插件目录下的 `data/`，不再依赖 OpenClaw 的当前工作目录；否则在某些启动方式下会被错误解析到 `/data` 一类根路径。
+
 ## 环境变量（可选）
 
 - `MEMORY_BRIDGE_DEDUP_THRESHOLD`（默认 0.9）
@@ -46,7 +48,7 @@
 ## 最小验证命令
 
 ````bash
-cd /Users/kckylechen/.openclaw/workspace/extensions/memory-hybrid-bridge
+cd /Users/kckylechen/.openclaw/extensions/memory-hybrid-bridge
 npm run typecheck
 
 # 1) Prompt fallback（临时改名 prompt 文件后再恢复）
@@ -63,5 +65,5 @@ node -e "import('./index.ts').then(m=>console.log('extension loaded', typeof m.d
 
 1. 在插件配置中禁用 `memory-hybrid-bridge`。
 2. 如需清理数据：删除
-   - `extensions/memory-hybrid-bridge/data/shadow-store.jsonl`
-   - `extensions/memory-hybrid-bridge/data/audit-log.jsonl`
+   - `~/.openclaw/extensions/memory-hybrid-bridge/data/shadow-store.jsonl`
+   - `~/.openclaw/extensions/memory-hybrid-bridge/data/audit-log.jsonl`

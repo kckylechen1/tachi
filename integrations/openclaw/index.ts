@@ -3,7 +3,7 @@ import path from "node:path";
 import { Type } from "@sinclair/typebox";
 // @ts-ignore
 import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
-import { bridgeConfigSchema, type MemoryEntry } from "./config.js";
+import { bridgeConfigSchema, pluginDataDir, workspaceRoot, type MemoryEntry } from "./config.js";
 import { extractMemoryEntry, getEmbedding, mergeMemoryEntries } from "./extractor.js";
 import { getStore, MemoryStore } from "./store.js";
 // @ts-ignore — reranker is plain JS
@@ -31,6 +31,10 @@ async function appendAuditLog(
   await fs.appendFile(auditLogPath, `${JSON.stringify(line)}\n`, "utf8");
 }
 
+function resolveConfigPath(api: OpenClawPluginApi, configuredPath: string): string {
+  return path.isAbsolute(configuredPath) ? configuredPath : api.resolvePath(configuredPath);
+}
+
 // ============================================================================
 // Plugin Definition
 // ============================================================================
@@ -52,17 +56,17 @@ export const memoryHybridBridgePlugin = {
       const id = agentId || "main";
       if (id === "main" || id === "ops") {
         return {
-          db: api.resolvePath(config.dbPath),
-          shadow: api.resolvePath(config.shadowStorePath),
-          audit: api.resolvePath(config.auditLogPath),
+          db: resolveConfigPath(api, config.dbPath),
+          shadow: resolveConfigPath(api, config.shadowStorePath),
+          audit: resolveConfigPath(api, config.auditLogPath),
         };
       }
 
-      // Per-agent scoped memory directory
-      const agentMemDir = path.resolve(
-        process.env.OPENCLAW_WORKSPACE || process.cwd(),
-        `agents/${id}/memory`,
-      );
+      // Never fall back to process.cwd(); some OpenClaw launches end up at "/",
+      // which would redirect writes into /agents or /data and fail on normal setups.
+      const agentMemDir = workspaceRoot
+        ? path.resolve(workspaceRoot, "agents", id, "memory")
+        : path.resolve(pluginDataDir, "agents", id);
       return {
         db: path.resolve(agentMemDir, "memory.db"),
         shadow: path.resolve(agentMemDir, "shadow-store.jsonl"),

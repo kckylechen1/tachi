@@ -8,7 +8,12 @@ import json, os, sys, time, sqlite3, struct, hashlib
 import httpx
 
 OPENCLAW_ROOT = os.path.expanduser("~/.openclaw")
-DB_PATH = os.path.join(OPENCLAW_ROOT, "workspace/extensions/memory-hybrid-bridge/data/memory.db")
+DEFAULT_DB_PATHS = [
+    os.path.join(OPENCLAW_ROOT, "extensions/memory-hybrid-bridge/data/memory.db"),
+    os.path.join(OPENCLAW_ROOT, "local-plugins/extensions/memory-hybrid-bridge/data/memory.db"),
+    os.path.join(OPENCLAW_ROOT, "workspace/extensions/memory-hybrid-bridge/data/memory.db"),
+]
+DB_PATH = next((p for p in DEFAULT_DB_PATHS if os.path.exists(p)), DEFAULT_DB_PATHS[0])
 
 # Load keys from .env
 def load_env():
@@ -199,4 +204,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

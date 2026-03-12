@@ -1,4 +1,5 @@
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { Type, type Static } from "@sinclair/typebox";
 
 // ============================================================================
@@ -68,16 +69,21 @@ export type BridgeConfig = {
   };
 };
 
-const workspace = process.env.OPENCLAW_WORKSPACE || process.cwd();
+const moduleDir = path.dirname(fileURLToPath(import.meta.url));
+const pluginDataDir = path.resolve(moduleDir, "data");
+const workspaceRoot = process.env.OPENCLAW_WORKSPACE || "";
+const repoRoot = path.resolve(moduleDir, "../..");
 
 export const defaultConfig: BridgeConfig = {
-  promptPath: path.resolve(workspace, "scripts/memory_builder_prompt.txt"),
-  dbPath: path.resolve(workspace, "extensions/memory-hybrid-bridge/data/memory.db"),
+  promptPath: workspaceRoot
+    ? path.resolve(workspaceRoot, "scripts/memory_builder_prompt.txt")
+    : path.resolve(repoRoot, "scripts/memory_builder_prompt.txt"),
+  dbPath: path.resolve(pluginDataDir, "memory.db"),
   shadowStorePath: path.resolve(
-    workspace,
-    "extensions/memory-hybrid-bridge/data/shadow-store.jsonl",
+    pluginDataDir,
+    "shadow-store.jsonl",
   ),
-  auditLogPath: path.resolve(workspace, "extensions/memory-hybrid-bridge/data/audit-log.jsonl"),
+  auditLogPath: path.resolve(pluginDataDir, "audit-log.jsonl"),
   topK: 6,
   searchReadLimit: Number(process.env.MEMORY_BRIDGE_SEARCH_READ_LIMIT || 2000),
   dedupThreshold: Number(process.env.MEMORY_BRIDGE_DEDUP_THRESHOLD || 0.95),
@@ -136,3 +142,5 @@ export const bridgeConfigSchema = {
     };
   },
 };
+
+export { moduleDir as pluginDir, pluginDataDir, workspaceRoot };
