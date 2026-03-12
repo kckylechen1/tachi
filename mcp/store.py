@@ -1,6 +1,19 @@
 """
 SQLite + sqlite-vec storage layer for Antigravity Memory MCP.
 Now powered by Rust-based memory-core-py.
+
+Dedup strategy (based on research):
+  >= 0.96  → hard skip (near-exact duplicate, A-Mem / arXiv 2602.00959)
+  0.75-0.96 → evolve: upsert with source='update' (A-Mem NeurIPS 2025)
+  < 0.75   → insert as new memory
+
+Ref:
+  - A-Mem: Agentic Memory for LLM Agents (NeurIPS 2025)
+    https://openreview.net/forum?id=FiM0M8gcct
+  - Probing Knowledge Boundary (arXiv 2602.00959, 2025)
+    https://arxiv.org/abs/2602.00959
+  - Synapse: Episodic-Semantic Memory for LLM Agents (arXiv 2601.02744)
+    https://arxiv.org/abs/2601.02744
 """
 
 import json
@@ -13,6 +26,16 @@ from typing import Any
 from memory_core_py import MemoryStore
 
 DB_PATH = os.environ.get("MEMORY_DB_PATH", os.path.expanduser("~/.sigil/memory.db"))
+
+# ── Dedup thresholds ─────────────────────────────────────────────────────────
+# Inspired by A-Mem (NeurIPS 2025) and arXiv:2602.00959:
+#   cosine >= HARD_SKIP  → true duplicate, silently drop
+#   cosine >= EVOLVE     → semantically related update, overwrite existing
+#   cosine <  EVOLVE     → new knowledge, insert fresh
+HARD_SKIP_THRESHOLD = float(os.environ.get("MEMORY_DEDUP_HARD_SKIP", "0.96"))
+EVOLVE_THRESHOLD    = float(os.environ.get("MEMORY_DEDUP_EVOLVE",    "0.75"))
+# ─────────────────────────────────────────────────────────────────────────────
+
 
 def get_connection() -> MemoryStore:
     """Get a database connection powered by the Rust memory-core backend."""
@@ -36,11 +59,19 @@ def save_memory(
     source: str = "manual",
     metadata: dict[str, Any] | None = None,
 ) -> dict | None:
-    """Save a memory entry. Returns None if duplicate detected by Rust core."""
+    """
+    Save a memory entry with two-stage dedup (A-Mem / arXiv:2602.00959).
+
+    Returns:
+      dict   → saved/evolved successfully
+      None   → hard-skip (near-exact duplicate, cosine >= HARD_SKIP_THRESHOLD)
+    """
     entry_id = str(uuid.uuid4())
-    now = datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
-    
-    # Check for near-duplicate before inserting (cosine >= 0.92 → skip)
+    now = _utc_now()
+
+    # ── Stage 1: vector similarity check ─────────────────────────────────────
+    top_score: float = 0.0
+    top_existing_id: str | None = None
     try:
         dedup_opts = json.dumps({
             "top_k": 1,
@@ -54,43 +85,61 @@ def save_memory(
         })
         res_str = store.search(text, dedup_opts)
         results = json.loads(res_str)
-        if results and len(results) > 0:
-            if results[0].get("score", {}).get("final", 0) >= 0.92:
-                return None
+        if results:
+            top_score = results[0].get("score", {}).get("final", 0.0)
+            top_existing_id = results[0].get("entry", {}).get("id")
     except Exception:
-        # Empty DB or vec0 not ready — skip dedup, proceed to insert
+        # Empty DB or vec0 not ready — skip dedup entirely, proceed to insert
         pass
-            
-        me = {
-            "id": entry_id,
-            "path": path,
-            "summary": summary,
-            "text": text,
-            "importance": importance,
-            "timestamp": now,
-            "category": "fact", # python side mostly deals with facts
-            "topic": topic,
-            "keywords": keywords or [],
-            "persons": [],
-            "entities": [],
-            "location": "",
-            "source": source,
-            "scope": scope,
-            "vector": vector,
-            "metadata": metadata or {}
-        }
+
+    # ── Stage 2: threshold routing ────────────────────────────────────────────
+    # >= HARD_SKIP (0.96): near-exact duplicate → drop silently
+    if top_score >= HARD_SKIP_THRESHOLD:
+        return None
+
+    # Build the memory entry payload
+    me = {
+        "id": entry_id,
+        "path": path,
+        "summary": summary,
+        "text": text,
+        "importance": importance,
+        "timestamp": now,
+        "category": "fact",
+        "topic": topic,
+        "keywords": keywords or [],
+        "persons": [],
+        "entities": [],
+        "location": "",
+        "source": source,
+        "scope": scope,
+        "vector": vector,
+        "metadata": metadata or {},
+    }
+
+    # EVOLVE_THRESHOLD (0.75) <= score < HARD_SKIP (0.96):
+    # Semantically related but not identical — treat as an evolution/update.
+    # Per A-Mem (NeurIPS 2025): memories should evolve, not be silently dropped.
+    # We reuse the existing ID so the entry is overwritten in-place (upsert).
+    if top_score >= EVOLVE_THRESHOLD and top_existing_id:
+        me["id"] = top_existing_id
+        me["source"] = "update"
+
+    # < EVOLVE_THRESHOLD: genuinely new knowledge → insert with fresh UUID
+    try:
         store.upsert(json.dumps(me))
         return {
-            "id": entry_id, 
-            "text": text, 
-            "path": path, 
-            "summary": summary, 
-            "topic": topic, 
-            "created_at": now
+            "id": me["id"],
+            "text": text,
+            "path": path,
+            "summary": summary,
+            "topic": topic,
+            "created_at": now,
         }
     except Exception as e:
         print(f"Failed to upsert memory: {e}")
-        raise  # Re-raise so server.py can distinguish from dedup skip
+        raise
+
 
 def get_memory(store: MemoryStore, entry_id: str, include_archived: bool = False) -> dict | None:
     """Retrieve full memory by ID."""
@@ -99,7 +148,6 @@ def get_memory(store: MemoryStore, entry_id: str, include_archived: bool = False
         return None
     try:
         data = json.loads(res)
-        # Adapt field names backwards for old MCP code if necessary
         if "timestamp" in data:
             data["created_at"] = data["timestamp"]
         return data
@@ -131,7 +179,6 @@ def search_by_vector(
     try:
         res_str = store.search("", json.dumps(opts))
         results = json.loads(res_str)
-        
         legacy_results = []
         for r in results:
             entry = r["entry"]
@@ -151,9 +198,10 @@ def search_by_vector(
     except Exception:
         return []
 
+
 def search_by_text(
-    store: MemoryStore, 
-    query: str, 
+    store: MemoryStore,
+    query: str,
     top_k: int = 10,
     path_prefix: str = "",
     include_archived: bool = False,
@@ -173,7 +221,6 @@ def search_by_text(
     try:
         res_str = store.search(query, json.dumps(opts))
         results = json.loads(res_str)
-        
         legacy_results = []
         for r in results:
             entry = r["entry"]
@@ -187,12 +234,13 @@ def search_by_text(
                 "scope": entry["scope"],
                 "importance": entry["importance"],
                 "created_at": entry["timestamp"],
-                "fts_rank": r["score"]["fts"], # use inner dimension score as fts_rank proxy 
+                "fts_rank": r["score"]["fts"],
                 "score": r["score"]["final"],
             })
         return legacy_results
     except Exception:
         return []
+
 
 def hybrid_search(
     store: MemoryStore,
@@ -221,7 +269,6 @@ def hybrid_search(
     try:
         res_str = store.search(query_text, json.dumps(opts))
         results = json.loads(res_str)
-        
         legacy_results = []
         for r in results:
             entry = r["entry"]
@@ -242,6 +289,7 @@ def hybrid_search(
         print(f"Hybrid search failed: {e}")
         return []
 
+
 def list_by_path(
     store: MemoryStore,
     path_prefix: str,
@@ -259,13 +307,10 @@ def list_by_path(
 
     try:
         entries = json.loads(store.list_by_path(normalized_path, limit, include_archived))
-
         dirs = set()
         memories = []
-
         for r in entries:
             p = r.get("path", "")
-
             if p == normalized_path:
                 summary = r.get("summary") or (r.get("text", "")[:60] + "...")
                 memories.append({
@@ -276,23 +321,20 @@ def list_by_path(
                     "created_at": r.get("timestamp", ""),
                 })
                 continue
-
             if not p.startswith(child_prefix):
                 continue
-
             rel = p[len(child_prefix):]
             sub_dir = rel.split('/', 1)[0]
             if sub_dir:
                 dirs.add(sub_dir)
-
         return {
             "path": normalized_path,
             "directories": sorted(list(dirs)),
-            "memories": memories
+            "memories": memories,
         }
     except Exception as e:
         print(f"list_by_path failed: {e}")
-        return { "path": normalized_path, "directories": [], "memories": [] }
+        return {"path": normalized_path, "directories": [], "memories": []}
 
 
 def get_stats(store: MemoryStore, include_archived: bool = False) -> dict:
@@ -301,21 +343,16 @@ def get_stats(store: MemoryStore, include_archived: bool = False) -> dict:
         res_str = store.get_all(100000, include_archived)
         all_entries = json.loads(res_str)
         count = len(all_entries)
-        
         scopes = {}
         root_paths = {}
         for r in all_entries:
-            # scope
             s = r.get("scope", "general")
             scopes[s] = scopes.get(s, 0) + 1
-            
-            # path
             p = r.get("path", "/")
             parts = p.split('/')
             if len(parts) > 1 and parts[1]:
                 root_path = f"/{parts[1]}"
                 root_paths[root_path] = root_paths.get(root_path, 0) + 1
-                
         return {
             "total_memories": count,
             "root_paths": root_paths,
@@ -513,8 +550,6 @@ def merge_memory_with_revision(
                     (target_id, blob),
                 )
             except sqlite3.Error:
-                # If sqlite-vec isn't available for this sqlite3 connection,
-                # keep text/fts updates and let future refresh repair vectors.
                 pass
 
         if archive_id:
