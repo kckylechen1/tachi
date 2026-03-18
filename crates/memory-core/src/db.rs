@@ -114,9 +114,6 @@ pub fn init_schema(conn: &Connection) -> Result<(), MemoryError> {
             metadata   TEXT NOT NULL DEFAULT '{}',
             created_at TEXT NOT NULL DEFAULT ''
         );
-        CREATE INDEX IF NOT EXISTS idx_derived_source ON derived_items(source);
-        CREATE INDEX IF NOT EXISTS idx_derived_path ON derived_items(path);
-        CREATE INDEX IF NOT EXISTS idx_derived_created_at ON derived_items(created_at DESC);
     "#)?;
 
     // Forward-compatible migrations for existing DB files created before
@@ -144,11 +141,20 @@ pub fn init_schema(conn: &Connection) -> Result<(), MemoryError> {
     ensure_column(conn, "memory_edges", "valid_from", "TEXT NOT NULL DEFAULT ''")?;
     ensure_column(conn, "memory_edges", "valid_to", "TEXT")?;
 
+    // derived_items columns that may be missing on legacy databases
+    ensure_column(conn, "derived_items", "summary", "TEXT NOT NULL DEFAULT ''")?;
+    ensure_column(conn, "derived_items", "importance", "REAL NOT NULL DEFAULT 0.5")?;
+    ensure_column(conn, "derived_items", "scope", "TEXT NOT NULL DEFAULT 'general'")?;
+    ensure_column(conn, "derived_items", "created_at", "TEXT NOT NULL DEFAULT ''")?;
+
     // Indexes on migrated columns — MUST come after ensure_column so the
     // columns exist on legacy databases that were created without them.
     conn.execute_batch(r#"
         CREATE INDEX IF NOT EXISTS idx_memories_archived    ON memories(archived);
         CREATE INDEX IF NOT EXISTS idx_memories_last_access ON memories(last_access DESC);
+        CREATE INDEX IF NOT EXISTS idx_derived_source       ON derived_items(source);
+        CREATE INDEX IF NOT EXISTS idx_derived_path         ON derived_items(path);
+        CREATE INDEX IF NOT EXISTS idx_derived_created_at   ON derived_items(created_at DESC);
     "#)?;
 
     // Backfill empty values for legacy rows.
