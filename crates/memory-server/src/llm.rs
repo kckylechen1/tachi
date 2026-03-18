@@ -93,6 +93,57 @@ impl LlmClient {
         Ok(vec)
     }
 
+    /// Batch embed multiple texts via Voyage-4 API
+    pub async fn embed_batch(&self, texts: &[String], input_type: &str) -> Result<Vec<Vec<f32>>, String> {
+        let body = serde_json::json!({
+            "model": "voyage-4",
+            "input": texts,
+            "input_type": input_type
+        });
+
+        let response = self
+            .http
+            .post("https://api.voyageai.com/v1/embeddings")
+            .header(reqwest::header::CONTENT_TYPE, "application/json")
+            .header(reqwest::header::AUTHORIZATION, format!("Bearer {}", self.voyage_api_key))
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| format!("Voyage batch API request failed: {}", e))?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let text = response.text().await.unwrap_or_default();
+            return Err(format!("Voyage batch API error: {} - {}", status, text));
+        }
+
+        let json: serde_json::Value = response
+            .json()
+            .await
+            .map_err(|e| format!("Failed to parse Voyage batch response: {}", e))?;
+
+        let data = json["data"]
+            .as_array()
+            .ok_or("Invalid Voyage batch response: missing data")?;
+
+        let mut results = Vec::with_capacity(data.len());
+        for item in data {
+            let embedding = item["embedding"]
+                .as_array()
+                .ok_or("Invalid embedding in batch response")?;
+            let vec: Vec<f32> = embedding
+                .iter()
+                .filter_map(|v| v.as_f64().map(|f| f as f32))
+                .collect();
+            if vec.len() != 1024 {
+                return Err(format!("Expected 1024-dim embedding, got {}", vec.len()));
+            }
+            results.push(vec);
+        }
+
+        Ok(results)
+    }
+
     /// Call SiliconFlow chat API (OpenAI-compatible)
     pub async fn call_llm(
         &self,
@@ -147,6 +198,18 @@ impl LlmClient {
             .trim();
 
         Ok(content.to_string())
+    }
+
+    /// Call SiliconFlow chat API with explicit model override (for causal worker using 27B)
+    pub async fn call_llm_with_model(
+        &self,
+        system: &str,
+        user: &str,
+        model: &str,
+        temperature: f32,
+        max_tokens: u32,
+    ) -> Result<String, String> {
+        self.call_llm(system, user, Some(model), temperature, max_tokens).await
     }
 
     /// Generate L0 summary using SUMMARY_PROMPT

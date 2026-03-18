@@ -7,6 +7,7 @@
 use std::os::unix::io::AsRawFd;
 
 mod llm;
+mod pipeline;
 mod prompts;
 
 use chrono::Utc;
@@ -33,18 +34,23 @@ use tokio_util::sync::CancellationToken;
 struct MemoryServer {
     store: Arc<StdMutex<MemoryStore>>,
     vec_available: bool,
-    llm_client: llm::LlmClient,
+    llm: Arc<llm::LlmClient>,
+    pipeline_enabled: bool,
 }
 
 impl MemoryServer {
     fn new(db_path: PathBuf) -> Result<Self, Box<dyn std::error::Error>> {
         let store = MemoryStore::open(db_path.to_str().unwrap())?;
         let vec_available = store.vec_available;
-        let llm_client = llm::LlmClient::new()?;
+        let llm = Arc::new(llm::LlmClient::new()?);
+        let pipeline_enabled = std::env::var("ENABLE_PIPELINE")
+            .map(|v| v == "true" || v == "1")
+            .unwrap_or(false);
         Ok(Self {
             store: Arc::new(StdMutex::new(store)),
             vec_available,
-            llm_client,
+            llm,
+            pipeline_enabled,
         })
     }
 
@@ -284,13 +290,13 @@ impl MemoryServer {
 
         // Generate L0 summary if not provided
         let summary = if params.summary.is_empty() {
-            self.llm_client.generate_summary(&params.text).await?
+            self.llm.generate_summary(&params.text).await?
         } else {
             params.summary
         };
 
         // Generate embedding (do this BEFORE locking the store)
-        let vector = self.llm_client.embed_voyage(&params.text, "document").await.ok();
+        let vector = self.llm.embed_voyage(&params.text, "document").await.ok();
 
         let entry = MemoryEntry {
             id: id.clone(),
@@ -314,9 +320,21 @@ impl MemoryServer {
             vector,
         };
 
-        let mut store = self.lock_store()?;
-        store.upsert(&entry)
-            .map_err(|e| format!("Failed to save memory: {}", e))?;
+        {
+            let mut store = self.lock_store()?;
+            store
+                .upsert(&entry)
+                .map_err(|e| format!("Failed to save memory: {}", e))?;
+        }
+
+        if self.pipeline_enabled {
+            let store = self.store.clone();
+            let llm = self.llm.clone();
+            let mid = id.clone();
+            tokio::spawn(async move {
+                pipeline::run_consolidator(store, llm, mid).await;
+            });
+        }
 
         serde_json::to_string(&json!({
             "id": id,
@@ -458,7 +476,7 @@ impl MemoryServer {
 
     #[tool(description = "Extract structured facts from text using LLM and save to memory.")]
     async fn extract_facts(&self, #[tool(aggr)] params: ExtractFactsParams) -> Result<String, String> {
-        let facts = self.llm_client.extract_facts(&params.text).await?;
+        let facts = self.llm.extract_facts(&params.text).await?;
         if facts.is_empty() {
             return Ok("No facts extracted.".to_string());
         }
@@ -513,6 +531,8 @@ impl MemoryServer {
 
     #[tool(description = "Ingest a conversation event and extract facts from messages.")]
     async fn ingest_event(&self, #[tool(aggr)] params: IngestEventParams) -> Result<String, String> {
+        let event_id = format!("{}|{}", params.conversation_id, params.turn_id);
+
         // Concatenate message contents for fact extraction
         let combined_text: String = params
             .messages
@@ -525,57 +545,68 @@ impl MemoryServer {
             return Ok("No content to process.".to_string());
         }
 
+        if self.pipeline_enabled {
+            let store = self.store.clone();
+            let llm = self.llm.clone();
+            let msgs = params.messages.clone();
+            let eid = event_id.clone();
+            tokio::spawn(async move {
+                pipeline::run_causal(store, llm, msgs, eid).await;
+            });
+        }
+
         // Reuse extract_facts logic
-        let facts = self.llm_client.extract_facts(&combined_text).await?;
+        let facts = self.llm.extract_facts(&combined_text).await?;
         if facts.is_empty() {
             return Ok("No facts extracted from event.".to_string());
         }
 
-        let mut store = self.lock_store()?;
         let mut saved = 0;
+        {
+            let mut store = self.lock_store()?;
+            for fact in &facts {
+                let text = fact["text"].as_str().unwrap_or("").to_string();
+                if text.is_empty() {
+                    continue;
+                }
 
-        for fact in &facts {
-            let text = fact["text"].as_str().unwrap_or("").to_string();
-            if text.is_empty() {
-                continue;
-            }
+                let topic = fact["topic"].as_str().unwrap_or("").to_string();
+                let importance = fact["importance"].as_f64().unwrap_or(0.7);
+                let keywords: Vec<String> = fact["keywords"]
+                    .as_array()
+                    .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+                    .unwrap_or_default();
+                let scope = fact["scope"].as_str().unwrap_or("general").to_string();
+                let summary = text.chars().take(100).collect::<String>();
 
-            let topic = fact["topic"].as_str().unwrap_or("").to_string();
-            let importance = fact["importance"].as_f64().unwrap_or(0.7);
-            let keywords: Vec<String> = fact["keywords"]
-                .as_array()
-                .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
-                .unwrap_or_default();
-            let scope = fact["scope"].as_str().unwrap_or("general").to_string();
-            let summary = text.chars().take(100).collect::<String>();
+                let entry = MemoryEntry {
+                    id: uuid::Uuid::new_v4().to_string(),
+                    path: format!("/{}/{}", scope, topic.replace(' ', "_")),
+                    summary,
+                    text,
+                    importance,
+                    timestamp: Utc::now().to_rfc3339(),
+                    category: "fact".to_string(),
+                    topic,
+                    keywords,
+                    persons: vec![],
+                    entities: vec![],
+                    location: String::new(),
+                    source: format!("conversation:{}", params.conversation_id),
+                    scope,
+                    archived: false,
+                    access_count: 0,
+                    last_access: None,
+                    metadata: serde_json::json!({
+                        "conversation_id": params.conversation_id,
+                        "turn_id": params.turn_id,
+                    }),
+                    vector: None,
+                };
 
-            let entry = MemoryEntry {
-                id: uuid::Uuid::new_v4().to_string(),
-                path: format!("/{}/{}", scope, topic.replace(' ', "_")),
-                summary,
-                text,
-                importance,
-                timestamp: Utc::now().to_rfc3339(),
-                category: "fact".to_string(),
-                topic,
-                keywords,
-                persons: vec![],
-                entities: vec![],
-                location: String::new(),
-                source: format!("conversation:{}", params.conversation_id),
-                scope,
-                archived: false,
-                access_count: 0,
-                last_access: None,
-                metadata: serde_json::json!({
-                    "conversation_id": params.conversation_id,
-                    "turn_id": params.turn_id,
-                }),
-                vector: None,
-            };
-
-            if store.upsert(&entry).is_ok() {
-                saved += 1;
+                if store.upsert(&entry).is_ok() {
+                    saved += 1;
+                }
             }
         }
 
@@ -591,11 +622,12 @@ impl MemoryServer {
 
         serde_json::to_string(&json!({
             "status": "running",
-            "workers": "rust_sync", // No async workers in Rust yet
+            "workers": if self.pipeline_enabled { "rust_async" } else { "disabled" },
             "total_entries": stats.total,
             "by_scope": stats.by_scope,
             "by_category": stats.by_category,
             "vec_available": self.vec_available,
+            "pipeline_enabled": self.pipeline_enabled,
         }))
         .map_err(|e| format!("Failed to serialize response: {}", e))
     }
@@ -669,6 +701,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let _lock_file = acquire_instance_lock(&lock_path)?;
 
     let server = MemoryServer::new(db_path.clone())?;
+
+    if server.pipeline_enabled {
+        eprintln!("Pipeline workers: ENABLED");
+        let distiller_store = server.store.clone();
+        let distiller_llm = server.llm.clone();
+        tokio::spawn(async move {
+            pipeline::run_distiller(distiller_store, distiller_llm, 7200).await;
+        });
+    } else {
+        eprintln!("Pipeline workers: DISABLED (set ENABLE_PIPELINE=true to enable)");
+    }
 
     // ── Startup integrity check ────────────────────────────────────────────
     {

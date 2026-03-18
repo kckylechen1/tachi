@@ -179,6 +179,42 @@ impl MemoryStore {
         db::graph_expand(&self.conn, seed_ids, max_hops, relation_filter)
     }
 
+    // ─── Derived Items Operations ──────────────────────────────────────────────
+
+    /// Save a derived item (causal extraction, distilled rule, etc.)
+    pub fn save_derived(
+        &self,
+        text: &str,
+        path: &str,
+        summary: &str,
+        importance: f64,
+        source: &str,
+        scope: &str,
+        metadata: &serde_json::Value,
+    ) -> Result<String, MemoryError> {
+        db::save_derived(&self.conn, text, path, summary, importance, source, scope, metadata)
+    }
+
+    /// Count derived items by source and path prefix.
+    pub fn count_derived_by_source(&self, source: &str, path_prefix: &str) -> Result<u64, MemoryError> {
+        db::count_derived_by_source(&self.conn, source, path_prefix)
+    }
+
+    /// List derived items by source and path prefix.
+    pub fn list_derived_by_source(
+        &self,
+        source: &str,
+        path_prefix: &str,
+        limit: usize,
+    ) -> Result<Vec<serde_json::Value>, MemoryError> {
+        db::list_derived_by_source(&self.conn, source, path_prefix, limit)
+    }
+
+    /// Archive a memory entry (set archived=1, used after merge).
+    pub fn archive_memory(&self, id: &str) -> Result<bool, MemoryError> {
+        db::archive_memory(&self.conn, id)
+    }
+
     // ─── Hard State Operations ────────────────────────────────────────────────
 
     /// Set a deterministic key-value state.

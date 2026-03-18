@@ -11,6 +11,7 @@ use std::collections::HashMap;
 use std::sync::Once;
 use chrono::{DateTime, SecondsFormat, Utc};
 use serde_json;
+use uuid::Uuid;
 
 use crate::error::MemoryError;
 use crate::types::MemoryEntry;
@@ -100,6 +101,22 @@ pub fn init_schema(conn: &Connection) -> Result<(), MemoryError> {
         );
         CREATE INDEX IF NOT EXISTS idx_access_hist_mem ON access_history(memory_id);
         CREATE INDEX IF NOT EXISTS idx_access_hist_time ON access_history(accessed_at DESC);
+
+        -- Derived items (causal extractions, distilled rules, etc.)
+        CREATE TABLE IF NOT EXISTS derived_items (
+            id         TEXT PRIMARY KEY,
+            text       TEXT NOT NULL DEFAULT '',
+            path       TEXT NOT NULL DEFAULT '/',
+            summary    TEXT NOT NULL DEFAULT '',
+            importance REAL NOT NULL DEFAULT 0.5,
+            source     TEXT NOT NULL DEFAULT '',
+            scope      TEXT NOT NULL DEFAULT 'general',
+            metadata   TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL DEFAULT ''
+        );
+        CREATE INDEX IF NOT EXISTS idx_derived_source ON derived_items(source);
+        CREATE INDEX IF NOT EXISTS idx_derived_path ON derived_items(path);
+        CREATE INDEX IF NOT EXISTS idx_derived_created_at ON derived_items(created_at DESC);
     "#)?;
 
     // Forward-compatible migrations for existing DB files created before
@@ -1084,6 +1101,92 @@ pub fn get_state(
         Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
         Err(e) => Err(MemoryError::from(e)),
     }
+}
+
+/// Save a derived item (causal extraction, distilled rule, etc.)
+pub fn save_derived(
+    conn: &Connection,
+    text: &str,
+    path: &str,
+    summary: &str,
+    importance: f64,
+    source: &str,
+    scope: &str,
+    metadata: &serde_json::Value,
+) -> Result<String, MemoryError> {
+    let id = Uuid::new_v4().to_string();
+    let now = now_utc_iso();
+    let metadata_json = serde_json::to_string(metadata)?;
+
+    conn.execute(
+        r#"INSERT INTO derived_items (id, text, path, summary, importance, source, scope, metadata, created_at)
+           VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)"#,
+        params![id, text, path, summary, importance, source, scope, metadata_json, now],
+    )?;
+
+    Ok(id)
+}
+
+/// Count derived items by source and path prefix.
+pub fn count_derived_by_source(
+    conn: &Connection,
+    source: &str,
+    path_prefix: &str,
+) -> Result<u64, MemoryError> {
+    let like_pattern = format!("{}%", path_prefix);
+    let count: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM derived_items WHERE source = ?1 AND path LIKE ?2",
+        params![source, like_pattern],
+        |row| row.get(0),
+    )?;
+    Ok(count as u64)
+}
+
+/// List derived items by source and path prefix.
+pub fn list_derived_by_source(
+    conn: &Connection,
+    source: &str,
+    path_prefix: &str,
+    limit: usize,
+) -> Result<Vec<serde_json::Value>, MemoryError> {
+    let like_pattern = format!("{}%", path_prefix);
+    let mut stmt = conn.prepare(
+        "SELECT id, text, path, summary, importance, source, scope, metadata, created_at
+         FROM derived_items
+         WHERE source = ?1 AND path LIKE ?2
+         ORDER BY created_at DESC
+         LIMIT ?3"
+    )?;
+
+    let rows = stmt.query_map(params![source, like_pattern, limit as i64], |row| {
+        Ok(serde_json::json!({
+            "id": row.get::<_, String>(0)?,
+            "text": row.get::<_, String>(1)?,
+            "path": row.get::<_, String>(2)?,
+            "summary": row.get::<_, String>(3)?,
+            "importance": row.get::<_, f64>(4)?,
+            "source": row.get::<_, String>(5)?,
+            "scope": row.get::<_, String>(6)?,
+            "metadata": row.get::<_, String>(7)?,
+            "created_at": row.get::<_, String>(8)?,
+        }))
+    })?;
+
+    let mut out = Vec::new();
+    for r in rows {
+        out.push(r?);
+    }
+    Ok(out)
+}
+
+/// Archive a memory entry (set archived = 1).
+pub fn archive_memory(conn: &Connection, id: &str) -> Result<bool, MemoryError> {
+    let now = now_utc_iso();
+    conn.execute(
+        "UPDATE memories SET archived = 1, updated_at = ?1 WHERE id = ?2 AND archived = 0",
+        params![now, id],
+    )?;
+    Ok(conn.changes() > 0)
 }
 
 #[cfg(test)]
