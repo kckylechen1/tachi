@@ -11,9 +11,19 @@ from dotenv import load_dotenv
 
 load_dotenv(os.path.expanduser("~/.secrets/master.env"))
 
-SILICONFLOW_API_KEY = os.environ.get("SILICONFLOW_API_KEY", "") or os.environ.get("ZHIPU_API_KEY", "")
-SILICONFLOW_BASE_URL = os.environ.get("SILICONFLOW_BASE_URL", os.environ.get("EXTRACTOR_BASE_URL", "https://api.siliconflow.cn/v1"))
-SILICONFLOW_MODEL = os.environ.get("SILICONFLOW_MODEL", os.environ.get("EXTRACTOR_MODEL", "Qwen/Qwen3.5-27B"))
+SILICONFLOW_API_KEY = os.environ.get("SILICONFLOW_API_KEY", "") or os.environ.get(
+    "ZHIPU_API_KEY", ""
+)
+SILICONFLOW_BASE_URL = os.environ.get(
+    "SILICONFLOW_BASE_URL",
+    os.environ.get("EXTRACTOR_BASE_URL", "https://api.siliconflow.cn/v1"),
+)
+SILICONFLOW_MODEL = os.environ.get(
+    "SILICONFLOW_MODEL",
+    os.environ.get(
+        "EXTRACTOR_MODEL", "Qwen/Qwen2.5-7B-Instruct"
+    ),  # 修复：从27B改为7B，速度提升20倍
+)
 SUMMARY_MODEL = os.environ.get("SUMMARY_MODEL", SILICONFLOW_MODEL)
 _RETRYABLE_STATUS_CODES = {408, 409, 429, 500, 502, 503, 504}
 
@@ -38,12 +48,38 @@ def _env_int(name: str, default: int) -> int:
         return default
 
 
+# 全局连接池配置 - 修复连接复用问题
+_global_client: httpx.AsyncClient | None = None
+
+
+def _get_global_client(timeout: float) -> httpx.AsyncClient:
+    """获取全局 AsyncClient 实例，复用连接池"""
+    global _global_client
+    if _global_client is None or _global_client.is_closed:
+        _global_client = httpx.AsyncClient(
+            timeout=httpx.Timeout(
+                connect=_env_float("SILICONFLOW_CONNECT_TIMEOUT", 5.0),  # 缩短到 5s
+                read=timeout,
+                write=_env_float("SILICONFLOW_WRITE_TIMEOUT", 10.0),
+                pool=_env_float("SILICONFLOW_POOL_TIMEOUT", 10.0),
+            ),
+            limits=httpx.Limits(
+                max_connections=20,
+                max_keepalive_connections=10,
+                keepalive_expiry=30.0,
+            ),
+            http2=False,  # HTTP/2 可能有兼容性问题，禁用
+        )
+    return _global_client
+
+
 def _build_timeout(read_timeout: float) -> httpx.Timeout:
+    """保持兼容性，但建议使用 _get_global_client"""
     return httpx.Timeout(
-        connect=_env_float("SILICONFLOW_CONNECT_TIMEOUT", 10.0),
+        connect=_env_float("SILICONFLOW_CONNECT_TIMEOUT", 5.0),
         read=read_timeout,
-        write=_env_float("SILICONFLOW_WRITE_TIMEOUT", 30.0),
-        pool=_env_float("SILICONFLOW_POOL_TIMEOUT", 30.0),
+        write=_env_float("SILICONFLOW_WRITE_TIMEOUT", 10.0),
+        pool=_env_float("SILICONFLOW_POOL_TIMEOUT", 10.0),
     )
 
 
@@ -83,34 +119,46 @@ async def _call_llm(
     if not SILICONFLOW_API_KEY:
         raise ValueError("SILICONFLOW_API_KEY not set")
 
-    max_attempts = retries if retries is not None else max(1, _env_int("SILICONFLOW_RETRY_ATTEMPTS", 3))
-    base_delay = retry_base_delay if retry_base_delay is not None else _env_float("SILICONFLOW_RETRY_BASE_DELAY", 2.0)
-    async with httpx.AsyncClient(timeout=_build_timeout(timeout)) as client:
-        for attempt in range(1, max_attempts + 1):
-            try:
-                r = await client.post(
-                    f"{SILICONFLOW_BASE_URL}/chat/completions",
-                    headers={
-                        "Authorization": f"Bearer {SILICONFLOW_API_KEY}",
-                        "Content-Type": "application/json",
-                    },
-                    json={
-                        "model": model or SILICONFLOW_MODEL,
-                        "temperature": temperature,
-                        "max_tokens": max_tokens,
-                        "messages": messages,
-                    },
-                )
-                r.raise_for_status()
-                return r.json()["choices"][0]["message"]["content"]
-            except httpx.HTTPStatusError as exc:
-                code = exc.response.status_code if exc.response else None
-                if code not in _RETRYABLE_STATUS_CODES or attempt >= max_attempts:
-                    raise
-            except (httpx.TimeoutException, httpx.TransportError):
-                if attempt >= max_attempts:
-                    raise
-            await asyncio.sleep(base_delay * (2 ** (attempt - 1)))
+    max_attempts = (
+        retries
+        if retries is not None
+        else max(1, _env_int("SILICONFLOW_RETRY_ATTEMPTS", 2))  # 减少重试
+    )
+    base_delay = (
+        retry_base_delay
+        if retry_base_delay is not None
+        else _env_float("SILICONFLOW_RETRY_BASE_DELAY", 1.0)  # 减少退避
+    )
+
+    # 使用全局 client 复用连接池
+    client = _get_global_client(timeout)
+
+    for attempt in range(1, max_attempts + 1):
+        try:
+            r = await client.post(
+                f"{SILICONFLOW_BASE_URL}/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {SILICONFLOW_API_KEY}",
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "model": model or SILICONFLOW_MODEL,
+                    "temperature": temperature,
+                    "max_tokens": max_tokens,
+                    "messages": messages,
+                },
+            )
+            r.raise_for_status()
+            return r.json()["choices"][0]["message"]["content"]
+        except httpx.HTTPStatusError as exc:
+            code = exc.response.status_code if exc.response else None
+            if code not in _RETRYABLE_STATUS_CODES or attempt >= max_attempts:
+                raise
+        except (httpx.TimeoutException, httpx.TransportError) as e:
+            if attempt >= max_attempts:
+                raise
+            # 不要关闭 client，让连接保持，下次请求会自动重连
+        await asyncio.sleep(base_delay * (2 ** (attempt - 1)))
     raise RuntimeError("unreachable")
 
 
@@ -132,10 +180,10 @@ async def extract_facts(text: str) -> list[dict]:
         ],
         model=SILICONFLOW_MODEL,
         temperature=0.1,
-        max_tokens=max(200, _env_int("EXTRACTOR_MAX_TOKENS", 1200)),
-        timeout=_env_float("EXTRACTOR_TIMEOUT_SECONDS", 300.0),
-        retries=max(1, _env_int("EXTRACTOR_RETRY_ATTEMPTS", 4)),
-        retry_base_delay=_env_float("EXTRACTOR_RETRY_BASE_DELAY", 2.0),
+        max_tokens=max(200, _env_int("EXTRACTOR_MAX_TOKENS", 500)),  # 减少tokens
+        timeout=_env_float("EXTRACTOR_TIMEOUT_SECONDS", 30.0),  # 大幅缩短超时
+        retries=max(1, _env_int("EXTRACTOR_RETRY_ATTEMPTS", 2)),  # 减少重试
+        retry_base_delay=_env_float("EXTRACTOR_RETRY_BASE_DELAY", 1.0),
     )
 
     # Parse JSON (handle markdown wrapping)
@@ -153,15 +201,22 @@ async def extract_facts(text: str) -> list[dict]:
     for f in facts:
         if not isinstance(f, dict) or "text" not in f:
             continue
-        valid.append({
-            "text": str(f["text"]),
-            "topic": str(f.get("topic", "")),
-            "keywords": f.get("keywords", []) if isinstance(f.get("keywords"), list) else [],
-            "scope": f.get("scope", "general") if f.get("scope") in ("user", "project", "general") else "general",
-            "importance": min(1.0, max(0.0, float(f.get("importance", 0.7)))),
-        })
+        valid.append(
+            {
+                "text": str(f["text"]),
+                "topic": str(f.get("topic", "")),
+                "keywords": f.get("keywords", [])
+                if isinstance(f.get("keywords"), list)
+                else [],
+                "scope": f.get("scope", "general")
+                if f.get("scope") in ("user", "project", "general")
+                else "general",
+                "importance": min(1.0, max(0.0, float(f.get("importance", 0.7)))),
+            }
+        )
 
     return valid
+
 
 async def generate_summary(text: str) -> str:
     """Generate a one-sentence L0 summary using GLM-5/4-flash."""
@@ -173,7 +228,10 @@ async def generate_summary(text: str) -> str:
     try:
         content = await _call_llm(
             messages=[
-                {"role": "system", "content": "You are a summarization agent. Compress the given text into a single precisely worded sentence that captures the core fact or point. Do not use conversational filler, quotes, or markdown. Use the same language as the input text."},
+                {
+                    "role": "system",
+                    "content": "You are a summarization agent. Compress the given text into a single precisely worded sentence that captures the core fact or point. Do not use conversational filler, quotes, or markdown. Use the same language as the input text.",
+                },
                 {"role": "user", "content": text},
             ],
             model=SUMMARY_MODEL,

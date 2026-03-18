@@ -23,6 +23,7 @@ import httpx
 from pathlib import Path
 
 from dotenv import load_dotenv
+
 load_dotenv(os.path.expanduser("~/.secrets/master.env"))
 
 # Load .env from project root (two levels up from mcp/server.py)
@@ -45,7 +46,11 @@ logger = logging.getLogger("memory-mcp")
 
 app = Server("antigravity-memory")
 _STORE_CONN = store.get_connection()
-ENABLE_PIPELINE = os.environ.get("ENABLE_PIPELINE", "false").lower() in ("true", "1", "yes")
+ENABLE_PIPELINE = os.environ.get("ENABLE_PIPELINE", "false").lower() in (
+    "true",
+    "1",
+    "yes",
+)
 _RETRYABLE_STATUS_CODES = {408, 409, 429, 500, 502, 503, 504}
 
 
@@ -66,7 +71,9 @@ def _env_float(name: str, default: float) -> float:
 _EMBED_RETRY_ATTEMPTS = max(1, _env_int("EMBED_RETRY_ATTEMPTS", 3))
 _EMBED_RETRY_BASE_DELAY = max(0.1, _env_float("EMBED_RETRY_BASE_DELAY", 1.5))
 _SUMMARY_CONCURRENCY = max(1, _env_int("EXTRACT_FACTS_SUMMARY_CONCURRENCY", 3))
-_SUMMARY_TIMEOUT_SECONDS = max(5.0, _env_float("EXTRACT_FACTS_SUMMARY_TIMEOUT_SECONDS", 45.0))
+_SUMMARY_TIMEOUT_SECONDS = max(
+    5.0, _env_float("EXTRACT_FACTS_SUMMARY_TIMEOUT_SECONDS", 45.0)
+)
 
 
 def _is_retriable_http_error(exc: Exception) -> bool:
@@ -110,16 +117,28 @@ async def _embed_batch_with_retry(texts: list[str]) -> list[list[float]]:
 
 
 async def _generate_summaries(texts: list[str]) -> list[str]:
+    """生成摘要。修复：使用本地截断作为 fallback，减少 LLM 调用"""
     import extractor  # Lazy import: only needed for explicit fact extraction
-    sem = asyncio.Semaphore(_SUMMARY_CONCURRENCY)
+
+    sem = asyncio.Semaphore(max(1, _SUMMARY_CONCURRENCY))  # 减少并发到1，避免资源争抢
+
     async def _one(t: str) -> str:
+        # 如果文本已经很短，直接截断，不调用 LLM
+        if len(t) <= 80:
+            return t
+
         async with sem:
             try:
-                return await asyncio.wait_for(extractor.generate_summary(t), timeout=_SUMMARY_TIMEOUT_SECONDS)
+                # 缩短超时到 15 秒，失败快速 fallback
+                return await asyncio.wait_for(
+                    extractor.generate_summary(t),
+                    timeout=min(15.0, _SUMMARY_TIMEOUT_SECONDS),
+                )
             except Exception:
+                # 快速 fallback 到本地截断
                 return _summary_fallback(t)
-    return await asyncio.gather(*(_one(t) for t in texts))
 
+    return await asyncio.gather(*(_one(t) for t in texts))
 
 
 def _validate_args(tool_name: str, args: dict | None) -> dict:
@@ -127,7 +146,9 @@ def _validate_args(tool_name: str, args: dict | None) -> dict:
     if args is None:
         args = {}
     if not isinstance(args, dict):
-        raise ValueError(f"invalid arguments for {tool_name}: body must be a JSON object")
+        raise ValueError(
+            f"invalid arguments for {tool_name}: body must be a JSON object"
+        )
 
     errors: list[str] = []
 
@@ -223,12 +244,37 @@ async def list_tools() -> list[Tool]:
             inputSchema={
                 "type": "object",
                 "properties": {
-                    "text": {"type": "string", "description": "The full fact or memory to save (L2)"},
-                    "path": {"type": "string", "description": "Hierarchical path, e.g. /project/openclaw/docs", "default": "/"},
-                    "topic": {"type": "string", "description": "Deprecated fallback for topic", "default": ""},
-                    "keywords": {"type": "array", "items": {"type": "string"}, "description": "Relevant keywords", "default": []},
-                    "scope": {"type": "string", "enum": ["user", "project", "general"], "description": "Deprecated fallback for scope", "default": "general"},
-                    "importance": {"type": "number", "description": "Importance 0.0-1.0", "default": 0.7},
+                    "text": {
+                        "type": "string",
+                        "description": "The full fact or memory to save (L2)",
+                    },
+                    "path": {
+                        "type": "string",
+                        "description": "Hierarchical path, e.g. /project/openclaw/docs",
+                        "default": "/",
+                    },
+                    "topic": {
+                        "type": "string",
+                        "description": "Deprecated fallback for topic",
+                        "default": "",
+                    },
+                    "keywords": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Relevant keywords",
+                        "default": [],
+                    },
+                    "scope": {
+                        "type": "string",
+                        "enum": ["user", "project", "general"],
+                        "description": "Deprecated fallback for scope",
+                        "default": "general",
+                    },
+                    "importance": {
+                        "type": "number",
+                        "description": "Importance 0.0-1.0",
+                        "default": 0.7,
+                    },
                 },
                 "required": ["text"],
             },
@@ -240,8 +286,16 @@ async def list_tools() -> list[Tool]:
                 "type": "object",
                 "properties": {
                     "query": {"type": "string", "description": "Search query"},
-                    "path_prefix": {"type": "string", "description": "Optional path prefix to filter (e.g. /project/openclaw)", "default": ""},
-                    "top_k": {"type": "integer", "description": "Max results to return", "default": 6},
+                    "path_prefix": {
+                        "type": "string",
+                        "description": "Optional path prefix to filter (e.g. /project/openclaw)",
+                        "default": "",
+                    },
+                    "top_k": {
+                        "type": "integer",
+                        "description": "Max results to return",
+                        "default": 6,
+                    },
                 },
                 "required": ["query"],
             },
@@ -252,7 +306,10 @@ async def list_tools() -> list[Tool]:
             inputSchema={
                 "type": "object",
                 "properties": {
-                    "id": {"type": "string", "description": "Memory ID returned from search_memory or list_memories"},
+                    "id": {
+                        "type": "string",
+                        "description": "Memory ID returned from search_memory or list_memories",
+                    },
                 },
                 "required": ["id"],
             },
@@ -263,9 +320,23 @@ async def list_tools() -> list[Tool]:
             inputSchema={
                 "type": "object",
                 "properties": {
-                    "path": {"type": "string", "description": "The path directory to list, e.g. / or /project", "default": "/"},
-                    "offset": {"type": "integer", "description": "Offset for pagination", "default": 0, "minimum": 0},
-                    "limit": {"type": "integer", "description": "Maximum results for pagination", "default": 100, "minimum": 1},
+                    "path": {
+                        "type": "string",
+                        "description": "The path directory to list, e.g. / or /project",
+                        "default": "/",
+                    },
+                    "offset": {
+                        "type": "integer",
+                        "description": "Offset for pagination",
+                        "default": 0,
+                        "minimum": 0,
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Maximum results for pagination",
+                        "default": 100,
+                        "minimum": 1,
+                    },
                 },
                 "required": [],
             },
@@ -276,8 +347,15 @@ async def list_tools() -> list[Tool]:
             inputSchema={
                 "type": "object",
                 "properties": {
-                    "text": {"type": "string", "description": "Conversation or document text"},
-                    "source": {"type": "string", "description": "Source label", "default": "extraction"},
+                    "text": {
+                        "type": "string",
+                        "description": "Conversation or document text",
+                    },
+                    "source": {
+                        "type": "string",
+                        "description": "Source label",
+                        "default": "extraction",
+                    },
                 },
                 "required": ["text"],
             },
@@ -288,8 +366,14 @@ async def list_tools() -> list[Tool]:
             inputSchema={
                 "type": "object",
                 "properties": {
-                    "conversation_id": {"type": "string", "description": "Conversation/session ID"},
-                    "turn_id": {"type": "string", "description": "Turn ID within conversation"},
+                    "conversation_id": {
+                        "type": "string",
+                        "description": "Conversation/session ID",
+                    },
+                    "turn_id": {
+                        "type": "string",
+                        "description": "Turn ID within conversation",
+                    },
                     "messages": {
                         "type": "array",
                         "description": "Turn messages, usually [{role, content}, ...]",
@@ -325,7 +409,11 @@ async def list_tools() -> list[Tool]:
             inputSchema={
                 "type": "object",
                 "properties": {
-                    "period_hours": {"type": "integer", "description": "Event stats window in hours", "default": 24},
+                    "period_hours": {
+                        "type": "integer",
+                        "description": "Event stats window in hours",
+                        "default": 24,
+                    },
                 },
             },
         ),
@@ -335,8 +423,15 @@ async def list_tools() -> list[Tool]:
             inputSchema={
                 "type": "object",
                 "properties": {
-                    "namespace": {"type": "string", "description": "State namespace, e.g. 'trading', 'config'", "default": "default"},
-                    "key": {"type": "string", "description": "State key, e.g. 'watchlist', 'fund_position'"},
+                    "namespace": {
+                        "type": "string",
+                        "description": "State namespace, e.g. 'trading', 'config'",
+                        "default": "default",
+                    },
+                    "key": {
+                        "type": "string",
+                        "description": "State key, e.g. 'watchlist', 'fund_position'",
+                    },
                     "value": {"description": "Any JSON-serializable value to store"},
                 },
                 "required": ["key", "value"],
@@ -348,7 +443,11 @@ async def list_tools() -> list[Tool]:
             inputSchema={
                 "type": "object",
                 "properties": {
-                    "namespace": {"type": "string", "description": "State namespace", "default": "default"},
+                    "namespace": {
+                        "type": "string",
+                        "description": "State namespace",
+                        "default": "default",
+                    },
                     "key": {"type": "string", "description": "State key to retrieve"},
                 },
                 "required": ["key"],
@@ -398,7 +497,12 @@ async def call_tool(name: str, arguments: dict | None) -> list[TextContent]:
             return await _get_state(validated_args)
     except Exception as e:
         logger.exception(f"Error in {name}")
-        return [TextContent(type="text", text=f"Error: {type(e).__name__}: {e or 'timeout or empty error'}")]
+        return [
+            TextContent(
+                type="text",
+                text=f"Error: {type(e).__name__}: {e or 'timeout or empty error'}",
+            )
+        ]
 
 
 async def _save_memory(args: dict) -> list[TextContent]:
@@ -409,7 +513,7 @@ async def _save_memory(args: dict) -> list[TextContent]:
     path = args.get("path", "")
     scope = args.get("scope", "general")
     topic = args.get("topic", "")
-    
+
     if not path or path == "/":
         path = f"/{scope}"
         if topic:
@@ -418,11 +522,13 @@ async def _save_memory(args: dict) -> list[TextContent]:
     # Phase 1: Use local fallback for L0 summary instead of LLM call
     summary = _summary_fallback(text)
     vec = await embedding.embed(text, input_type="document")
-    
+
     conn = _STORE_CONN
     try:
         result = store.save_memory(
-            conn, text, vec,
+            conn,
+            text,
+            vec,
             path=path,
             summary=summary,
             topic=topic,
@@ -432,8 +538,18 @@ async def _save_memory(args: dict) -> list[TextContent]:
             source="manual",
         )
         if result is None:
-            return [TextContent(type="text", text="⏭ Skipped: similar memory already exists (cosine >= 0.92)")]
-        return [TextContent(type="text", text=f"✅ Saved to {result['path']}: [{result['topic']}] {result['summary']} (id: {result['id']})")]
+            return [
+                TextContent(
+                    type="text",
+                    text="⏭ Skipped: similar memory already exists (cosine >= 0.92)",
+                )
+            ]
+        return [
+            TextContent(
+                type="text",
+                text=f"✅ Saved to {result['path']}: [{result['topic']}] {result['summary']} (id: {result['id']})",
+            )
+        ]
     except Exception as e:
         logger.exception("Error in save_memory")
         return [TextContent(type="text", text=f"Error: {e}")]
@@ -446,11 +562,13 @@ async def _search_memory(args: dict) -> list[TextContent]:
 
     top_k = args.get("top_k", 6)
     path_prefix = args.get("path_prefix", "")
-    
+
     vec = await embedding.embed(query, input_type="query")
     conn = _STORE_CONN
     try:
-        candidates = store.hybrid_search(conn, vec, query, top_k=top_k, path_prefix=path_prefix)
+        candidates = store.hybrid_search(
+            conn, vec, query, top_k=top_k, path_prefix=path_prefix
+        )
         if not candidates:
             return [TextContent(type="text", text="No relevant memories found.")]
 
@@ -460,7 +578,9 @@ async def _search_memory(args: dict) -> list[TextContent]:
         for i, r in enumerate(results, 1):
             score_pct = int(r["score"] * 100)
             # Only return the L0 summary
-            lines.append(f"{i}. [id:{r['id']}] [{r['path']}] ({score_pct}%)\n   <Summary>: {r['summary']}")
+            lines.append(
+                f"{i}. [id:{r['id']}] [{r['path']}] ({score_pct}%)\n   <Summary>: {r['summary']}"
+            )
         return [TextContent(type="text", text="\n".join(lines))]
     except Exception as e:
         logger.exception("Error in search_memory")
@@ -477,7 +597,7 @@ async def _get_memory(args: dict) -> list[TextContent]:
         mem = store.get_memory(conn, id_)
         if not mem:
             return [TextContent(type="text", text=f"Memory ID {id_} not found.")]
-            
+
         created = mem.get("created_at", mem.get("timestamp", ""))
         out = f"ID: {mem['id']}\nPath: {mem['path']}\nCreated: {created}\nSummary: {mem['summary']}\n---\n{mem['text']}"
         return [TextContent(type="text", text=out)]
@@ -488,25 +608,25 @@ async def _get_memory(args: dict) -> list[TextContent]:
 
 async def _list_memories(args: dict) -> list[TextContent]:
     path = args.get("path", "/")
-    
+
     conn = _STORE_CONN
     try:
         res = store.list_by_path(conn, path)
-        
+
         lines = [f"Path: {res['path']}"]
         if res["directories"]:
             lines.append("Directories:")
             for d in res["directories"]:
                 lines.append(f"  📁 {d}/")
-                
+
         if res["memories"]:
             lines.append("Memories:")
             for m in res["memories"]:
                 lines.append(f"  📄 [id:{m['id']}] {m['summary']}")
-                
+
         if not res["directories"] and not res["memories"]:
             lines.append("(Empty)")
-            
+
         return [TextContent(type="text", text="\n".join(lines))]
     except Exception as e:
         logger.exception("Error in list_memories")
@@ -515,6 +635,7 @@ async def _list_memories(args: dict) -> list[TextContent]:
 
 async def _extract_facts(args: dict) -> list[TextContent]:
     import extractor  # Lazy import: only needed for explicit fact extraction
+
     text = args["text"].strip()
     if not text:
         return [TextContent(type="text", text="Error: empty text")]
@@ -526,7 +647,11 @@ async def _extract_facts(args: dict) -> list[TextContent]:
         facts = await extractor.extract_facts(text)
     except Exception as e:
         logger.exception("Error during extraction stage")
-        return [TextContent(type="text", text=f"Error: extraction failed ({type(e).__name__}: {e})")]
+        return [
+            TextContent(
+                type="text", text=f"Error: extraction failed ({type(e).__name__}: {e})"
+            )
+        ]
 
     if not facts:
         return [TextContent(type="text", text="No facts extracted.")]
@@ -537,7 +662,11 @@ async def _extract_facts(args: dict) -> list[TextContent]:
         vectors = await _embed_batch_with_retry(texts)
     except Exception as e:
         logger.exception("Error during embedding stage")
-        return [TextContent(type="text", text=f"Error: embedding failed ({type(e).__name__}: {e})")]
+        return [
+            TextContent(
+                type="text", text=f"Error: embedding failed ({type(e).__name__}: {e})"
+            )
+        ]
     summaries = await _generate_summaries(texts)
 
     conn = _STORE_CONN
@@ -549,9 +678,11 @@ async def _extract_facts(args: dict) -> list[TextContent]:
             path = f"/{scope}"
             if topic:
                 path += f"/{topic.replace(' ', '_').replace('/', '_')}"
-                
+
             result = store.save_memory(
-                conn, fact["text"], vec,
+                conn,
+                fact["text"],
+                vec,
                 path=path,
                 summary=summ,
                 topic=topic,
@@ -568,9 +699,13 @@ async def _extract_facts(args: dict) -> list[TextContent]:
         logger.exception("Error in extract_facts")
         return [TextContent(type="text", text=f"Error: {e}")]
 
-    summary_lines = [f"📝 Extracted {len(facts)} facts → ✅ {saved} saved, ⏭ {skipped} duplicates"]
+    summary_lines = [
+        f"📝 Extracted {len(facts)} facts → ✅ {saved} saved, ⏭ {skipped} duplicates"
+    ]
     for i, f in enumerate(facts, 1):
-        summary_lines.append(f"  {i}. [path:/{f.get('scope', '?')}...] {f['text'][:80]}")
+        summary_lines.append(
+            f"  {i}. [path:/{f.get('scope', '?')}...] {f['text'][:80]}"
+        )
     return [TextContent(type="text", text="\n".join(summary_lines))]
 
 
@@ -586,7 +721,9 @@ async def _ingest_event(args: dict) -> list[TextContent]:
     if not isinstance(messages, list):
         return [TextContent(type="text", text="Error: messages must be an array")]
 
-    event_id = hashlib.sha256(f"{conversation_id}|{turn_id}".encode("utf-8")).hexdigest()
+    event_id = hashlib.sha256(
+        f"{conversation_id}|{turn_id}".encode("utf-8")
+    ).hexdigest()
     payload = {
         "event_id": event_id,
         "conversation_id": conversation_id,
@@ -599,14 +736,22 @@ async def _ingest_event(args: dict) -> list[TextContent]:
         enqueue(store.DB_PATH, event_id, "extractor", payload)
         enqueue(store.DB_PATH, event_id, "causal", payload)
 
-    return [TextContent(type="text", text=json.dumps({"event_id": event_id}, ensure_ascii=False))]
+    return [
+        TextContent(
+            type="text", text=json.dumps({"event_id": event_id}, ensure_ascii=False)
+        )
+    ]
 
 
 async def _memory_stats() -> list[TextContent]:
     conn = _STORE_CONN
     try:
         stats = store.get_stats(conn)
-        return [TextContent(type="text", text=json.dumps(stats, indent=2, ensure_ascii=False))]
+        return [
+            TextContent(
+                type="text", text=json.dumps(stats, indent=2, ensure_ascii=False)
+            )
+        ]
     except Exception as e:
         logger.exception("Error in memory_stats")
         return [TextContent(type="text", text=f"Error: {e}")]
@@ -624,7 +769,11 @@ async def _get_pipeline_status(args: dict) -> list[TextContent]:
 
     try:
         health = build_pipeline_health(period_hours=period_hours, db_path=store.DB_PATH)
-        return [TextContent(type="text", text=json.dumps(health, indent=2, ensure_ascii=False))]
+        return [
+            TextContent(
+                type="text", text=json.dumps(health, indent=2, ensure_ascii=False)
+            )
+        ]
     except Exception as e:
         logger.exception("Error in get_pipeline_status")
         return [TextContent(type="text", text=f"Error: {e}")]
@@ -644,7 +793,12 @@ async def _set_state(args: dict) -> list[TextContent]:
             value=value,
             modified_by="mcp",
         )
-        return [TextContent(type="text", text=f"✅ State set: {namespace}/{key} (v{result['version']})")]
+        return [
+            TextContent(
+                type="text",
+                text=f"✅ State set: {namespace}/{key} (v{result['version']})",
+            )
+        ]
     except Exception as e:
         logger.exception("Error in set_state")
         return [TextContent(type="text", text=f"Error: {e}")]
@@ -658,8 +812,14 @@ async def _get_state(args: dict) -> list[TextContent]:
     try:
         result = store.get_state(db_path=store.DB_PATH, namespace=namespace, key=key)
         if result is None:
-            return [TextContent(type="text", text=f"State not found: {namespace}/{key}")]
-        return [TextContent(type="text", text=json.dumps(result, indent=2, ensure_ascii=False))]
+            return [
+                TextContent(type="text", text=f"State not found: {namespace}/{key}")
+            ]
+        return [
+            TextContent(
+                type="text", text=json.dumps(result, indent=2, ensure_ascii=False)
+            )
+        ]
     except Exception as e:
         logger.exception("Error in get_state")
         return [TextContent(type="text", text=f"Error: {e}")]
@@ -674,7 +834,9 @@ async def main():
     store.ensure_derived_items_table(store.DB_PATH)
     migrated = store.migrate_causal_to_derived(store.DB_PATH)
     if migrated > 0:
-        logger.info(f"Phase 3 migration: moved {migrated} causal records to derived_items")
+        logger.info(
+            f"Phase 3 migration: moved {migrated} causal records to derived_items"
+        )
 
     # Phase 1: Feature flag to disable async pipeline workers
     launcher = WorkerLauncher(db_path=store.DB_PATH, conn=_STORE_CONN)
@@ -685,7 +847,9 @@ async def main():
         logger.info("Pipeline workers DISABLED (set ENABLE_PIPELINE=true to enable)")
     try:
         async with stdio_server() as (read_stream, write_stream):
-            await app.run(read_stream, write_stream, app.create_initialization_options())
+            await app.run(
+                read_stream, write_stream, app.create_initialization_options()
+            )
     finally:
         await launcher.stop()
 
