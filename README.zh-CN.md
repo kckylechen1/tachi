@@ -56,16 +56,33 @@
 请协助我配置安装 Sigil (MCP 记忆服务器)：
 
 1. 克隆仓库: git clone https://github.com/kckylechen1/sigil.git && cd sigil
-2. 构建服务端与环境:
+
+【方式一】Python 运行时：
    cd mcp && python3 -m venv .venv && source .venv/bin/activate
    cd ../crates/memory-python && pip install maturin && maturin develop --release
    cd ../../mcp && pip install -r requirements.txt
-3. 将以下配置追加至 mcp_config.json 配置文件中:
+   配置 mcp_config.json:
    {
      "mcpServers": {
        "memory": {
-         "command": "<使用绝对路径指向>/sigil/mcp/.venv/bin/python3",
-         "args": ["<使用绝对路径指向>/sigil/mcp/server.py"]
+         "command": "<绝对路径>/sigil/mcp/.venv/bin/python3",
+         "args": ["<绝对路径>/sigil/mcp/server.py"]
+       }
+     }
+   }
+
+【方式二】Rust 原生二进制（最快）：
+   cargo build -p memory-server --release
+   配置 mcp_config.json:
+   {
+     "mcpServers": {
+       "memory": {
+         "command": "<绝对路径>/sigil/target/release/memory-server",
+         "env": {
+           "VOYAGE_API_KEY": "...",
+           "SILICONFLOW_API_KEY": "...",
+           "MEMORY_DB_PATH": "~/.sigil/memory.db"
+         }
        }
      }
    }
@@ -134,42 +151,53 @@ Sigil 支持以外部扩展插件的形式桥接运行于 OpenClaw 内核。
 graph TD
     subgraph Clients["支持的集成端"]
         MCP["MCP Server (Python 3.10+)"]
+        RMCP["MCP Server (Rust 5.2MB 原生二进制)"]
         OC["OpenClaw Extension (Node.js)"]
         NATIVE["Native Rust Crates"]
     end
 
-    subgraph Operations["异步工作站 (Python/Node)"]
+    subgraph Cloud["云端 API"]
+        VOYAGE["Voyage-4 向量嵌入"]
+        SILICON["SiliconFlow Qwen LLM"]
+    end
+
+    subgraph Operations["异步工作站"]
         EXTRACT["事实提取器 (Qwen)"]
         DISTILL["上下文蒸馏器 (Qwen)"]
         CAUSAL["因果关系流水线"]
         CONSOLIDATE["记忆碎片合并清理站"]
     end
 
-    subgraph Core["Sigil 核心 (Rust 'memory-core')"]
+    subgraph Core["Sigil 核心 (Rust memory-core)"]
         NAPI["NAPI Binding"]
         PYO3["PyO3 Binding"]
-        
+
         NAPI --- LIB[/"lib.rs (Store API)"/]
         PYO3 --- LIB
-        
-        LIB --> SEARCH["四通道混合检索引擎"]
-        LIB --> GRAPH["关系层级映射流"]
-        
+
+        LIB --> SEARCH["五通道混合检索引擎"]
+        LIB --> GRAPH["记忆图谱 (PageRank)"]
+
         SEARCH --> SQLITE[("Embedded SQLite + vec0")]
         GRAPH --> SQLITE
     end
 
+    RMCP ==>|"静态链接·无 FFI"| LIB
+    RMCP -->|"reqwest"| VOYAGE
+    RMCP -->|"async-openai"| SILICON
     MCP --> PYO3
     OC --> NAPI
-    MCP -. 异步事件下发队列 .-> Operations
-    Operations -. 异步落地修正 .-> PYO3
-    
+    MCP -.->|"异步事件队列"| Operations
+    Operations -.->|"落地写入"| PYO3
+
     classDef client fill:#3b2e5a,stroke:#8a5cf5,stroke-width:2px,color:#fff;
-    classDef worker fill:#5a4f2e,stroke:#f5cw5a,stroke-width:2px,color:#fff;
+    classDef cloud fill:#2e3d5a,stroke:#5a9cf5,stroke-width:2px,color:#fff;
+    classDef worker fill:#5a4f2e,stroke:#f5c55a,stroke-width:2px,color:#fff;
     classDef rust fill:#5a2e2e,stroke:#f55c5c,stroke-width:2px,color:#fff;
     classDef db fill:#2e5a40,stroke:#5cf58a,stroke-width:2px,color:#fff;
-    
-    class MCP,OC,NATIVE client;
+
+    class MCP,RMCP,OC,NATIVE client;
+    class VOYAGE,SILICON cloud;
     class EXTRACT,DISTILL,CAUSAL,CONSOLIDATE worker;
     class NAPI,PYO3,LIB,SEARCH,GRAPH rust;
     class SQLITE db;
@@ -186,6 +214,7 @@ graph TD
 | **特征向量 (Embedding)** | [Voyage-4](https://voyageai.com/) | 1024 高维度向量输出，提供领先的多语种文本检索能力。与 Rust 执行核心直连。 |
 | **逻辑提取与快摄 (Extraction & Summarization)** | [Qwen3.5-27B](https://cloud.siliconflow.cn/i/QwFqsLF1) 分片部署 | 面向高精度 JSON 数据集校验、L0 简要提取提供的强大因果推理能力。（仅启用 `ENABLE_PIPELINE=true` 时加载） |
 | **全局蒸馏 (Distillation)** | [Qwen3.5-27B](https://cloud.siliconflow.cn/i/QwFqsLF1) 分片部署 | 用于梳理高层级跨场景行为图谱及全局规则统一沉淀。（同上） |
+| **异步客户端库** | [`async-openai`](https://github.com/64bit/async-openai) + [`reqwest`](https://docs.rs/reqwest/) | Rust 原生异步 HTTP 客户端，用于 MCP 服务器内直接 API 集成。 |
 
 ---
 

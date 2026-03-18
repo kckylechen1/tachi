@@ -210,6 +210,68 @@ impl PyMemoryStore {
     fn vec_available(&self) -> bool {
         self.inner.lock().unwrap().vec_available
     }
+
+    // ─── Graph Operations ────────────────────────────────────────────────────
+
+    /// Add or update an edge in the memory graph. `edge_json` is a JSON string of MemoryEdge.
+    fn add_edge(&self, edge_json: &str) -> PyResult<()> {
+        let edge: memory_core::MemoryEdge = serde_json::from_str(edge_json)
+            .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
+        self.inner
+            .lock()
+            .unwrap()
+            .add_edge(&edge)
+            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
+    }
+
+    /// Remove an edge. Returns true if found and deleted.
+    #[pyo3(signature = (source_id, target_id, relation))]
+    fn remove_edge(&self, source_id: &str, target_id: &str, relation: &str) -> PyResult<bool> {
+        self.inner
+            .lock()
+            .unwrap()
+            .remove_edge(source_id, target_id, relation)
+            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
+    }
+
+    /// Get edges for a memory ID. Returns JSON string of MemoryEdge[].
+    #[pyo3(signature = (memory_id, direction="both", relation_filter=None))]
+    fn get_edges(
+        &self,
+        memory_id: &str,
+        direction: &str,
+        relation_filter: Option<&str>,
+    ) -> PyResult<String> {
+        let edges = self.inner
+            .lock()
+            .unwrap()
+            .get_edges(memory_id, direction, relation_filter)
+            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+
+        serde_json::to_string(&edges)
+            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
+    }
+
+    /// BFS graph expansion from seed IDs. Returns JSON string of GraphExpandResult.
+    #[pyo3(signature = (seed_ids_json, max_hops=2, relation_filter=None))]
+    fn graph_expand(
+        &self,
+        seed_ids_json: &str,
+        max_hops: u32,
+        relation_filter: Option<&str>,
+    ) -> PyResult<String> {
+        let seeds: Vec<String> = serde_json::from_str(seed_ids_json)
+            .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
+
+        let result = self.inner
+            .lock()
+            .unwrap()
+            .graph_expand(&seeds, max_hops, relation_filter)
+            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+
+        serde_json::to_string(&result)
+            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
+    }
 }
 
 // ── Module registration ───────────────────────────────────────────────────────

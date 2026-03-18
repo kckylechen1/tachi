@@ -56,16 +56,33 @@ For environments like Claude Desktop, Cursor, or AutoGen, Sigil operates nativel
 Please configure the Sigil local memory MCP server:
 
 1. Clone repository: git clone https://github.com/kckylechen1/sigil.git && cd sigil
-2. Initialize environment:
+
+[Option A] Python Runtime:
    cd mcp && python3 -m venv .venv && source .venv/bin/activate
    cd ../crates/memory-python && pip install maturin && maturin develop --release
    cd ../../mcp && pip install -r requirements.txt
-3. Append to my mcp_config.json:
+   Configure mcp_config.json:
    {
      "mcpServers": {
        "memory": {
-         "command": "<absolute-path-to>/sigil/mcp/.venv/bin/python3",
-         "args": ["<absolute-path-to>/sigil/mcp/server.py"]
+         "command": "<absolute-path>/sigil/mcp/.venv/bin/python3",
+         "args": ["<absolute-path>/sigil/mcp/server.py"]
+       }
+     }
+   }
+
+[Option B] Native Rust Binary (Fastest):
+   cargo build -p memory-server --release
+   Configure mcp_config.json:
+   {
+     "mcpServers": {
+       "memory": {
+         "command": "<absolute-path>/sigil/target/release/memory-server",
+         "env": {
+           "VOYAGE_API_KEY": "...",
+           "SILICONFLOW_API_KEY": "...",
+           "MEMORY_DB_PATH": "~/.sigil/memory.db"
+         }
        }
      }
    }
@@ -132,44 +149,55 @@ Both causal derivations and distilled rules are physically isolated within a ded
 
 ```mermaid
 graph TD
-    subgraph Clients["Supported Integrations"]
+    subgraph Clients["Integrations"]
         MCP["MCP Server (Python 3.10+)"]
+        RMCP["MCP Server (Rust 5.2MB binary)"]
         OC["OpenClaw Extension (Node.js)"]
         NATIVE["Native Rust Crates"]
     end
 
-    subgraph Operations["Async Workers (Python/Node)"]
+    subgraph Cloud["Cloud APIs"]
+        VOYAGE["Voyage-4 Embedding"]
+        SILICON["SiliconFlow Qwen LLM"]
+    end
+
+    subgraph Operations["Async Workers"]
         EXTRACT["Fact Extractor (Qwen)"]
         DISTILL["Context Distiller (Qwen)"]
         CAUSAL["Causal Worker"]
         CONSOLIDATE["Session Consolidator"]
     end
 
-    subgraph Core["Sigil Core (Rust 'memory-core')"]
+    subgraph Core["Sigil Core (Rust memory-core)"]
         NAPI["NAPI Binding"]
         PYO3["PyO3 Binding"]
-        
+
         NAPI --- LIB[/"lib.rs (Store API)"/]
         PYO3 --- LIB
-        
-        LIB --> SEARCH["Hybrid Search Engine (4 Channels)"]
-        LIB --> GRAPH["Memory Relations & Causal Maps"]
-        
+
+        LIB --> SEARCH["5-Channel Hybrid Search"]
+        LIB --> GRAPH["Memory Graph (PageRank)"]
+
         SEARCH --> SQLITE[("Embedded SQLite + vec0")]
         GRAPH --> SQLITE
     end
 
+    RMCP ==>|"Static link, no FFI"| LIB
+    RMCP -->|"reqwest"| VOYAGE
+    RMCP -->|"async-openai"| SILICON
     MCP --> PYO3
     OC --> NAPI
-    MCP -. Async Event Queue .-> Operations
-    Operations -. Write Events .-> PYO3
-    
+    MCP -.->|"Async Queue"| Operations
+    Operations -.->|"Write"| PYO3
+
     classDef client fill:#3b2e5a,stroke:#8a5cf5,stroke-width:2px,color:#fff;
-    classDef worker fill:#5a4f2e,stroke:#f5cw5a,stroke-width:2px,color:#fff;
+    classDef cloud fill:#2e3d5a,stroke:#5a9cf5,stroke-width:2px,color:#fff;
+    classDef worker fill:#5a4f2e,stroke:#f5c55a,stroke-width:2px,color:#fff;
     classDef rust fill:#5a2e2e,stroke:#f55c5c,stroke-width:2px,color:#fff;
     classDef db fill:#2e5a40,stroke:#5cf58a,stroke-width:2px,color:#fff;
-    
-    class MCP,OC,NATIVE client;
+
+    class MCP,RMCP,OC,NATIVE client;
+    class VOYAGE,SILICON cloud;
     class EXTRACT,DISTILL,CAUSAL,CONSOLIDATE worker;
     class NAPI,PYO3,LIB,SEARCH,GRAPH rust;
     class SQLITE db;
@@ -186,6 +214,7 @@ The following model stack is optimized to balance latency, quality, and cost for
 | **Embedding** | [Voyage-4](https://voyageai.com/) | 1024d vectors offering top-tier multilingual retrieval capabilities. |
 | **Extraction & Summarization** | [Qwen3.5-27B](https://cloud.siliconflow.cn/) (SiliconFlow) | High accuracy for structured JSON parsing and L0 fast-summarization. (Requires `ENABLE_PIPELINE=true`) |
 | **Distillation** | [Qwen3.5-27B](https://cloud.siliconflow.cn/) (SiliconFlow) | Unified model implementation for periodic global schema logic. (Same as above) |
+| **Async Client Libraries** | [`async-openai`](https://github.com/64bit/async-openai) + [`reqwest`](https://docs.rs/reqwest/) | Rust-native async HTTP clients for direct API integration within the MCP server. |
 
 ---
 

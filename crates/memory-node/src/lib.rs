@@ -167,6 +167,75 @@ impl JsMemoryStore {
     pub fn vec_available(&self) -> bool {
         self.inner.lock().unwrap_or_else(|e| e.into_inner()).vec_available
     }
+
+    // ─── Graph Operations ────────────────────────────────────────────────────
+
+    /// Add or update an edge in the memory graph. `edge_json` is a JSON string of MemoryEdge.
+    #[napi]
+    pub fn add_edge(&self, edge_json: String) -> napi::Result<()> {
+        let edge: memory_core::MemoryEdge = serde_json::from_str(&edge_json)
+            .map_err(|e| napi::Error::from_reason(format!("invalid edge JSON: {e}")))?;
+        self.inner
+            .lock().unwrap_or_else(|e| e.into_inner())
+            .add_edge(&edge)
+            .map_err(|e| napi::Error::from_reason(e.to_string()))
+    }
+
+    /// Remove an edge. Returns true if found and deleted.
+    #[napi]
+    pub fn remove_edge(
+        &self,
+        source_id: String,
+        target_id: String,
+        relation: String,
+    ) -> napi::Result<bool> {
+        self.inner
+            .lock().unwrap_or_else(|e| e.into_inner())
+            .remove_edge(&source_id, &target_id, &relation)
+            .map_err(|e| napi::Error::from_reason(e.to_string()))
+    }
+
+    /// Get edges for a memory ID. Returns JSON string of MemoryEdge[].
+    /// direction: "outgoing", "incoming", or "both"
+    #[napi]
+    pub fn get_edges(
+        &self,
+        memory_id: String,
+        direction: Option<String>,
+        relation_filter: Option<String>,
+    ) -> napi::Result<String> {
+        let dir = direction.as_deref().unwrap_or("both");
+        let rel = relation_filter.as_deref();
+        let edges = self.inner
+            .lock().unwrap_or_else(|e| e.into_inner())
+            .get_edges(&memory_id, dir, rel)
+            .map_err(|e| napi::Error::from_reason(e.to_string()))?;
+
+        serde_json::to_string(&edges)
+            .map_err(|e| napi::Error::from_reason(e.to_string()))
+    }
+
+    /// BFS graph expansion from seed IDs. Returns JSON string of GraphExpandResult.
+    #[napi]
+    pub fn graph_expand(
+        &self,
+        seed_ids_json: String,
+        max_hops: Option<u32>,
+        relation_filter: Option<String>,
+    ) -> napi::Result<String> {
+        let seeds: Vec<String> = serde_json::from_str(&seed_ids_json)
+            .map_err(|e| napi::Error::from_reason(format!("invalid seed_ids JSON: {e}")))?;
+        let hops = max_hops.unwrap_or(2);
+        let rel = relation_filter.as_deref();
+
+        let result = self.inner
+            .lock().unwrap_or_else(|e| e.into_inner())
+            .graph_expand(&seeds, hops, rel)
+            .map_err(|e| napi::Error::from_reason(e.to_string()))?;
+
+        serde_json::to_string(&result)
+            .map_err(|e| napi::Error::from_reason(e.to_string()))
+    }
 }
 
 /// Check if text is noise.

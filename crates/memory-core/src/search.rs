@@ -1,13 +1,14 @@
 // search.rs — Hybrid search orchestration
 //
 // Runs Vec + FTS + Symbolic channels, merges scores in Rust, returns top K.
+// Optional graph expansion augments results with memory-graph neighbors.
 // This is the hottest path: all computation stays in Rust, zero JS/Python overhead.
 
 use rusqlite::Connection;
 use std::collections::HashMap;
 
 use crate::{
-    db::{fetch_by_ids, record_access, search_fts, search_vec},
+    db::{fetch_by_ids, get_access_times, graph_expand, record_access, search_fts, search_vec},
     error::MemoryError,
     scorer::{cosine_similarity, hybrid_score, symbolic_score, HybridWeights},
     types::{MemoryEntry, SearchResult},
@@ -34,6 +35,12 @@ pub struct SearchOptions {
     /// MMR diversity threshold: cosine similarity > threshold → defer to end.
     /// Set to None to disable MMR. Default: Some(0.85).
     pub mmr_threshold: Option<f64>,
+    /// Graph expand hops: 0 = disabled, 1-2 = expand through memory_edges after ranking.
+    /// Expanded entries are appended after the ranked results (lower priority).
+    pub graph_expand_hops: u32,
+    /// Optional filter for graph edges: "causes", "follows", "related_to", etc.
+    /// None = traverse all relation types.
+    pub graph_relation_filter: Option<String>,
 }
 
 impl Default for SearchOptions {
@@ -48,6 +55,8 @@ impl Default for SearchOptions {
             record_access: true,
             include_archived: false,
             mmr_threshold: Some(0.85),
+            graph_expand_hops: 0,
+            graph_relation_filter: None,
         }
     }
 }
@@ -173,13 +182,18 @@ pub fn hybrid_search(
         return Ok(vec![]);
     }
 
-    // ── Hybrid scoring ─────────────────────────────────────────────────────────
+    // ── ACT-R access history (Spreading Activation: 越用越靠前) ──────────────
+    let candidate_ids_vec: Vec<String> = entries_ref.keys().cloned().collect();
+    let access_times = get_access_times(conn, &candidate_ids_vec).unwrap_or_default();
+
+    // ── Hybrid scoring with ACT-R enhancement ─────────────────────────────────
     let scores = hybrid_score(
         &entries_ref,
         &vec_scores,
         &fts_scores,
         &symbolic_scores,
         &opts.weights,
+        &access_times,
     );
     // ── Sort and take top K ───────────────────────────────────────────────────
     let mut ranked: Vec<(&String, f64)> = scores
@@ -206,6 +220,50 @@ pub fn hybrid_search(
             Some(SearchResult { entry, score })
         })
         .collect();
+
+    // ── Graph expansion (post-search augmentation) ────────────────────────────
+    // If graph_expand_hops > 0, BFS from result IDs to find related entries
+    // and append them to results. This enriches search with causally/temporally
+    // linked memories without making them score higher than direct matches.
+    if opts.graph_expand_hops > 0 && !results.is_empty() {
+        let seed_ids: Vec<String> = results.iter().map(|r| r.entry.id.clone()).collect();
+        let rel_filter = opts.graph_relation_filter.as_deref();
+
+        if let Ok(expand_result) = graph_expand(conn, &seed_ids, opts.graph_expand_hops, rel_filter) {
+            let existing_ids: std::collections::HashSet<String> =
+                results.iter().map(|r| r.entry.id.clone()).collect();
+
+            let min_score = results.last()
+                .map(|r| r.score.final_score * 0.5)
+                .unwrap_or(0.1);
+
+            // Compute local PageRank on the expanded subgraph
+            let pr_scores = crate::scorer::local_pagerank(&expand_result.edges, 0.85);
+
+            let new_entries: Vec<SearchResult> = expand_result.entries
+                .into_iter()
+                .filter(|entry| !existing_ids.contains(&entry.id))
+                .map(|entry| {
+                    let distance = expand_result.distances.get(&entry.id).copied().unwrap_or(1);
+                    let pr = pr_scores.get(&entry.id).copied().unwrap_or(0.0);
+                    // Combine distance decay with PageRank: important hub nodes score higher
+                    let graph_boost = min_score * (0.5 / (distance as f64 + 1.0) + 0.5 * pr);
+                    SearchResult {
+                        entry,
+                        score: crate::types::HybridScore {
+                            vector: 0.0,
+                            fts: 0.0,
+                            symbolic: 0.0,
+                            decay: 0.0,
+                            final_score: graph_boost,
+                        },
+                    }
+                })
+                .collect();
+
+            results.extend(new_entries);
+        }
+    }
 
     // ── Record access (bump counters) ─────────────────────────────────────────
     if opts.record_access {

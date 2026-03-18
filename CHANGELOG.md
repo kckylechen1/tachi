@@ -5,6 +5,30 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0] - 2026-03-18
+
+### Added
+- **NEW: Native Rust MCP Server (`memory-server` crate)**: Complete replacement for the Python `mcp/server.py`. Single 5.2MB ARM64 binary with 10 MCP tools, built with `rmcp` SDK. Eliminates Python runtime dependency for the MCP server.
+- **LLM Integration in Rust (`llm.rs`)**: Voyage-4 embedding via `reqwest` (direct API) and SiliconFlow Qwen LLM via `async-openai` for L0 summary generation and fact extraction. All API calls happen asynchronously before database locks.
+- **Prompt Templates (`prompts.rs`)**: Extracted and hardcoded all LLM prompt templates (EXTRACTION_PROMPT, SUMMARY_PROMPT, CAUSAL_PROMPT) from Python into Rust constants.
+- **10 MCP Tools**: `save_memory` (with real-time Voyage-4 embedding + Qwen summary), `search_memory`, `get_memory`, `list_memories`, `memory_stats`, `set_state`, `get_state`, `extract_facts` (LLM-based), `ingest_event`, `get_pipeline_status`.
+- **Hard State Table in Rust**: `hard_state` table with `set_state`/`get_state` functions in `memory-core` for persistent KV storage.
+- **Memory Graph (`memory_edges` table)**: Added graph structure with edge management, PageRank scoring, and graph expansion in hybrid search.
+- **ACT-R Cognitive Decay**: Time-based decay scoring inspired by ACT-R cognitive architecture, integrated into hybrid search scorer.
+- **PageRank Integration**: Graph-aware PageRank scoring in hybrid search for importance-weighted retrieval.
+- **Noise Injection**: Configurable Gaussian noise for search score diversification.
+
+### Changed
+- **Architecture**: MCP server can now run as either Python (`mcp/server.py`) or native Rust binary (`memory-server`). Rust path eliminates PyO3 bridge overhead.
+- **Embedding Decision**: A/B tested Voyage-4 vs Qwen3-Embedding-8B (SiliconFlow). Voyage-4 won on discrimination (Δ 0.46 vs 0.37) and query latency (569ms vs 1017ms). Staying with Voyage-4.
+- **Thread Safety**: Replaced `tokio::sync::Mutex` with `std::sync::Mutex` for `rusqlite::Connection` (!Send safety in multi-threaded Tokio runtime).
+- **JSON Safety**: All JSON output uses `serde_json::to_string` instead of `format!` string concatenation.
+
+### Fixed
+- **ServerHandler Registration**: Fixed `rmcp` integration where `#[tool(tool_box)]` was missing on `ServerHandler` impl, causing tools to not register (empty `tools/list` response).
+- **Search Output Format**: `search_memory` returns human-readable summaries instead of raw JSON.
+- **State Management**: Proper `hard_state` table replaces hacky MemoryEntry-based state storage.
+
 ## [0.3.0] - 2026-03-14
 
 ### Added

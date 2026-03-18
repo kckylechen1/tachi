@@ -56,16 +56,33 @@
 请协助我配置安装 Sigil (MCP 记忆服务器)：
 
 1. 克隆仓库: git clone https://github.com/kckylechen1/sigil.git && cd sigil
-2. 构建服务端与环境:
+
+【方式一】幻术启灵（Python 运行时）：
    cd mcp && python3 -m venv .venv && source .venv/bin/activate
    cd ../crates/memory-python && pip install maturin && maturin develop --release
    cd ../../mcp && pip install -r requirements.txt
-3. 将以下配置追加至 mcp_config.json 配置文件中:
+   配置 mcp_config.json:
    {
      "mcpServers": {
        "memory": {
-         "command": "<使用绝对路径指向>/sigil/mcp/.venv/bin/python3",
-         "args": ["<使用绝对路径指向>/sigil/mcp/server.py"]
+         "command": "<绝对路径>/sigil/mcp/.venv/bin/python3",
+         "args": ["<绝对路径>/sigil/mcp/server.py"]
+       }
+     }
+   }
+
+【方式二】玄铁炼体（Rust 原生启·最速）：
+   cargo build -p memory-server --release
+   配置 mcp_config.json:
+   {
+     "mcpServers": {
+       "memory": {
+         "command": "<绝对路径>/sigil/target/release/memory-server",
+         "env": {
+           "VOYAGE_API_KEY": "...",
+           "SILICONFLOW_API_KEY": "...",
+           "MEMORY_DB_PATH": "~/.sigil/memory.db"
+         }
        }
      }
    }
@@ -135,43 +152,54 @@ Sigil 亦化身为 OpenClaw 气海之元婴法宝。
 ```mermaid
 graph TD
     subgraph Clients["四方来客"]
-        MCP["MCP 使节 (Python 3.10+)"]
+        MCP["MCP 幻术 (Python 3.10+)"]
+        RMCP["玄铁MCP (Rust 5.2MB 独体·推）"]
         OC["OpenClaw 分舵 (Node.js)"]
         NATIVE["玄铁器宗 (Rust Crates)"]
     end
 
-    subgraph Operations["暗卫司 (Python/Node)"]
+    subgraph Cloud["九天云阙"]
+        VOYAGE["Voyage-4 千维道标"]
+        SILICON["SiliconFlow Qwen 降神"]
+    end
+
+    subgraph Operations["暗卫司 (异步)"]
         EXTRACT["照妖镜 (Qwen)"]
         DISTILL["化骨炉 (Qwen)"]
         CAUSAL["天机枢"]
         CONSOLIDATE["拾荒人"]
     end
 
-    subgraph Core["Sigil 剑冢 (Rust 'memory-core')"]
+    subgraph Core["Sigil 剑冢 (Rust memory-core)"]
         NAPI["NAPI 皮囊"]
         PYO3["PyO3 皮囊"]
-        
+
         NAPI --- LIB[/"lib.rs (心经)"/]
         PYO3 --- LIB
-        
-        LIB --> SEARCH["四象绝杀阵"]
+
+        LIB --> SEARCH["五行搜魂阵"]
         LIB --> GRAPH["因果千丝网"]
-        
+
         SEARCH --> SQLITE[("袖里乾坤 SQLite + vec0")]
         GRAPH --> SQLITE
     end
 
+    RMCP ==>|"静态链接·无皮囊"| LIB
+    RMCP -->|"reqwest"| VOYAGE
+    RMCP -->|"async-openai"| SILICON
     MCP --> PYO3
     OC --> NAPI
-    MCP -. 飞鸽传书 .-> Operations
-    Operations -. 斩金截铁 .-> PYO3
-    
+    MCP -.->|"飞鸽传书"| Operations
+    Operations -.->|"斩金截铁"| PYO3
+
     classDef client fill:#3b2e5a,stroke:#8a5cf5,stroke-width:2px,color:#fff;
-    classDef worker fill:#5a4f2e,stroke:#f5cw5a,stroke-width:2px,color:#fff;
+    classDef cloud fill:#2e3d5a,stroke:#5a9cf5,stroke-width:2px,color:#fff;
+    classDef worker fill:#5a4f2e,stroke:#f5c55a,stroke-width:2px,color:#fff;
     classDef rust fill:#5a2e2e,stroke:#f55c5c,stroke-width:2px,color:#fff;
     classDef db fill:#2e5a40,stroke:#5cf58a,stroke-width:2px,color:#fff;
-    
-    class MCP,OC,NATIVE client;
+
+    class MCP,RMCP,OC,NATIVE client;
+    class VOYAGE,SILICON cloud;
     class EXTRACT,DISTILL,CAUSAL,CONSOLIDATE worker;
     class NAPI,PYO3,LIB,SEARCH,GRAPH rust;
     class SQLITE db;
@@ -188,6 +216,7 @@ graph TD
 | **搜神引（Embedding）** | [Voyage-4](https://voyageai.com/) | 千维道标，八荒九州语皆可探明。与玄铁丹心（Rust 核心）直接交汇。 |
 | **抽丝剥茧（抽取）** | [Qwen3.5-27B](https://cloud.siliconflow.cn/i/QwFqsLF1) | 断文识字、破空捉影。（惟于 `ENABLE_PIPELINE=true` 方遣将其降世）|
 | **大造化（全局蒸馏）** | [Qwen3.5-27B](https://cloud.siliconflow.cn/i/QwFqsLF1) | 以同源之智凝练万里乾坤总纲。（同上） |
+| **异步法器（Rust）** | [`async-openai`](https://github.com/64bit/async-openai) + [`reqwest`](https://docs.rs/reqwest/) | 玄铁MCP之内丹，直通云端法力，异步吞吐，不滞于物。 |
 
 ---
 

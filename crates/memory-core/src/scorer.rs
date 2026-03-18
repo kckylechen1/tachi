@@ -59,6 +59,143 @@ pub fn decay_score(entry: &MemoryEntry) -> f64 {
     (recency * (1.0 + 0.2 * frequency)).max(importance_floor)
 }
 
+/// ACT-R Base-Level Activation: B_i = ln(Σ t_j^(-d))
+/// Where t_j is the age of each access in seconds, d is the decay parameter.
+/// More frequent and more recent accesses → higher activation.
+/// Returns 0.0 if no access history (falls back to existing decay_score).
+pub fn base_level_activation(access_ages_secs: &[f64], d: f64) -> f64 {
+    if access_ages_secs.is_empty() {
+        return 0.0;
+    }
+    let sum: f64 = access_ages_secs
+        .iter()
+        .map(|t| t.max(1.0).powf(-d))
+        .sum();
+    if sum > 0.0 { sum.ln() } else { 0.0 }
+}
+
+/// Enhanced decay score using ACT-R base-level activation when access history is available.
+/// Falls back to the simplified decay_score when no history is provided.
+pub fn decay_score_actr(entry: &MemoryEntry, access_ages: Option<&[f64]>) -> f64 {
+    match access_ages {
+        Some(ages) if !ages.is_empty() => {
+            let bla = base_level_activation(ages, 0.5);
+            // Normalize to [0, 1] range: BLA typically ranges from -5 to +5
+            let normalized = (bla + 5.0) / 10.0;
+            normalized.clamp(0.0, 1.0).max(entry.importance * 0.3)
+        }
+        _ => decay_score(entry),
+    }
+}
+
+/// Local PageRank on a subgraph of MemoryEdges.
+/// Returns a map from node_id → PageRank score (normalized to [0, 1]).
+/// Uses 5 iterations with damping factor d=0.85.
+/// Nodes with more incoming edges from important nodes rank higher.
+pub fn local_pagerank(edges: &[crate::types::MemoryEdge], damping: f64) -> HashMap<String, f64> {
+    use std::collections::HashSet;
+
+    // Collect all node IDs
+    let mut nodes: HashSet<String> = HashSet::new();
+    for edge in edges {
+        nodes.insert(edge.source_id.clone());
+        nodes.insert(edge.target_id.clone());
+    }
+
+    if nodes.is_empty() {
+        return HashMap::new();
+    }
+
+    let n = nodes.len() as f64;
+    let base = (1.0 - damping) / n;
+
+    // Build adjacency: source → list of targets
+    // Exclude 'contradicts' edges — contradictions indicate conflict, not authority
+    let mut outgoing: HashMap<&str, Vec<&str>> = HashMap::new();
+    for edge in edges {
+        if edge.relation != "contradicts" {
+            outgoing.entry(edge.source_id.as_str()).or_default().push(edge.target_id.as_str());
+        }
+    }
+
+    // Initialize scores uniformly
+    let mut scores: HashMap<String, f64> = nodes.iter().map(|id| (id.clone(), 1.0 / n)).collect();
+
+    // 5 iterations of PageRank
+    for _ in 0..5 {
+        let mut new_scores: HashMap<String, f64> = nodes.iter().map(|id| (id.clone(), base)).collect();
+
+        for (source, targets) in &outgoing {
+            let source_score = scores.get(*source).copied().unwrap_or(0.0);
+            let share = source_score / targets.len() as f64;
+            for target in targets {
+                if let Some(s) = new_scores.get_mut(*target) {
+                    *s += damping * share;
+                }
+            }
+        }
+
+        scores = new_scores;
+    }
+
+    // Normalize to [0, 1]
+    let max_score = scores.values().cloned().fold(0.0_f64, f64::max);
+    if max_score > 0.0 {
+        for score in scores.values_mut() {
+            *score /= max_score;
+        }
+    }
+
+    scores
+}
+
+/// Compute surprise score for a memory entry based on novelty signals.
+/// Surprise is higher for:
+///   - New topics (topic not matching common patterns)
+///   - Entries with contradicting edges (contradiction_count > 0)
+///   - High importance combined with low access (unexpected significance)
+///
+/// Returns a value in [0, 1] that can be used to boost importance.
+/// This is a pure computation — no LLM calls needed.
+pub fn surprise_score(
+    entry: &MemoryEntry,
+    avg_importance: f64,
+    contradiction_count: u32,
+    total_same_topic: u32,
+) -> f64 {
+    // Component 1: Importance surprise — how much does this entry deviate from average?
+    let importance_surprise = (entry.importance - avg_importance).abs();
+
+    // Component 2: Contradiction signal — contradictions are inherently surprising
+    let contradiction_surprise = if contradiction_count > 0 {
+        (1.0 + contradiction_count as f64).ln() / 3.0  // logarithmic scale, max ~0.7
+    } else {
+        0.0
+    };
+
+    // Component 3: Topic novelty — rare topics are more surprising
+    let topic_novelty = if total_same_topic <= 1 {
+        0.5  // New/unique topic
+    } else {
+        1.0 / (total_same_topic as f64)  // Diminishing novelty
+    };
+
+    // Component 4: Low-access high-importance = overlooked valuable memory
+    let overlooked = if entry.access_count == 0 && entry.importance > 0.7 {
+        0.3
+    } else {
+        0.0
+    };
+
+    // Weighted combination
+    let raw = 0.25 * importance_surprise
+        + 0.30 * contradiction_surprise
+        + 0.25 * topic_novelty
+        + 0.20 * overlooked;
+
+    raw.clamp(0.0, 1.0)
+}
+
 /// Reciprocal Rank Fusion (RRF) score used to merge sorted lists.
 /// Standard k=60 constant. Reserved for future RRF-mode scoring.
 #[inline]
@@ -92,12 +229,14 @@ impl Default for HybridWeights {
 /// Merge several scored lists into a single HybridScore per doc-id.
 ///
 /// `vec_scores`, `fts_scores`, `symbolic_scores` are maps from doc-id → normalised score [0,1].
+/// `access_times` is a map from doc-id → list of access ages in seconds (for ACT-R BLA).
 pub fn hybrid_score(
     entries: &HashMap<String, &MemoryEntry>,
     vec_scores: &HashMap<String, f64>,
     fts_scores: &HashMap<String, f64>,
     symbolic_scores: &HashMap<String, f64>,
     weights: &HybridWeights,
+    access_times: &HashMap<String, Vec<f64>>,
 ) -> HashMap<String, HybridScore> {
     let all_ids: std::collections::HashSet<&String> = vec_scores
         .keys()
@@ -112,9 +251,13 @@ pub fn hybrid_score(
         let fs = normalize(*fts_scores.get(id).unwrap_or(&0.0));
         let ss = normalize(*symbolic_scores.get(id).unwrap_or(&0.0));
 
+        // Use ACT-R enhanced decay when access history exists, else fallback
         let ds = entries
             .get(id.as_str())
-            .map(|e| decay_score(e))
+            .map(|e| {
+                let ages = access_times.get(id).map(|v| v.as_slice());
+                decay_score_actr(e, ages)
+            })
             .unwrap_or(0.0);
 
         let final_score = weights.semantic * vs

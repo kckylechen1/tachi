@@ -141,6 +141,47 @@ pub struct StatsResult {
     pub by_root_path: std::collections::HashMap<String, u64>,
 }
 
+// ─── Graph Types ─────────────────────────────────────────────────────────────
+
+/// A directed edge between two memory entries in the memory graph.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MemoryEdge {
+    /// Source memory ID
+    pub source_id: String,
+    /// Target memory ID
+    pub target_id: String,
+    /// Relationship type: "causes", "supports", "contradicts", "follows", "related_to"
+    pub relation: String,
+    /// Edge weight (0.0–1.0)
+    #[serde(default = "default_edge_weight")]
+    pub weight: f64,
+    /// Optional JSON metadata (confidence, timespan, etc.)
+    #[serde(default = "default_metadata")]
+    pub metadata: serde_json::Value,
+    /// When the edge was created
+    #[serde(default)]
+    pub created_at: String,
+    /// When the edge becomes valid (temporal validity start)
+    #[serde(default)]
+    pub valid_from: String,
+    /// When the edge expires (temporal validity end); None = no expiry
+    #[serde(default)]
+    pub valid_to: Option<String>,
+}
+
+fn default_edge_weight() -> f64 { 1.0 }
+
+/// Result of a graph expansion query
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GraphExpandResult {
+    /// Memory entries found via graph traversal
+    pub entries: Vec<MemoryEntry>,
+    /// Edges traversed during expansion
+    pub edges: Vec<MemoryEdge>,
+    /// Hop distance for each entry ID
+    pub distances: std::collections::HashMap<String, u32>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

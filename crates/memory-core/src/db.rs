@@ -62,6 +62,40 @@ pub fn init_schema(conn: &Connection) -> Result<(), MemoryError> {
             entities,
             tokenize = 'simple'
         );
+
+        -- Memory graph edges for causal/temporal/entity relationships
+        CREATE TABLE IF NOT EXISTS memory_edges (
+            source_id  TEXT NOT NULL,
+            target_id  TEXT NOT NULL,
+            relation   TEXT NOT NULL,
+            weight     REAL NOT NULL DEFAULT 1.0,
+            metadata   TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL DEFAULT '',
+            PRIMARY KEY (source_id, target_id, relation)
+        );
+        CREATE INDEX IF NOT EXISTS idx_edges_source ON memory_edges(source_id);
+        CREATE INDEX IF NOT EXISTS idx_edges_target ON memory_edges(target_id);
+        CREATE INDEX IF NOT EXISTS idx_edges_relation ON memory_edges(relation);
+
+        -- Deterministic KV state (no vector search, no LLM)
+        CREATE TABLE IF NOT EXISTS hard_state (
+            namespace        TEXT NOT NULL,
+            key              TEXT NOT NULL,
+            value_json       TEXT NOT NULL DEFAULT '{}',
+            version          INTEGER NOT NULL DEFAULT 1,
+            created_at       TEXT NOT NULL DEFAULT '',
+            updated_at       TEXT NOT NULL DEFAULT '',
+            PRIMARY KEY (namespace, key)
+        );
+
+        -- Access history for ACT-R base-level activation
+        CREATE TABLE IF NOT EXISTS access_history (
+            memory_id  TEXT NOT NULL,
+            accessed_at TEXT NOT NULL,
+            query_hash  TEXT NOT NULL DEFAULT ''
+        );
+        CREATE INDEX IF NOT EXISTS idx_access_hist_mem ON access_history(memory_id);
+        CREATE INDEX IF NOT EXISTS idx_access_hist_time ON access_history(accessed_at DESC);
     "#)?;
 
     // Forward-compatible migrations for existing DB files created before
@@ -84,6 +118,10 @@ pub fn init_schema(conn: &Connection) -> Result<(), MemoryError> {
         "updated_at",
         "TEXT NOT NULL DEFAULT ''",
     )?;
+
+    // Temporal edge columns for memory_edges
+    ensure_column(conn, "memory_edges", "valid_from", "TEXT NOT NULL DEFAULT ''")?;
+    ensure_column(conn, "memory_edges", "valid_to", "TEXT")?;
 
     // Indexes on migrated columns — MUST come after ensure_column so the
     // columns exist on legacy databases that were created without them.
@@ -562,6 +600,7 @@ pub fn list_by_path(
 }
 
 /// Bump access_count and last_access for a list of IDs (called after every search).
+/// Also records access timestamps for ACT-R base-level activation.
 pub fn record_access(conn: &Connection, ids: &[String]) -> Result<(), MemoryError> {
     if ids.is_empty() {
         return Ok(());
@@ -576,9 +615,63 @@ pub fn record_access(conn: &Connection, ids: &[String]) -> Result<(), MemoryErro
              WHERE id = ?2",
             params![&now, id],
         )?;
+        // Also record timestamp for ACT-R base-level activation
+        tx.execute(
+            "INSERT INTO access_history (memory_id, accessed_at) VALUES (?1, ?2)",
+            params![id, &now],
+        )?;
     }
     tx.commit()?;
     Ok(())
+}
+
+/// Record access timestamps for ACT-R base-level activation.
+/// Called alongside record_access after each search.
+pub fn record_access_history(conn: &Connection, ids: &[String]) -> Result<(), MemoryError> {
+    if ids.is_empty() {
+        return Ok(());
+    }
+    let now = now_utc_iso();
+    let tx = conn.unchecked_transaction()?;
+    for id in ids {
+        tx.execute(
+            "INSERT INTO access_history (memory_id, accessed_at) VALUES (?1, ?2)",
+            params![id, &now],
+        )?;
+    }
+    tx.commit()?;
+    Ok(())
+}
+
+/// Fetch access timestamps for a set of memory IDs (for ACT-R base-level activation).
+/// Returns a map from memory_id -> sorted list of seconds-since-epoch (age in seconds).
+pub fn get_access_times(conn: &Connection, ids: &[String]) -> Result<HashMap<String, Vec<f64>>, MemoryError> {
+    if ids.is_empty() {
+        return Ok(HashMap::new());
+    }
+    let placeholders: Vec<String> = ids.iter().enumerate().map(|(i, _)| format!("?{}", i + 1)).collect();
+    let sql = format!(
+        "SELECT memory_id, accessed_at FROM access_history WHERE memory_id IN ({}) ORDER BY accessed_at DESC",
+        placeholders.join(", ")
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let params_vec: Vec<&dyn rusqlite::ToSql> = ids.iter().map(|s| s as &dyn rusqlite::ToSql).collect();
+    let rows = stmt.query_map(params_vec.as_slice(), |row| {
+        let mem_id: String = row.get(0)?;
+        let at: String = row.get(1)?;
+        Ok((mem_id, at))
+    })?;
+
+    let now = Utc::now();
+    let mut result: HashMap<String, Vec<f64>> = HashMap::new();
+    for row in rows {
+        let (mem_id, at_str) = row?;
+        if let Ok(dt) = at_str.parse::<DateTime<Utc>>() {
+            let age_secs = (now - dt).num_seconds().max(1) as f64;
+            result.entry(mem_id).or_default().push(age_secs);
+        }
+    }
+    Ok(result)
 }
 
 // ─── DELETE ───────────────────────────────────────────────────────────────────
@@ -605,6 +698,9 @@ pub fn delete(conn: &Connection, id: &str, vec_available: bool) -> Result<bool, 
         if vec_available {
             let _ = tx.execute("DELETE FROM memories_vec WHERE id = ?1", params![trimmed]);
         }
+
+        // Clean up graph edges
+        tx.execute("DELETE FROM memory_edges WHERE source_id = ?1 OR target_id = ?1", params![trimmed])?;
     }
 
     tx.commit()?;
@@ -689,6 +785,269 @@ pub fn stats(conn: &Connection, include_archived: bool) -> Result<crate::types::
         by_category,
         by_root_path,
     })
+}
+
+// ─── Graph Operations ─────────────────────────────────────────────────────────
+
+use crate::types::{MemoryEdge, GraphExpandResult};
+
+/// Add or update an edge in the memory graph.
+pub fn add_edge(conn: &Connection, edge: &MemoryEdge) -> Result<(), MemoryError> {
+    let created = if edge.created_at.is_empty() {
+        now_utc_iso()
+    } else {
+        normalize_utc_iso_or_now(&edge.created_at)
+    };
+    let valid_from = if edge.valid_from.is_empty() {
+        created.clone()
+    } else {
+        normalize_utc_iso_or_now(&edge.valid_from)
+    };
+    let meta_str = serde_json::to_string(&edge.metadata)
+        .unwrap_or_else(|_| "{}".to_string());
+
+    conn.execute(
+        r#"INSERT INTO memory_edges (source_id, target_id, relation, weight, metadata, created_at, valid_from, valid_to)
+           VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+           ON CONFLICT(source_id, target_id, relation)
+           DO UPDATE SET weight = ?4, metadata = ?5, created_at = ?6, valid_from = ?7, valid_to = ?8"#,
+        params![edge.source_id, edge.target_id, edge.relation, edge.weight, meta_str, created, valid_from, edge.valid_to],
+    )?;
+    Ok(())
+}
+
+/// Remove an edge from the memory graph.
+pub fn remove_edge(
+    conn: &Connection,
+    source_id: &str,
+    target_id: &str,
+    relation: &str,
+) -> Result<bool, MemoryError> {
+    let count = conn.execute(
+        "DELETE FROM memory_edges WHERE source_id = ?1 AND target_id = ?2 AND relation = ?3",
+        params![source_id, target_id, relation],
+    )?;
+    Ok(count > 0)
+}
+
+/// Get all edges connected to a memory ID.
+/// direction: "outgoing" (source_id match), "incoming" (target_id match), or "both"
+pub fn get_edges(
+    conn: &Connection,
+    memory_id: &str,
+    direction: &str,
+    relation_filter: Option<&str>,
+) -> Result<Vec<MemoryEdge>, MemoryError> {
+    let (sql, id_param) = match direction {
+        "incoming" => (
+            "SELECT source_id, target_id, relation, weight, metadata, created_at, valid_from, valid_to FROM memory_edges WHERE target_id = ?1
+             AND (valid_to IS NULL OR valid_to > datetime('now'))",
+            memory_id,
+        ),
+        "outgoing" => (
+            "SELECT source_id, target_id, relation, weight, metadata, created_at, valid_from, valid_to FROM memory_edges WHERE source_id = ?1
+             AND (valid_to IS NULL OR valid_to > datetime('now'))",
+            memory_id,
+        ),
+        _ => (
+            "SELECT source_id, target_id, relation, weight, metadata, created_at, valid_from, valid_to FROM memory_edges WHERE source_id = ?1 OR target_id = ?1
+             AND (valid_to IS NULL OR valid_to > datetime('now'))",
+            memory_id,
+        ),
+    };
+
+    let full_sql = if let Some(rel) = relation_filter {
+        format!("{} AND relation = '{}'", sql, rel.replace('\'', "''"))
+    } else {
+        sql.to_string()
+    };
+
+    let mut stmt = conn.prepare(&full_sql)?;
+    let edges = stmt.query_map(params![id_param], |row| {
+        let meta_str: String = row.get(4)?;
+        let metadata = serde_json::from_str(&meta_str).unwrap_or_default();
+        Ok(MemoryEdge {
+            source_id: row.get(0)?,
+            target_id: row.get(1)?,
+            relation: row.get(2)?,
+            weight: row.get(3)?,
+            metadata,
+            created_at: row.get(5)?,
+            valid_from: row.get(6)?,
+            valid_to: row.get(7)?,
+        })
+    })?.filter_map(|r| r.ok()).collect();
+
+    Ok(edges)
+}
+
+/// Count the number of 'contradicts' edges for a given memory ID.
+/// Used by surprise scoring to detect controversial/surprising memories.
+pub fn get_contradiction_count(conn: &Connection, memory_id: &str) -> Result<u32, MemoryError> {
+    let count: u32 = conn.query_row(
+        "SELECT COUNT(*) FROM memory_edges WHERE (source_id = ?1 OR target_id = ?1) AND relation = 'contradicts' AND (valid_to IS NULL OR valid_to > datetime('now'))",
+        params![memory_id],
+        |row| row.get(0),
+    )?;
+    Ok(count)
+}
+
+/// Count how many memories share the same topic as the given entry.
+/// Used by surprise scoring for topic novelty.
+pub fn count_same_topic(conn: &Connection, topic: &str) -> Result<u32, MemoryError> {
+    if topic.is_empty() {
+        return Ok(0);
+    }
+    let count: u32 = conn.query_row(
+        "SELECT COUNT(*) FROM memories WHERE topic = ?1 AND archived = 0",
+        params![topic],
+        |row| row.get(0),
+    )?;
+    Ok(count)
+}
+
+/// Get the average importance across all non-archived memories.
+/// Used by surprise scoring.
+pub fn avg_importance(conn: &Connection) -> Result<f64, MemoryError> {
+    let avg: f64 = conn.query_row(
+        "SELECT COALESCE(AVG(importance), 0.7) FROM memories WHERE archived = 0",
+        [],
+        |row| row.get(0),
+    )?;
+    Ok(avg)
+}
+
+/// BFS graph expansion from seed memory IDs.
+/// Returns entries found within `max_hops` of any seed, plus the edges traversed.
+pub fn graph_expand(
+    conn: &Connection,
+    seed_ids: &[String],
+    max_hops: u32,
+    relation_filter: Option<&str>,
+) -> Result<GraphExpandResult, MemoryError> {
+    use std::collections::{HashMap, HashSet, VecDeque};
+
+    let mut visited: HashSet<String> = HashSet::new();
+    let mut distances: HashMap<String, u32> = HashMap::new();
+    let mut all_edges: Vec<MemoryEdge> = Vec::new();
+    let mut queue: VecDeque<(String, u32)> = VecDeque::new();
+
+    // Initialize with seeds at distance 0
+    for id in seed_ids {
+        if visited.insert(id.clone()) {
+            distances.insert(id.clone(), 0);
+            queue.push_back((id.clone(), 0));
+        }
+    }
+
+    // BFS
+    while let Some((current_id, depth)) = queue.pop_front() {
+        if depth >= max_hops {
+            continue;
+        }
+
+        let edges = get_edges(conn, &current_id, "both", relation_filter)?;
+        for edge in &edges {
+            let neighbor = if edge.source_id == current_id {
+                &edge.target_id
+            } else {
+                &edge.source_id
+            };
+
+            if visited.insert(neighbor.clone()) {
+                let new_depth = depth + 1;
+                distances.insert(neighbor.clone(), new_depth);
+                queue.push_back((neighbor.clone(), new_depth));
+            }
+        }
+        all_edges.extend(edges);
+    }
+
+    // Fetch all discovered entries (exclude seeds — caller already has those)
+    let non_seed_ids: Vec<String> = distances.keys()
+        .filter(|id| !seed_ids.contains(id))
+        .cloned()
+        .collect();
+
+    let entries = if non_seed_ids.is_empty() {
+        Vec::new()
+    } else {
+        let map = fetch_by_ids(conn, &non_seed_ids, false)?;
+        map.into_values().collect()
+    };
+
+    // Deduplicate edges
+    all_edges.sort_by(|a, b| {
+        (&a.source_id, &a.target_id, &a.relation)
+            .cmp(&(&b.source_id, &b.target_id, &b.relation))
+    });
+    all_edges.dedup_by(|a, b| {
+        a.source_id == b.source_id && a.target_id == b.target_id && a.relation == b.relation
+    });
+
+    Ok(GraphExpandResult {
+        entries,
+        edges: all_edges,
+        distances,
+    })
+}
+
+/// Remove all edges referencing a memory ID (both as source and target).
+/// Call this when deleting a memory entry to keep the graph consistent.
+pub fn remove_edges_for_memory(conn: &Connection, memory_id: &str) -> Result<usize, MemoryError> {
+    let count = conn.execute(
+        "DELETE FROM memory_edges WHERE source_id = ?1 OR target_id = ?1",
+        params![memory_id],
+    )?;
+    Ok(count)
+}
+
+// ─── Hard State Operations ─────────────────────────────────────────────────────
+
+/// Set a key-value pair in the hard_state table. INSERT OR UPDATE with version bump.
+pub fn set_state(
+    conn: &Connection,
+    namespace: &str,
+    key: &str,
+    value_json: &str,
+) -> Result<u32, MemoryError> {
+    let now = now_utc_iso();
+    conn.execute(
+        "INSERT INTO hard_state (namespace, key, value_json, version, created_at, updated_at)
+         VALUES (?1, ?2, ?3, 1, ?4, ?4)
+         ON CONFLICT(namespace, key) DO UPDATE SET
+           value_json = excluded.value_json,
+           version = hard_state.version + 1,
+           updated_at = excluded.updated_at",
+        params![namespace, key, value_json, &now],
+    )?;
+    let version: u32 = conn.query_row(
+        "SELECT version FROM hard_state WHERE namespace = ?1 AND key = ?2",
+        params![namespace, key],
+        |row| row.get(0),
+    )?;
+    Ok(version)
+}
+
+/// Get a key-value pair from the hard_state table.
+pub fn get_state(
+    conn: &Connection,
+    namespace: &str,
+    key: &str,
+) -> Result<Option<(String, u32)>, MemoryError> {
+    let mut stmt = conn.prepare(
+        "SELECT value_json, version FROM hard_state WHERE namespace = ?1 AND key = ?2"
+    )?;
+    let result = stmt.query_row(params![namespace, key], |row| {
+        let val: String = row.get(0)?;
+        let ver: u32 = row.get(1)?;
+        Ok((val, ver))
+    });
+    match result {
+        Ok(pair) => Ok(Some(pair)),
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+        Err(e) => Err(MemoryError::from(e)),
+    }
 }
 
 #[cfg(test)]
@@ -833,5 +1192,88 @@ mod tests {
         assert_eq!(s.by_category.get("decision"), Some(&1_u64));
         assert_eq!(s.by_root_path.get("/project"), Some(&2_u64));
         assert_eq!(s.by_root_path.get("/user"), Some(&1_u64));
+    }
+
+    #[test]
+    fn graph_add_and_get_edges() {
+        let conn = make_conn();
+        let e1 = make_entry("g1", "cause event");
+        let e2 = make_entry("g2", "effect event");
+        upsert(&conn, &e1, false).unwrap();
+        upsert(&conn, &e2, false).unwrap();
+
+        let edge = MemoryEdge {
+            source_id: "g1".into(),
+            target_id: "g2".into(),
+            relation: "causes".into(),
+            weight: 0.9,
+            metadata: serde_json::json!({}),
+            created_at: String::new(),
+            valid_from: String::new(),
+            valid_to: None,
+        };
+        add_edge(&conn, &edge).unwrap();
+
+        let out = get_edges(&conn, "g1", "outgoing", None).unwrap();
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].target_id, "g2");
+        assert_eq!(out[0].relation, "causes");
+
+        let inc = get_edges(&conn, "g2", "incoming", None).unwrap();
+        assert_eq!(inc.len(), 1);
+        assert_eq!(inc[0].source_id, "g1");
+    }
+
+    #[test]
+    fn graph_expand_bfs() {
+        let conn = make_conn();
+        // Create chain: a -> b -> c
+        for id in &["a", "b", "c", "d"] {
+            upsert(&conn, &make_entry(id, &format!("node {}", id)), false).unwrap();
+        }
+        add_edge(&conn, &MemoryEdge {
+            source_id: "a".into(), target_id: "b".into(),
+            relation: "follows".into(), weight: 1.0,
+            metadata: serde_json::json!({}), created_at: String::new(),
+            valid_from: String::new(), valid_to: None,
+        }).unwrap();
+        add_edge(&conn, &MemoryEdge {
+            source_id: "b".into(), target_id: "c".into(),
+            relation: "follows".into(), weight: 1.0,
+            metadata: serde_json::json!({}), created_at: String::new(),
+            valid_from: String::new(), valid_to: None,
+        }).unwrap();
+        // d is disconnected
+
+        // Expand 1 hop from "a"
+        let r1 = graph_expand(&conn, &["a".into()], 1, None).unwrap();
+        assert_eq!(r1.entries.len(), 1); // should find b
+        assert!(r1.distances.contains_key("b"));
+        assert!(!r1.distances.contains_key("c")); // c is 2 hops
+
+        // Expand 2 hops from "a"
+        let r2 = graph_expand(&conn, &["a".into()], 2, None).unwrap();
+        assert_eq!(r2.entries.len(), 2); // b and c
+        assert!(r2.distances.contains_key("c"));
+        assert!(!r2.distances.contains_key("d")); // d is disconnected
+    }
+
+    #[test]
+    fn delete_cascades_edges() {
+        let conn = make_conn();
+        let e1 = make_entry("del-e1", "source");
+        let e2 = make_entry("del-e2", "target");
+        upsert(&conn, &e1, false).unwrap();
+        upsert(&conn, &e2, false).unwrap();
+        add_edge(&conn, &MemoryEdge {
+            source_id: "del-e1".into(), target_id: "del-e2".into(),
+            relation: "causes".into(), weight: 1.0,
+            metadata: serde_json::json!({}), created_at: String::new(),
+            valid_from: String::new(), valid_to: None,
+        }).unwrap();
+
+        delete(&conn, "del-e1", false).unwrap();
+        let edges = get_edges(&conn, "del-e2", "both", None).unwrap();
+        assert!(edges.is_empty(), "edges should be cleaned up on delete");
     }
 }

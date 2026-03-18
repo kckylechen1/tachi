@@ -128,8 +128,14 @@ async def _call_llm(
     timeout: float = 120,
     retries: int | None = None,
     retry_base_delay: float | None = None,
+    extra_body: dict | None = None,
 ) -> str:
-    """Shared LLM caller used by extractors/workers."""
+    """Shared LLM caller used by extractors/workers.
+    
+    Args:
+        extra_body: Additional keys merged into request JSON, e.g.
+                    {"enable_thinking": False} for SiliconFlow Qwen3.5 models.
+    """
     if not SILICONFLOW_API_KEY:
         raise ValueError("SILICONFLOW_API_KEY not set")
 
@@ -147,6 +153,15 @@ async def _call_llm(
     # 使用全局 client 复用连接池
     client = _get_global_client(timeout)
 
+    body = {
+        "model": model or SILICONFLOW_MODEL,
+        "temperature": temperature,
+        "max_tokens": max_tokens,
+        "messages": messages,
+    }
+    if extra_body:
+        body.update(extra_body)
+
     for attempt in range(1, max_attempts + 1):
         try:
             r = await client.post(
@@ -155,12 +170,7 @@ async def _call_llm(
                     "Authorization": f"Bearer {SILICONFLOW_API_KEY}",
                     "Content-Type": "application/json",
                 },
-                json={
-                    "model": model or SILICONFLOW_MODEL,
-                    "temperature": temperature,
-                    "max_tokens": max_tokens,
-                    "messages": messages,
-                },
+                json=body,
             )
             r.raise_for_status()
             return r.json()["choices"][0]["message"]["content"]

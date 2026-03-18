@@ -11,7 +11,7 @@ pub mod search;
 pub mod types;
 
 pub use error::MemoryError;
-pub use types::{HybridScore, MemoryEntry, SearchResult, StatsResult};
+pub use types::{HybridScore, MemoryEntry, MemoryEdge, GraphExpandResult, SearchResult, StatsResult};
 pub use search::{SearchOptions, hybrid_search};
 pub use scorer::HybridWeights;
 pub use noise::{is_noise_text, should_skip_query};
@@ -118,5 +118,54 @@ impl MemoryStore {
     /// Get aggregate statistics about the memory store.
     pub fn stats(&self, include_archived: bool) -> Result<StatsResult, MemoryError> {
         db::stats(&self.conn, include_archived)
+    }
+
+    // ─── Graph Operations ────────────────────────────────────────────────────
+
+    /// Add or update an edge in the memory graph.
+    pub fn add_edge(&self, edge: &MemoryEdge) -> Result<(), MemoryError> {
+        db::add_edge(&self.conn, edge)
+    }
+
+    /// Remove a specific edge.
+    pub fn remove_edge(
+        &self,
+        source_id: &str,
+        target_id: &str,
+        relation: &str,
+    ) -> Result<bool, MemoryError> {
+        db::remove_edge(&self.conn, source_id, target_id, relation)
+    }
+
+    /// Get edges connected to a memory entry.
+    pub fn get_edges(
+        &self,
+        memory_id: &str,
+        direction: &str,
+        relation_filter: Option<&str>,
+    ) -> Result<Vec<MemoryEdge>, MemoryError> {
+        db::get_edges(&self.conn, memory_id, direction, relation_filter)
+    }
+
+    /// BFS expansion from seed IDs through the memory graph.
+    pub fn graph_expand(
+        &self,
+        seed_ids: &[String],
+        max_hops: u32,
+        relation_filter: Option<&str>,
+    ) -> Result<GraphExpandResult, MemoryError> {
+        db::graph_expand(&self.conn, seed_ids, max_hops, relation_filter)
+    }
+
+    // ─── Hard State Operations ────────────────────────────────────────────────
+
+    /// Set a deterministic key-value state.
+    pub fn set_state(&self, namespace: &str, key: &str, value_json: &str) -> Result<u32, MemoryError> {
+        db::set_state(&self.conn, namespace, key, value_json)
+    }
+
+    /// Get a deterministic key-value state.
+    pub fn get_state_kv(&self, namespace: &str, key: &str) -> Result<Option<(String, u32)>, MemoryError> {
+        db::get_state(&self.conn, namespace, key)
     }
 }
