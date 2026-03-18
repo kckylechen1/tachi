@@ -22,7 +22,7 @@ SILICONFLOW_MODEL = os.environ.get(
     "SILICONFLOW_MODEL",
     os.environ.get(
         "EXTRACTOR_MODEL", "Qwen/Qwen2.5-7B-Instruct"
-    ),  # 修复：从27B改为7B，速度提升20倍
+    ),  # 7B速度快质量够用，3.5系列thinking模式无法关闭
 )
 SUMMARY_MODEL = os.environ.get("SUMMARY_MODEL", SILICONFLOW_MODEL)
 _RETRYABLE_STATUS_CODES = {408, 409, 429, 500, 502, 503, 504}
