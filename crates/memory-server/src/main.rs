@@ -705,8 +705,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// Acquire an advisory file lock to prevent multiple server instances.
+/// Acquire an advisory file lock to detect multiple server instances.
 /// Returns the lock File which must be kept alive for the process lifetime.
+/// Multiple instances are allowed (busy_timeout handles coordination),
+/// but a warning is emitted so users know about potential contention.
 #[cfg(unix)]
 fn acquire_instance_lock(path: &std::path::Path) -> Result<std::fs::File, Box<dyn std::error::Error>> {
     let file = std::fs::OpenOptions::new()
@@ -715,14 +717,14 @@ fn acquire_instance_lock(path: &std::path::Path) -> Result<std::fs::File, Box<dy
         .truncate(false)
         .open(path)?;
 
-    // Try non-blocking exclusive lock
+    // Try non-blocking exclusive lock — warn but don't fail
     let ret = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
     if ret != 0 {
-        return Err(format!(
-            "Another memory-server instance is already running (lock file: {}). \
-             Only one instance should access the database at a time.",
+        eprintln!(
+            "WARNING: Another memory-server instance may be accessing this database (lock file: {}). \
+             Concurrent access is supported via busy_timeout, but avoid heavy parallel writes.",
             path.display()
-        ).into());
+        );
     }
 
     // Write PID for debugging
