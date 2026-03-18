@@ -4,6 +4,7 @@ Aligned with OpenClaw memory-hybrid-bridge extraction prompt.
 """
 
 import asyncio
+import atexit
 import os
 import json
 import httpx
@@ -48,8 +49,21 @@ def _env_int(name: str, default: int) -> int:
         return default
 
 
-# 全局连接池配置 - 修复连接复用问题
 _global_client: httpx.AsyncClient | None = None
+
+
+def _close_global_client_sync() -> None:
+    """同步关闭全局 client（用于 atexit）"""
+    global _global_client
+    if _global_client and not _global_client.is_closed:
+        try:
+            loop = asyncio.get_running_loop()
+            loop.create_task(_global_client.aclose())
+        except RuntimeError:
+            pass
+
+
+atexit.register(_close_global_client_sync)
 
 
 def _get_global_client(timeout: float) -> httpx.AsyncClient:
@@ -58,7 +72,7 @@ def _get_global_client(timeout: float) -> httpx.AsyncClient:
     if _global_client is None or _global_client.is_closed:
         _global_client = httpx.AsyncClient(
             timeout=httpx.Timeout(
-                connect=_env_float("SILICONFLOW_CONNECT_TIMEOUT", 5.0),  # 缩短到 5s
+                connect=_env_float("SILICONFLOW_CONNECT_TIMEOUT", 5.0),
                 read=timeout,
                 write=_env_float("SILICONFLOW_WRITE_TIMEOUT", 10.0),
                 pool=_env_float("SILICONFLOW_POOL_TIMEOUT", 10.0),
@@ -66,9 +80,9 @@ def _get_global_client(timeout: float) -> httpx.AsyncClient:
             limits=httpx.Limits(
                 max_connections=20,
                 max_keepalive_connections=10,
-                keepalive_expiry=30.0,
+                keepalive_expiry=300.0,  # 5分钟长连接复用
             ),
-            http2=False,  # HTTP/2 可能有兼容性问题，禁用
+            http2=False,
         )
     return _global_client
 
