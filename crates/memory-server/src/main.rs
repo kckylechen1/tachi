@@ -10,7 +10,7 @@ use async_trait::async_trait;
 use chrono::Utc;
 use memory_core::{MemoryEntry, MemoryStore, SearchOptions};
 use rmcp::{
-    model::ServerInfo,
+    model::{ServerInfo, ServerCapabilities, ToolsCapability},
     ServerHandler,
     tool,
 };
@@ -591,6 +591,10 @@ impl ServerHandler for MemoryServer {
                 Provides hybrid search (vector + FTS + symbolic), memory storage, and state management."
                     .into(),
             ),
+            capabilities: ServerCapabilities {
+                tools: Some(ToolsCapability::default()),
+                ..Default::default()
+            },
             ..Default::default()
         }
     }
