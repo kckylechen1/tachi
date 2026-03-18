@@ -151,7 +151,16 @@ impl LlmClient {
 
     /// Generate L0 summary using SUMMARY_PROMPT
     pub async fn generate_summary(&self, text: &str) -> Result<String, String> {
-        match self.call_llm(crate::prompts::SUMMARY_PROMPT, text, None, 0.3, 100).await {
+        match self
+            .call_llm(
+                crate::prompts::SUMMARY_PROMPT,
+                text,
+                Some(&self.summary_model),
+                0.3,
+                100,
+            )
+            .await
+        {
             Ok(summary) => Ok(summary),
             Err(_) => {
                 // Fallback to truncation on error

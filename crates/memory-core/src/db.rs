@@ -8,11 +8,14 @@
 
 use rusqlite::{params, Connection, Result as SqlResult};
 use std::collections::HashMap;
+use std::sync::Once;
 use chrono::{DateTime, SecondsFormat, Utc};
 use serde_json;
 
 use crate::error::MemoryError;
 use crate::types::MemoryEntry;
+
+static SQLITE_VEC_AUTO_EXT_ONCE: Once = Once::new();
 
 /// Initialise all required tables on a fresh or existing database.
 /// Idempotent: safe to call on every startup.
@@ -22,6 +25,7 @@ pub fn init_schema(conn: &Connection) -> Result<(), MemoryError> {
     conn.execute_batch(r#"
         PRAGMA journal_mode = WAL;
         PRAGMA foreign_keys = ON;
+        PRAGMA busy_timeout = 5000;
         PRAGMA cache_size = -16000;   -- 16 MB page cache
 
         CREATE TABLE IF NOT EXISTS memories (
@@ -140,6 +144,8 @@ pub fn init_schema(conn: &Connection) -> Result<(), MemoryError> {
         [],
     )?;
 
+    ensure_fts_backfilled(conn)?;
+
     // NOTE: sqlite-vec virtual table (memories_vec) is created separately after
     // the extension is loaded by the caller via register_sqlite_vec().
     Ok(())
@@ -148,11 +154,14 @@ pub fn init_schema(conn: &Connection) -> Result<(), MemoryError> {
 /// Register the sqlite-vec extension globally via sqlite3_auto_extension.
 /// Must be called ONCE before any Connection::open(). Safe to call multiple times.
 pub fn register_sqlite_vec() {
-    unsafe {
-        rusqlite::ffi::sqlite3_auto_extension(Some(
+    SQLITE_VEC_AUTO_EXT_ONCE.call_once(|| unsafe {
+        let rc = rusqlite::ffi::sqlite3_auto_extension(Some(
             std::mem::transmute(sqlite_vec::sqlite3_vec_init as *const ())
         ));
-    }
+        if rc != rusqlite::ffi::SQLITE_OK {
+            eprintln!("warning: sqlite-vec auto_extension registration failed (rc={rc})");
+        }
+    });
 }
 
 /// Attempt to create the sqlite-vec virtual table so KNN search is available.
@@ -203,6 +212,33 @@ fn has_column(conn: &Connection, table: &str, column: &str) -> Result<bool, Memo
         }
     }
     Ok(false)
+}
+
+fn ensure_fts_backfilled(conn: &Connection) -> Result<(), MemoryError> {
+    let memories_count: i64 = conn.query_row("SELECT COUNT(*) FROM memories", [], |row| row.get(0))?;
+    if memories_count == 0 {
+        return Ok(());
+    }
+
+    let fts_count: i64 = conn.query_row("SELECT COUNT(*) FROM memories_fts", [], |row| row.get(0))?;
+    if fts_count > 0 {
+        return Ok(());
+    }
+
+    conn.execute(
+        r#"INSERT INTO memories_fts (id, path, summary, text, keywords, entities)
+           SELECT
+             id,
+             path,
+             summary,
+             text,
+             trim(replace(replace(replace(keywords, '[', ' '), ']', ' '), '"', ' ')),
+             trim(replace(replace(replace(entities, '[', ' '), ']', ' '), '"', ' '))
+           FROM memories"#,
+        [],
+    )?;
+
+    Ok(())
 }
 
 // ─── Row mapping ──────────────────────────────────────────────────────────────
@@ -270,7 +306,7 @@ fn row_to_entry(row: &rusqlite::Row<'_>) -> SqlResult<MemoryEntry> {
 // ─── UPSERT ───────────────────────────────────────────────────────────────────
 
 /// Insert or update a memory entry (and its embedding vector if provided).
-pub fn upsert(conn: &Connection, entry: &MemoryEntry, vec_available: bool) -> Result<(), MemoryError> {
+pub fn upsert(conn: &mut Connection, entry: &MemoryEntry, vec_available: bool) -> Result<(), MemoryError> {
     if entry.id.trim().is_empty() {
         return Err(MemoryError::InvalidArg("entry.id must be provided by caller".to_string()));
     }
@@ -285,7 +321,7 @@ pub fn upsert(conn: &Connection, entry: &MemoryEntry, vec_available: bool) -> Re
     let e_json = serde_json::to_string(&entry.entities)?;
 
     // All writes for one upsert must be atomic across main table + FTS + vec.
-    let tx = conn.unchecked_transaction()?;
+    let tx = conn.transaction()?;
 
     // Write to main table
     tx.execute(
@@ -601,13 +637,13 @@ pub fn list_by_path(
 
 /// Bump access_count and last_access for a list of IDs (called after every search).
 /// Also records access timestamps for ACT-R base-level activation.
-pub fn record_access(conn: &Connection, ids: &[String]) -> Result<(), MemoryError> {
+pub fn record_access(conn: &mut Connection, ids: &[String]) -> Result<(), MemoryError> {
     if ids.is_empty() {
         return Ok(());
     }
 
     let now = now_utc_iso();
-    let tx = conn.unchecked_transaction()?;
+    let tx = conn.transaction()?;
     for id in ids {
         tx.execute(
             "UPDATE memories
@@ -627,12 +663,12 @@ pub fn record_access(conn: &Connection, ids: &[String]) -> Result<(), MemoryErro
 
 /// Record access timestamps for ACT-R base-level activation.
 /// Called alongside record_access after each search.
-pub fn record_access_history(conn: &Connection, ids: &[String]) -> Result<(), MemoryError> {
+pub fn record_access_history(conn: &mut Connection, ids: &[String]) -> Result<(), MemoryError> {
     if ids.is_empty() {
         return Ok(());
     }
     let now = now_utc_iso();
-    let tx = conn.unchecked_transaction()?;
+    let tx = conn.transaction()?;
     for id in ids {
         tx.execute(
             "INSERT INTO access_history (memory_id, accessed_at) VALUES (?1, ?2)",
@@ -678,13 +714,13 @@ pub fn get_access_times(conn: &Connection, ids: &[String]) -> Result<HashMap<Str
 
 /// Delete a memory entry by ID from main table, FTS index, and vector table.
 /// Returns true if an entry was found and deleted.
-pub fn delete(conn: &Connection, id: &str, vec_available: bool) -> Result<bool, MemoryError> {
+pub fn delete(conn: &mut Connection, id: &str, vec_available: bool) -> Result<bool, MemoryError> {
     let trimmed = id.trim();
     if trimmed.is_empty() {
         return Err(MemoryError::InvalidArg("empty ID".to_string()));
     }
 
-    let tx = conn.unchecked_transaction()?;
+    let tx = conn.transaction()?;
 
     // Delete from main table and check if anything was actually removed
     tx.execute("DELETE FROM memories WHERE id = ?1", params![trimmed])?;
@@ -1091,9 +1127,9 @@ mod tests {
 
     #[test]
     fn upsert_and_fts() {
-        let conn = make_conn();
+        let mut conn = make_conn();
         let e = make_entry("abc", "Rust is a systems programming language");
-        upsert(&conn, &e, false).unwrap();
+        upsert(&mut conn, &e, false).unwrap();
 
         let results = search_fts(&conn, "systems programming", 5, false).unwrap();
         assert!(results.contains_key("abc"), "expected 'abc' in FTS results");
@@ -1101,11 +1137,11 @@ mod tests {
 
     #[test]
     fn upsert_idempotent() {
-        let conn = make_conn();
+        let mut conn = make_conn();
         let mut e = make_entry("dup", "first text");
-        upsert(&conn, &e, false).unwrap();
+        upsert(&mut conn, &e, false).unwrap();
         e.text = "updated text".into();
-        upsert(&conn, &e, false).unwrap();
+        upsert(&mut conn, &e, false).unwrap();
 
         let results = search_fts(&conn, "updated", 5, false).unwrap();
         assert!(results.contains_key("dup"));
@@ -1113,7 +1149,7 @@ mod tests {
 
     #[test]
     fn search_vec_knn_with_k_constraint() {
-        let conn = make_conn();
+        let mut conn = make_conn();
         let has_vec: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM sqlite_master WHERE name = 'memories_vec'",
@@ -1127,7 +1163,7 @@ mod tests {
 
         let mut e = make_entry("vec-1", "vector memory entry");
         e.vector = Some(vec![0.1_f32; 1024]);
-        upsert(&conn, &e, true).unwrap();
+        upsert(&mut conn, &e, true).unwrap();
 
         let query = vec![0.1_f32; 1024];
         let results = search_vec(&conn, &query, 3, false).unwrap();
@@ -1136,11 +1172,11 @@ mod tests {
 
     #[test]
     fn delete_existing() {
-        let conn = make_conn();
+        let mut conn = make_conn();
         let e = make_entry("del-1", "to be deleted");
-        upsert(&conn, &e, false).unwrap();
+        upsert(&mut conn, &e, false).unwrap();
 
-        let deleted = delete(&conn, "del-1", false).unwrap();
+        let deleted = delete(&mut conn, "del-1", false).unwrap();
         assert!(deleted, "should return true for existing entry");
 
         // Verify it's gone from main table
@@ -1156,32 +1192,32 @@ mod tests {
 
     #[test]
     fn delete_nonexistent() {
-        let conn = make_conn();
-        let deleted = delete(&conn, "nonexistent-id", false).unwrap();
+        let mut conn = make_conn();
+        let deleted = delete(&mut conn, "nonexistent-id", false).unwrap();
         assert!(!deleted, "should return false for non-existent entry");
     }
 
     #[test]
     fn stats_aggregation() {
-        let conn = make_conn();
+        let mut conn = make_conn();
 
         let mut e1 = make_entry("s1", "fact entry");
         e1.scope = "general".into();
         e1.category = "fact".into();
         e1.path = "/project/alpha".into();
-        upsert(&conn, &e1, false).unwrap();
+        upsert(&mut conn, &e1, false).unwrap();
 
         let mut e2 = make_entry("s2", "decision entry");
         e2.scope = "project".into();
         e2.category = "decision".into();
         e2.path = "/project/beta".into();
-        upsert(&conn, &e2, false).unwrap();
+        upsert(&mut conn, &e2, false).unwrap();
 
         let mut e3 = make_entry("s3", "user preference");
         e3.scope = "user".into();
         e3.category = "preference".into();
         e3.path = "/user/settings".into();
-        upsert(&conn, &e3, false).unwrap();
+        upsert(&mut conn, &e3, false).unwrap();
 
         let s = stats(&conn, false).unwrap();
         assert_eq!(s.total, 3);
@@ -1196,11 +1232,11 @@ mod tests {
 
     #[test]
     fn graph_add_and_get_edges() {
-        let conn = make_conn();
+        let mut conn = make_conn();
         let e1 = make_entry("g1", "cause event");
         let e2 = make_entry("g2", "effect event");
-        upsert(&conn, &e1, false).unwrap();
-        upsert(&conn, &e2, false).unwrap();
+        upsert(&mut conn, &e1, false).unwrap();
+        upsert(&mut conn, &e2, false).unwrap();
 
         let edge = MemoryEdge {
             source_id: "g1".into(),
@@ -1226,10 +1262,10 @@ mod tests {
 
     #[test]
     fn graph_expand_bfs() {
-        let conn = make_conn();
+        let mut conn = make_conn();
         // Create chain: a -> b -> c
         for id in &["a", "b", "c", "d"] {
-            upsert(&conn, &make_entry(id, &format!("node {}", id)), false).unwrap();
+            upsert(&mut conn, &make_entry(id, &format!("node {}", id)), false).unwrap();
         }
         add_edge(&conn, &MemoryEdge {
             source_id: "a".into(), target_id: "b".into(),
@@ -1260,11 +1296,11 @@ mod tests {
 
     #[test]
     fn delete_cascades_edges() {
-        let conn = make_conn();
+        let mut conn = make_conn();
         let e1 = make_entry("del-e1", "source");
         let e2 = make_entry("del-e2", "target");
-        upsert(&conn, &e1, false).unwrap();
-        upsert(&conn, &e2, false).unwrap();
+        upsert(&mut conn, &e1, false).unwrap();
+        upsert(&mut conn, &e2, false).unwrap();
         add_edge(&conn, &MemoryEdge {
             source_id: "del-e1".into(), target_id: "del-e2".into(),
             relation: "causes".into(), weight: 1.0,
@@ -1272,7 +1308,7 @@ mod tests {
             valid_from: String::new(), valid_to: None,
         }).unwrap();
 
-        delete(&conn, "del-e1", false).unwrap();
+        delete(&mut conn, "del-e1", false).unwrap();
         let edges = get_edges(&conn, "del-e2", "both", None).unwrap();
         assert!(edges.is_empty(), "edges should be cleaned up on delete");
     }

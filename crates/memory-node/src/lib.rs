@@ -38,9 +38,8 @@ impl JsMemoryStore {
     pub fn upsert(&self, entry_json: String) -> napi::Result<()> {
         let e: MemoryEntry = serde_json::from_str(&entry_json)
             .map_err(|e| napi::Error::from_reason(format!("invalid entry JSON: {e}")))?;
-        self.inner
-            .lock().unwrap_or_else(|e| e.into_inner())
-            .upsert(&e)
+        let mut store = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        store.upsert(&e)
             .map_err(|e| napi::Error::from_reason(e.to_string()))
     }
 
@@ -99,9 +98,10 @@ impl JsMemoryStore {
             }
         }
 
-        let results = self
+        let mut store = self
             .inner
-            .lock().unwrap_or_else(|e| e.into_inner())
+            .lock().unwrap_or_else(|e| e.into_inner());
+        let results = store
             .search(&query, Some(opts))
             .map_err(|e| napi::Error::from_reason(e.to_string()))?;
 
@@ -112,9 +112,8 @@ impl JsMemoryStore {
     /// Delete a memory by ID.
     #[napi]
     pub fn delete(&self, id: String) -> napi::Result<bool> {
-        self.inner
-            .lock().unwrap_or_else(|e| e.into_inner())
-            .delete(&id)
+        let mut store = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        store.delete(&id)
             .map_err(|e| napi::Error::from_reason(e.to_string()))
     }
 

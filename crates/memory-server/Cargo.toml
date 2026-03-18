@@ -9,6 +9,7 @@ rmcp = { version = "0.1", features = ["server", "transport-io", "macros"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tokio = { version = "1", features = ["full"] }
+tokio-util = "0.7"
 async-trait = "0.1"
 uuid = { workspace = true }
 chrono = { workspace = true }
@@ -18,6 +19,7 @@ reqwest = { version = "0.12", features = ["json"] }
 async-openai = "0.27"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+libc = "0.2"
 
 [[bin]]
 name = "memory-server"

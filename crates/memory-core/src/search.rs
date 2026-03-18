@@ -122,7 +122,7 @@ fn apply_mmr_diversity(
 ///  4. Hybrid score merge (weighted sum) with ACT-R decay
 ///  5. Sort, take top_k, record access
 pub fn hybrid_search(
-    conn: &Connection,
+    conn: &mut Connection,
     query: &str,
     opts: &SearchOptions,
 ) -> Result<Vec<SearchResult>, MemoryError> {
@@ -295,7 +295,7 @@ mod tests {
         conn
     }
 
-    fn insert(conn: &Connection, id: &str, text: &str, keywords: &[&str]) {
+    fn insert(conn: &mut Connection, id: &str, text: &str, keywords: &[&str]) {
         let e = MemoryEntry {
             id: id.into(),
             path: "/test".into(),
@@ -322,16 +322,16 @@ mod tests {
 
     #[test]
     fn hybrid_returns_relevant() {
-        let conn = setup();
-        insert(&conn, "a", "Rust is fast and memory safe", &["rust", "performance"]);
-        insert(&conn, "b", "Python is great for scripting", &["python", "scripting"]);
+        let mut conn = setup();
+        insert(&mut conn, "a", "Rust is fast and memory safe", &["rust", "performance"]);
+        insert(&mut conn, "b", "Python is great for scripting", &["python", "scripting"]);
 
         let opts = SearchOptions {
             top_k: 3,
             record_access: false,
             ..Default::default()
         };
-        let results = hybrid_search(&conn, "rust performance", &opts).unwrap();
+        let results = hybrid_search(&mut conn, "rust performance", &opts).unwrap();
         assert!(!results.is_empty());
         // "a" should score higher for "rust performance" query
         assert_eq!(results[0].entry.id, "a");
@@ -339,10 +339,10 @@ mod tests {
 
     #[test]
     fn empty_query_returns_empty() {
-        let conn = setup();
-        insert(&conn, "x", "some text", &[]);
+        let mut conn = setup();
+        insert(&mut conn, "x", "some text", &[]);
         let opts = SearchOptions { record_access: false, ..Default::default() };
-        let results = hybrid_search(&conn, "", &opts).unwrap();
+        let results = hybrid_search(&mut conn, "", &opts).unwrap();
         // FTS5 with empty query should produce no FTS results; vec channel also empty
         assert!(results.is_empty());
     }

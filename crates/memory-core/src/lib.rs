@@ -17,6 +17,7 @@ pub use scorer::HybridWeights;
 pub use noise::{is_noise_text, should_skip_query};
 
 use rusqlite::Connection;
+use std::time::Duration;
 
 /// High-level handle that owns a database connection.
 /// Language bindings (NAPI, PyO3) will wrap this struct.
@@ -33,6 +34,7 @@ impl MemoryStore {
             .map_err(|e| MemoryError::InvalidArg(format!("simple tokenizer init: {e}")))?;
         db::register_sqlite_vec();
         let conn = Connection::open(db_path)?;
+        conn.busy_timeout(Duration::from_millis(5_000))?;
         db::init_schema(&conn)?;
         let vec_available = db::try_load_sqlite_vec(&conn);
         Ok(Self { conn, vec_available })
@@ -44,25 +46,26 @@ impl MemoryStore {
             .map_err(|e| MemoryError::InvalidArg(format!("simple tokenizer init: {e}")))?;
         db::register_sqlite_vec();
         let conn = Connection::open_in_memory()?;
+        conn.busy_timeout(Duration::from_millis(5_000))?;
         db::init_schema(&conn)?;
         let vec_available = db::try_load_sqlite_vec(&conn);
         Ok(Self { conn, vec_available })
     }
 
     /// Insert or update a memory entry (with optional embedding vector).
-    pub fn upsert(&self, entry: &MemoryEntry) -> Result<(), MemoryError> {
-        db::upsert(&self.conn, entry, self.vec_available)
+    pub fn upsert(&mut self, entry: &MemoryEntry) -> Result<(), MemoryError> {
+        db::upsert(&mut self.conn, entry, self.vec_available)
     }
 
     /// Hybrid search: Text + FTS5 + optional vector channel.
     pub fn search(
-        &self,
+        &mut self,
         query: &str,
         opts: Option<SearchOptions>,
     ) -> Result<Vec<SearchResult>, MemoryError> {
         let mut options = opts.unwrap_or_default();
         options.vec_available = self.vec_available;
-        hybrid_search(&self.conn, query, &options)
+        hybrid_search(&mut self.conn, query, &options)
     }
 
     /// Fetch a single entry by ID.
@@ -111,8 +114,27 @@ impl MemoryStore {
     }
 
     /// Delete a memory entry by ID. Returns true if found and deleted.
-    pub fn delete(&self, id: &str) -> Result<bool, MemoryError> {
-        db::delete(&self.conn, id, self.vec_available)
+    pub fn delete(&mut self, id: &str) -> Result<bool, MemoryError> {
+        db::delete(&mut self.conn, id, self.vec_available)
+    }
+
+    /// Run PRAGMA quick_check to detect database corruption early.
+    /// Returns Ok(true) if healthy, Ok(false) if corrupt.
+    pub fn quick_check(&self) -> Result<bool, MemoryError> {
+        let result: String = self.conn.query_row(
+            "PRAGMA quick_check",
+            [],
+            |row| row.get(0),
+        )?;
+        Ok(result == "ok")
+    }
+
+    /// Flush SQLite state before process shutdown.
+    pub fn prepare_shutdown(&self) -> Result<(), MemoryError> {
+        self.conn.execute_batch(
+            "PRAGMA optimize;\nPRAGMA wal_checkpoint(PASSIVE);",
+        )?;
+        Ok(())
     }
 
     /// Get aggregate statistics about the memory store.

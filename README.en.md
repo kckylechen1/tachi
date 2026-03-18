@@ -91,6 +91,12 @@ The server loads API keys automatically from the `.env` file in the project root
 Required providers:
 - Voyage API (Embedding + Rerank): https://dash.voyageai.com/
 - SiliconFlow (Extraction): https://cloud.siliconflow.cn/
+
+IMPORTANT Database Safety Rules:
+- NEVER place the database file in a cloud-synced folder (iCloud, Dropbox, OneDrive, Google Drive). SQLite WAL mode is incompatible with network filesystems.
+- Ensure only ONE memory-server instance accesses the same database file. The server enforces this via file lock, but do not bypass it.
+- Do NOT use `sqlite3` CLI to write to the database while the server is running. Read-only queries with `PRAGMA busy_timeout = 5000` are acceptable.
+- On unclean shutdown, the server auto-recovers FTS index on next startup.
 ```
 
 ---
@@ -262,6 +268,20 @@ SILICONFLOW_API_KEY="your_siliconflow_key_here"
 # Database path (Optional)
 MEMORY_DB_PATH="~/.sigil/memory.db"
 ```
+
+---
+
+## 🛡️ Database Safety
+
+> **Important**: Sigil uses SQLite in WAL mode for maximum single-writer performance. Violating the rules below may corrupt the database.
+
+| Rule | Why |
+|------|-----|
+| **Single instance only** | The server acquires an exclusive file lock (`memory.db.lock`) at startup. If you see "Another memory-server instance is already running", stop the duplicate process. |
+| **No cloud-synced paths** | iCloud, Dropbox, OneDrive, and Google Drive are **incompatible** with SQLite WAL. Use a local-only directory (e.g., `~/.sigil/`). |
+| **No concurrent CLI writes** | Do not run `sqlite3` INSERT/UPDATE on the database while the server is running. Read-only queries are safe with `PRAGMA busy_timeout = 5000`. |
+| **Auto-recovery on startup** | The server runs `PRAGMA quick_check` on startup and auto-backfills an empty FTS index from the main `memories` table. |
+| **Graceful shutdown** | The server handles SIGINT/SIGTERM to flush WAL and run `PRAGMA optimize` before exit. Avoid `kill -9`. |
 
 ---
 

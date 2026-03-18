@@ -40,10 +40,8 @@ impl PyMemoryStore {
     fn upsert(&self, entry_json: &str) -> PyResult<()> {
         let me: MemoryEntry = serde_json::from_str(entry_json)
             .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
-        self.inner
-            .lock()
-            .unwrap()
-            .upsert(&me)
+        let mut store = self.inner.lock().unwrap();
+        store.upsert(&me)
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
     }
 
@@ -103,10 +101,8 @@ impl PyMemoryStore {
             }
         }
 
-        let results = self
-            .inner
-            .lock()
-            .unwrap()
+        let mut store = self.inner.lock().unwrap();
+        let results = store
             .search(query, Some(opts))
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
 
@@ -117,10 +113,8 @@ impl PyMemoryStore {
     /// Delete a memory by ID. Returns true if deleted, false if not found.
     #[pyo3(signature = (id,))]
     fn delete(&self, id: &str) -> PyResult<bool> {
-        self.inner
-            .lock()
-            .unwrap()
-            .delete(id)
+        let mut store = self.inner.lock().unwrap();
+        store.delete(id)
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
     }
 

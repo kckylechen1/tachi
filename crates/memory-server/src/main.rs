@@ -3,10 +3,12 @@
 // Rust MCP server using rmcp SDK to expose memory-core functionality.
 // Replaces the Python mcp/server.py implementation.
 
+#[cfg(unix)]
+use std::os::unix::io::AsRawFd;
+
 mod llm;
 mod prompts;
 
-use async_trait::async_trait;
 use chrono::Utc;
 use memory_core::{MemoryEntry, MemoryStore, SearchOptions};
 use rmcp::{
@@ -19,8 +21,10 @@ use serde::Deserialize;
 use serde_json::json;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::MutexGuard as StdMutexGuard;
 use std::sync::Mutex as StdMutex;
 use tokio::io::{stdin, stdout};
+use tokio_util::sync::CancellationToken;
 
 // ─── Server State ─────────────────────────────────────────────────────────────
 
@@ -42,6 +46,23 @@ impl MemoryServer {
             vec_available,
             llm_client,
         })
+    }
+
+    fn lock_store(&self) -> Result<StdMutexGuard<'_, MemoryStore>, String> {
+        self.store
+            .lock()
+            .map_err(|e| format!("memory store lock poisoned: {e}"))
+    }
+
+    fn prepare_shutdown(&self) {
+        match self.lock_store() {
+            Ok(store) => {
+                if let Err(e) = store.prepare_shutdown() {
+                    eprintln!("Failed to flush database on shutdown: {e}");
+                }
+            }
+            Err(e) => eprintln!("Failed to lock database on shutdown: {e}"),
+        }
     }
 }
 
@@ -293,7 +314,7 @@ impl MemoryServer {
             vector,
         };
 
-        let store = self.store.lock().unwrap();
+        let mut store = self.lock_store()?;
         store.upsert(&entry)
             .map_err(|e| format!("Failed to save memory: {}", e))?;
 
@@ -320,7 +341,7 @@ impl MemoryServer {
         };
         opts.vec_available = self.vec_available;
 
-        let store = self.store.lock().unwrap();
+        let mut store = self.lock_store()?;
         let results = store
             .search(&params.query, Some(opts))
             .map_err(|e| format!("Search failed: {}", e))?;
@@ -346,7 +367,7 @@ impl MemoryServer {
         &self,
         #[tool(aggr)] params: GetMemoryParams,
     ) -> Result<String, String> {
-        let store = self.store.lock().unwrap();
+        let store = self.lock_store()?;
         let entry = store
             .get_with_options(&params.id, params.include_archived)
             .map_err(|e| format!("Failed to get memory: {}", e))?;
@@ -367,7 +388,7 @@ impl MemoryServer {
         &self,
         #[tool(aggr)] params: ListMemoriesParams,
     ) -> Result<String, String> {
-        let store = self.store.lock().unwrap();
+        let store = self.lock_store()?;
         let entries = store
             .list_by_path(&params.path_prefix, params.limit, params.include_archived)
             .map_err(|e| format!("Failed to list memories: {}", e))?;
@@ -378,7 +399,7 @@ impl MemoryServer {
 
     #[tool(description = "Get aggregate statistics about the memory store.")]
     async fn memory_stats(&self) -> Result<String, String> {
-        let store = self.store.lock().unwrap();
+        let store = self.lock_store()?;
         let stats = store
             .stats(false)
             .map_err(|e| format!("Failed to get stats: {}", e))?;
@@ -395,7 +416,7 @@ impl MemoryServer {
         let value_json = serde_json::to_string(&params.value)
             .map_err(|e| format!("Failed to serialize value: {}", e))?;
 
-        let store = self.store.lock().unwrap();
+        let store = self.lock_store()?;
         let version = store.set_state("mcp", &params.key, &value_json)
             .map_err(|e| format!("Failed to set state: {}", e))?;
 
@@ -411,7 +432,7 @@ impl MemoryServer {
         &self,
         #[tool(aggr)] params: GetStateParams,
     ) -> Result<String, String> {
-        let store = self.store.lock().unwrap();
+        let store = self.lock_store()?;
 
         match store.get_state_kv("mcp", &params.key) {
             Ok(Some((value, version))) => {
@@ -442,7 +463,7 @@ impl MemoryServer {
             return Ok("No facts extracted.".to_string());
         }
 
-        let store = self.store.lock().unwrap();
+        let mut store = self.lock_store()?;
         let mut saved = 0;
 
         for fact in &facts {
@@ -510,7 +531,7 @@ impl MemoryServer {
             return Ok("No facts extracted from event.".to_string());
         }
 
-        let store = self.store.lock().unwrap();
+        let mut store = self.lock_store()?;
         let mut saved = 0;
 
         for fact in &facts {
@@ -563,7 +584,7 @@ impl MemoryServer {
 
     #[tool(description = "Get pipeline status and statistics.")]
     async fn get_pipeline_status(&self) -> Result<String, String> {
-        let store = self.store.lock().unwrap();
+        let store = self.lock_store()?;
 
         // Get basic stats from the store
         let stats = store.stats(false).map_err(|e| format!("Failed to get stats: {}", e))?;
@@ -578,6 +599,29 @@ impl MemoryServer {
         }))
         .map_err(|e| format!("Failed to serialize response: {}", e))
     }
+}
+
+#[cfg(unix)]
+async fn wait_for_shutdown_signal() {
+    use tokio::signal::unix::{signal, SignalKind};
+
+    let sigint = signal(SignalKind::interrupt());
+    let sigterm = signal(SignalKind::terminate());
+
+    if let (Ok(mut sigint), Ok(mut sigterm)) = (sigint, sigterm) {
+        tokio::select! {
+            _ = sigint.recv() => {}
+            _ = sigterm.recv() => {}
+            _ = tokio::signal::ctrl_c() => {}
+        }
+    } else {
+        let _ = tokio::signal::ctrl_c().await;
+    }
+}
+
+#[cfg(not(unix))]
+async fn wait_for_shutdown_signal() {
+    let _ = tokio::signal::ctrl_c().await;
 }
 
 // ─── ServerHandler Implementation ────────────────────────────────────────────────
@@ -618,7 +662,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         tokio::fs::create_dir_all(parent).await?;
     }
 
+    // ── Single-instance guard via flock ──────────────────────────────────────
+    // Prevents multiple server processes from writing to the same database,
+    // which is a common cause of WAL corruption.
+    let lock_path = db_path.with_extension("db.lock");
+    let _lock_file = acquire_instance_lock(&lock_path)?;
+
     let server = MemoryServer::new(db_path.clone())?;
+
+    // ── Startup integrity check ────────────────────────────────────────────
+    {
+        let store = server.lock_store().map_err(|e| format!("lock: {e}"))?;
+        match store.quick_check() {
+            Ok(true) => eprintln!("Database integrity: OK"),
+            Ok(false) => eprintln!("WARNING: Database may be corrupted! Run PRAGMA integrity_check for details."),
+            Err(e) => eprintln!("WARNING: Could not check database integrity: {e}"),
+        }
+    }
+
     let transport = (stdin(), stdout());
 
     eprintln!("Starting Memory MCP Server v{}", env!("CARGO_PKG_VERSION"));
@@ -626,10 +687,61 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     eprintln!("Vector search: {}", server.vec_available);
     eprintln!("Tools: save_memory, search_memory, get_memory, list_memories, memory_stats, set_state, get_state, extract_facts, ingest_event, get_pipeline_status");
 
-    rmcp::serve_server(server, transport)
-        .await?
-        .waiting()
-        .await?;
+    let shutdown_token = CancellationToken::new();
+    let running = rmcp::service::serve_server_with_ct(server, transport, shutdown_token.clone()).await?;
+    let shutdown_server = running.service().clone();
+    let final_server = running.service().clone();
+    tokio::spawn(async move {
+        wait_for_shutdown_signal().await;
+        eprintln!("Shutdown signal received, stopping Memory MCP Server...");
+        shutdown_server.prepare_shutdown();
+        shutdown_token.cancel();
+    });
+
+    let quit_reason = running.waiting().await?;
+    final_server.prepare_shutdown();
+    eprintln!("Memory MCP Server stopped: {:?}", quit_reason);
 
     Ok(())
+}
+
+/// Acquire an advisory file lock to prevent multiple server instances.
+/// Returns the lock File which must be kept alive for the process lifetime.
+#[cfg(unix)]
+fn acquire_instance_lock(path: &std::path::Path) -> Result<std::fs::File, Box<dyn std::error::Error>> {
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(false)
+        .open(path)?;
+
+    // Try non-blocking exclusive lock
+    let ret = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+    if ret != 0 {
+        return Err(format!(
+            "Another memory-server instance is already running (lock file: {}). \
+             Only one instance should access the database at a time.",
+            path.display()
+        ).into());
+    }
+
+    // Write PID for debugging
+    use std::io::Write;
+    let mut f = &file;
+    let _ = f.write_all(format!("{}", std::process::id()).as_bytes());
+    let _ = f.flush();
+
+    Ok(file)
+}
+
+#[cfg(not(unix))]
+fn acquire_instance_lock(path: &std::path::Path) -> Result<std::fs::File, Box<dyn std::error::Error>> {
+    // On non-Unix, just create the file as a marker (no real locking)
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(false)
+        .open(path)?;
+    eprintln!("WARNING: File locking not supported on this platform. Ensure only one instance runs.");
+    Ok(file)
 }
