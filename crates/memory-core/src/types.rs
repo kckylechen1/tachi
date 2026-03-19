@@ -92,8 +92,8 @@ pub struct MemoryEntry {
     #[serde(default = "default_revision")]
     pub revision: i64,
 
-    /// Embedding vector (1024-dim Voyage-4)
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// Embedding vector (1024-dim Voyage-4) — internal only, never serialized to clients.
+    #[serde(default, skip_serializing)]
     pub vector: Option<Vec<f32>>,
 
     /// Catch-all JSON blob for low-frequency fields:
