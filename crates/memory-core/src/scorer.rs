@@ -390,6 +390,7 @@ mod tests {
             archived: false,
             access_count: 0,
             last_access: None,
+            revision: 1,
             metadata: serde_json::Value::Object(Default::default()),
             vector: None,
         };

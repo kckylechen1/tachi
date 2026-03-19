@@ -4,6 +4,8 @@ use chrono::Utc;
 use memory_core::{HybridWeights, MemoryEdge, MemoryEntry, MemoryStore, SearchOptions};
 use serde_json::{json, Value};
 use std::collections::HashSet;
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
 use std::sync::{Arc, Mutex};
 use tokio::time::{sleep, Duration};
 use uuid::Uuid;
@@ -161,12 +163,153 @@ fn parse_confidence(item: &Value, key: &str, default: f64) -> f64 {
         .unwrap_or(default)
 }
 
+fn event_hash_for(event_id: &str) -> String {
+    let mut hasher = DefaultHasher::new();
+    event_id.hash(&mut hasher);
+    format!("{:x}", hasher.finish())
+}
+
+fn mark_worker_event_processed(
+    store: &Arc<Mutex<MemoryStore>>,
+    event_hash: &str,
+    event_id: &str,
+    worker: &str,
+) {
+    match store.lock() {
+        Ok(guard) => {
+            if let Err(e) = guard.mark_event_processed(event_hash, event_id, worker) {
+                eprintln!("pipeline: failed to mark event processed ({worker}, {event_id}): {e}");
+            }
+        }
+        Err(e) => eprintln!("pipeline: store lock poisoned while marking processed event: {e}"),
+    }
+}
+
+fn support_tokens(text: &str) -> HashSet<String> {
+    const STOPWORDS: &[&str] = &[
+        "the", "and", "with", "that", "this", "from", "into", "your", "you", "for", "are", "was", "were", "have",
+        "has", "had", "not", "but", "then", "than", "when", "where", "what", "how", "why", "who", "will", "would",
+        "should", "could", "must", "can", "may", "about", "into", "onto", "over", "under", "after", "before",
+        "while", "during", "global", "rule", "rules", "behavior", "always", "never", "avoid",
+    ];
+
+    text.to_lowercase()
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|token| token.len() >= 4 && !STOPWORDS.contains(token))
+        .map(|token| token.to_string())
+        .collect()
+}
+
+fn support_count_for_rule(rule_text: &str, derived_items: &[Value]) -> usize {
+    let tokens = support_tokens(rule_text);
+    if tokens.is_empty() {
+        return 0;
+    }
+
+    derived_items
+        .iter()
+        .filter(|item| {
+            let correction_text = item
+                .get("text")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_lowercase();
+            if correction_text.is_empty() {
+                return false;
+            }
+
+            let hits = tokens
+                .iter()
+                .filter(|token| correction_text.contains(token.as_str()))
+                .count();
+            if tokens.len() <= 2 {
+                hits >= 1
+            } else {
+                hits >= 2
+            }
+        })
+        .count()
+}
+
+async fn promote_draft_rules(store: &Arc<Mutex<MemoryStore>>, derived_items: &[Value]) {
+    if derived_items.len() < 3 {
+        return;
+    }
+
+    let rules = match store.lock() {
+        Ok(guard) => match guard.list_by_path("/behavior/global_rules", 200, false) {
+            Ok(entries) => entries,
+            Err(e) => {
+                eprintln!("run_distiller: failed to load global rules for promotion: {e}");
+                return;
+            }
+        },
+        Err(e) => {
+            eprintln!("run_distiller: store lock poisoned while loading global rules: {e}");
+            return;
+        }
+    };
+
+    for entry in rules {
+        let state = entry
+            .metadata
+            .get("state")
+            .and_then(Value::as_str)
+            .unwrap_or("DRAFT");
+        if state != "DRAFT" {
+            continue;
+        }
+
+        let support_count = support_count_for_rule(&entry.text, derived_items);
+        if support_count < 3 {
+            continue;
+        }
+
+        let mut updated = entry.clone();
+        if !updated.metadata.is_object() {
+            updated.metadata = json!({});
+        }
+        if let Some(meta) = updated.metadata.as_object_mut() {
+            meta.insert("state".to_string(), json!("ACTIVE"));
+            meta.insert("activated_at".to_string(), json!(Utc::now().to_rfc3339()));
+            meta.insert("support_count".to_string(), json!(support_count));
+        }
+
+        match store.lock() {
+            Ok(mut guard) => {
+                if let Err(e) = guard.upsert(&updated) {
+                    eprintln!("run_distiller: failed to promote DRAFT rule {}: {e}", updated.id);
+                }
+            }
+            Err(e) => {
+                eprintln!("run_distiller: store lock poisoned while promoting rule {}: {e}", updated.id);
+            }
+        }
+    }
+}
+
 pub async fn run_causal(
     store: Arc<Mutex<MemoryStore>>,
     llm: Arc<LlmClient>,
     messages: Vec<Value>,
     event_id: String,
 ) {
+    let event_hash = event_hash_for(&event_id);
+    match store.lock() {
+        Ok(guard) => {
+            if guard
+                .is_event_processed(&event_hash, "causal")
+                .unwrap_or(false)
+            {
+                return;
+            }
+        }
+        Err(e) => {
+            eprintln!("run_causal: store lock poisoned while checking dedup: {e}");
+            return;
+        }
+    }
+
     if messages.len() < 2 {
         return;
     }
@@ -195,6 +338,7 @@ pub async fn run_causal(
 
     let items = parse_json_array(&content);
     if items.is_empty() {
+        mark_worker_event_processed(&store, &event_hash, &event_id, "causal");
         return;
     }
 
@@ -340,6 +484,8 @@ pub async fn run_causal(
             eprintln!("run_causal: failed to add causal edge: {e}");
         }
     }
+
+    mark_worker_event_processed(&store, &event_hash, &event_id, "causal");
 }
 
 pub async fn run_consolidator(
@@ -463,23 +609,37 @@ pub async fn run_consolidator(
                             continue;
                         }
                     };
-
-                    let mut merged_entry = target_entry;
-                    merged_entry.text = merged_text.clone();
-                    merged_entry.summary = merged_summary.clone();
-                    merged_entry.source = "consolidation".to_string();
-                    merged_entry.vector = Some(merged_vec.clone());
-
-                    if !merged_entry.metadata.is_object() {
-                        merged_entry.metadata = json!({});
+                    let expected_revision = target_entry.revision;
+                    let mut merged_metadata = target_entry.metadata.clone();
+                    if !merged_metadata.is_object() {
+                        merged_metadata = json!({});
                     }
-                    if let Some(meta) = merged_entry.metadata.as_object_mut() {
+                    if let Some(meta) = merged_metadata.as_object_mut() {
                         meta.insert("merged_from".to_string(), json!(memory_id.clone()));
                         meta.insert("merge_source".to_string(), json!("consolidator"));
                     }
 
-                    if let Err(e) = guard.upsert(&merged_entry) {
-                        eprintln!("run_consolidator: failed to upsert merged memory {target_id}: {e}");
+                    let updated = match guard.update_with_revision(
+                        &target_id,
+                        &merged_text,
+                        &merged_summary,
+                        "consolidation",
+                        &merged_metadata,
+                        Some(&merged_vec),
+                        expected_revision,
+                    ) {
+                        Ok(ok) => ok,
+                        Err(e) => {
+                            eprintln!("run_consolidator: failed revision-checked update for {target_id}: {e}");
+                            false
+                        }
+                    };
+
+                    if !updated {
+                        eprintln!(
+                            "run_consolidator: revision mismatch while merging {}, skipping stale write",
+                            target_id
+                        );
                         false
                     } else if let Err(e) = guard.archive_memory(&memory_id) {
                         eprintln!("run_consolidator: failed to archive merged source {memory_id}: {e}");
@@ -747,6 +907,7 @@ pub async fn run_distiller(
                             archived: false,
                             access_count: 0,
                             last_access: None,
+                            revision: 1,
                             metadata: json!({
                                 "origin": "distillation",
                                 "state": "DRAFT",
@@ -767,6 +928,8 @@ pub async fn run_distiller(
                     }
                 }
             }
+
+            promote_draft_rules(&store, &derived_items).await;
         }
 
         sleep(Duration::from_secs(poll_interval_secs)).await;

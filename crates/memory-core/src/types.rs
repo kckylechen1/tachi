@@ -88,6 +88,10 @@ pub struct MemoryEntry {
     #[serde(default)]
     pub last_access: Option<String>,
 
+    /// Monotonic revision for optimistic locking.
+    #[serde(default = "default_revision")]
+    pub revision: i64,
+
     /// Embedding vector (1024-dim Voyage-4)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub vector: Option<Vec<f32>>,
@@ -105,6 +109,7 @@ fn default_importance() -> f64 { 0.7 }
 fn default_category() -> String { "fact".to_string() }
 fn default_source() -> String { "manual".to_string() }
 fn default_scope() -> String { "general".to_string() }
+fn default_revision() -> i64 { 1 }
 fn default_metadata() -> serde_json::Value { serde_json::Value::Object(Default::default()) }
 
 // ─── Scoring Types ───────────────────────────────────────────────────────────

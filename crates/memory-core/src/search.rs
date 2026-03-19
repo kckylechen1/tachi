@@ -314,6 +314,7 @@ mod tests {
             archived: false,
             access_count: 0,
             last_access: None,
+            revision: 1,
             metadata: json!({ "keywords": keywords, "entities": [] }),
             vector: None,
         };

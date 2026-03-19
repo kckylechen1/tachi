@@ -49,6 +49,7 @@ pub fn init_schema(conn: &Connection) -> Result<(), MemoryError> {
             updated_at   TEXT NOT NULL DEFAULT '',
             access_count INTEGER NOT NULL DEFAULT 0,
             last_access  TEXT,
+            revision     INTEGER NOT NULL DEFAULT 1,
             metadata     TEXT NOT NULL DEFAULT '{}'
         );
 
@@ -114,6 +115,14 @@ pub fn init_schema(conn: &Connection) -> Result<(), MemoryError> {
             metadata   TEXT NOT NULL DEFAULT '{}',
             created_at TEXT NOT NULL DEFAULT ''
         );
+
+        CREATE TABLE IF NOT EXISTS processed_events (
+            event_hash TEXT NOT NULL,
+            event_id   TEXT NOT NULL DEFAULT '',
+            worker     TEXT NOT NULL DEFAULT '',
+            created_at TEXT NOT NULL DEFAULT '',
+            PRIMARY KEY (event_hash, worker)
+        );
     "#)?;
 
     // Forward-compatible migrations for existing DB files created before
@@ -135,6 +144,12 @@ pub fn init_schema(conn: &Connection) -> Result<(), MemoryError> {
         "memories",
         "updated_at",
         "TEXT NOT NULL DEFAULT ''",
+    )?;
+    ensure_column(
+        conn,
+        "memories",
+        "revision",
+        "INTEGER NOT NULL DEFAULT 1",
     )?;
 
     // Temporal edge columns for memory_edges
@@ -164,6 +179,10 @@ pub fn init_schema(conn: &Connection) -> Result<(), MemoryError> {
     )?;
     conn.execute(
         "UPDATE memories SET updated_at = created_at WHERE updated_at IS NULL OR updated_at = ''",
+        [],
+    )?;
+    conn.execute(
+        "UPDATE memories SET revision = 1 WHERE revision IS NULL OR revision <= 0",
         [],
     )?;
 
@@ -321,6 +340,7 @@ fn row_to_entry(row: &rusqlite::Row<'_>) -> SqlResult<MemoryEntry> {
         archived: row.get("archived")?,
         access_count: row.get("access_count")?,
         last_access,
+        revision: row.get("revision").unwrap_or(1),
         metadata,
         vector: None,
     })
@@ -352,8 +372,8 @@ pub fn upsert(conn: &mut Connection, entry: &MemoryEntry, vec_available: bool) -
               (id, path, summary, text, importance,
                timestamp, category, topic, keywords, persons, entities,
                location, source, scope, archived, created_at, updated_at,
-               access_count, last_access, metadata)
-           VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20)
+               access_count, last_access, revision, metadata)
+           VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21)
            ON CONFLICT(id) DO UPDATE SET
                path         = excluded.path,
                summary      = excluded.summary,
@@ -373,6 +393,7 @@ pub fn upsert(conn: &mut Connection, entry: &MemoryEntry, vec_available: bool) -
                updated_at   = excluded.updated_at,
                access_count = excluded.access_count,
                last_access  = excluded.last_access,
+               revision     = memories.revision + 1,
                metadata     = excluded.metadata"#,
         params![
             entry.id,
@@ -394,6 +415,7 @@ pub fn upsert(conn: &mut Connection, entry: &MemoryEntry, vec_available: bool) -
             &write_time_utc,
             entry.access_count,
             last_access_utc,
+            entry.revision.max(1),
             metadata_json,
         ],
     )?;
@@ -429,6 +451,96 @@ pub fn upsert(conn: &mut Connection, entry: &MemoryEntry, vec_available: bool) -
 
     tx.commit()?;
     Ok(())
+}
+
+/// Check if an event has already been processed by a specific worker.
+pub fn is_event_processed(
+    conn: &Connection,
+    event_hash: &str,
+    worker: &str,
+) -> Result<bool, MemoryError> {
+    let count: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM processed_events WHERE event_hash = ?1 AND worker = ?2",
+        params![event_hash, worker],
+        |row| row.get(0),
+    )?;
+    Ok(count > 0)
+}
+
+/// Mark an event as processed by a specific worker.
+pub fn mark_event_processed(
+    conn: &Connection,
+    event_hash: &str,
+    event_id: &str,
+    worker: &str,
+) -> Result<(), MemoryError> {
+    let now = now_utc_iso();
+    conn.execute(
+        "INSERT OR IGNORE INTO processed_events (event_hash, event_id, worker, created_at) VALUES (?1, ?2, ?3, ?4)",
+        params![event_hash, event_id, worker, now],
+    )?;
+    Ok(())
+}
+
+/// Update a memory row only when its revision matches `expected_revision`.
+/// Returns `Ok(true)` when updated, `Ok(false)` on revision mismatch.
+pub fn update_with_revision(
+    conn: &mut Connection,
+    id: &str,
+    new_text: &str,
+    new_summary: &str,
+    new_source: &str,
+    new_metadata: &str,
+    new_vec: Option<&[u8]>,
+    expected_revision: i64,
+) -> Result<bool, MemoryError> {
+    let now = now_utc_iso();
+    let new_revision = expected_revision + 1;
+    let tx = conn.transaction()?;
+
+    tx.execute(
+        "UPDATE memories
+         SET text = ?1, summary = ?2, source = ?3, metadata = ?4, updated_at = ?5, revision = ?6
+         WHERE id = ?7 AND revision = ?8",
+        params![
+            new_text,
+            new_summary,
+            new_source,
+            new_metadata,
+            &now,
+            new_revision,
+            id,
+            expected_revision
+        ],
+    )?;
+    let updated = tx.changes() > 0;
+
+    if updated {
+        tx.execute("DELETE FROM memories_fts WHERE id = ?1", params![id])?;
+        tx.execute(
+            r#"INSERT INTO memories_fts(id, path, summary, text, keywords, entities)
+               SELECT
+                 id,
+                 path,
+                 summary,
+                 text,
+                 trim(replace(replace(replace(keywords, '[', ' '), ']', ' '), '"', ' ')),
+                 trim(replace(replace(replace(entities, '[', ' '), ']', ' '), '"', ' '))
+               FROM memories WHERE id = ?1"#,
+            params![id],
+        )?;
+
+        if let Some(vec_blob) = new_vec {
+            tx.execute("DELETE FROM memories_vec WHERE id = ?1", params![id])?;
+            tx.execute(
+                "INSERT INTO memories_vec(id, embedding) VALUES (?1, ?2)",
+                params![id, vec_blob],
+            )?;
+        }
+    }
+
+    tx.commit()?;
+    Ok(updated)
 }
 
 // ─── VECTOR SEARCH ────────────────────────────────────────────────────────────
@@ -539,7 +651,7 @@ pub fn fetch_by_ids(
     // Build a parameterised IN clause
     let placeholders = ids.iter().enumerate().map(|(i, _)| format!("?{}", i + 1)).collect::<Vec<_>>().join(",");
     let mut sql = format!(
-        "SELECT id,path,summary,text,importance,timestamp,category,topic,keywords,persons,entities,location,source,scope,archived,access_count,last_access,metadata
+        "SELECT id,path,summary,text,importance,timestamp,category,topic,keywords,persons,entities,location,source,scope,archived,access_count,last_access,revision,metadata
          FROM memories WHERE id IN ({})",
         placeholders
     );
@@ -596,10 +708,10 @@ pub fn get_all(
     include_archived: bool,
 ) -> Result<Vec<MemoryEntry>, MemoryError> {
     let sql = if include_archived {
-        "SELECT id,path,summary,text,importance,timestamp,category,topic,keywords,persons,entities,location,source,scope,archived,access_count,last_access,metadata
+        "SELECT id,path,summary,text,importance,timestamp,category,topic,keywords,persons,entities,location,source,scope,archived,access_count,last_access,revision,metadata
          FROM memories ORDER BY timestamp DESC LIMIT ?"
     } else {
-        "SELECT id,path,summary,text,importance,timestamp,category,topic,keywords,persons,entities,location,source,scope,archived,access_count,last_access,metadata
+        "SELECT id,path,summary,text,importance,timestamp,category,topic,keywords,persons,entities,location,source,scope,archived,access_count,last_access,revision,metadata
          FROM memories WHERE archived = 0 ORDER BY timestamp DESC LIMIT ?"
     };
     let mut stmt = conn.prepare(sql)?;
@@ -636,13 +748,13 @@ pub fn list_by_path(
     };
 
     let sql = if include_archived {
-        "SELECT id,path,summary,text,importance,timestamp,category,topic,keywords,persons,entities,location,source,scope,archived,access_count,last_access,metadata
+        "SELECT id,path,summary,text,importance,timestamp,category,topic,keywords,persons,entities,location,source,scope,archived,access_count,last_access,revision,metadata
          FROM memories
          WHERE path = ?1 OR path LIKE ?2
          ORDER BY path ASC, timestamp DESC
          LIMIT ?3"
     } else {
-        "SELECT id,path,summary,text,importance,timestamp,category,topic,keywords,persons,entities,location,source,scope,archived,access_count,last_access,metadata
+        "SELECT id,path,summary,text,importance,timestamp,category,topic,keywords,persons,entities,location,source,scope,archived,access_count,last_access,revision,metadata
          FROM memories
          WHERE (path = ?1 OR path LIKE ?2) AND archived = 0
          ORDER BY path ASC, timestamp DESC
@@ -1189,7 +1301,7 @@ pub fn list_derived_by_source(
 pub fn archive_memory(conn: &Connection, id: &str) -> Result<bool, MemoryError> {
     let now = now_utc_iso();
     conn.execute(
-        "UPDATE memories SET archived = 1, updated_at = ?1 WHERE id = ?2 AND archived = 0",
+        "UPDATE memories SET archived = 1, updated_at = ?1, revision = revision + 1 WHERE id = ?2 AND archived = 0",
         params![now, id],
     )?;
     Ok(conn.changes() > 0)
@@ -1229,6 +1341,7 @@ mod tests {
             archived: false,
             access_count: 0,
             last_access: None,
+            revision: 1,
             metadata: json!({ "keywords": ["test"], "entities": [] }),
             vector: None,
         }
@@ -1254,6 +1367,49 @@ mod tests {
 
         let results = search_fts(&conn, "updated", 5, false).unwrap();
         assert!(results.contains_key("dup"));
+    }
+
+    #[test]
+    fn processed_events_dedup_by_worker() {
+        let conn = make_conn();
+        assert!(!is_event_processed(&conn, "abc", "ingest").unwrap());
+        mark_event_processed(&conn, "abc", "conv:1", "ingest").unwrap();
+        assert!(is_event_processed(&conn, "abc", "ingest").unwrap());
+        assert!(!is_event_processed(&conn, "abc", "causal").unwrap());
+    }
+
+    #[test]
+    fn update_with_revision_detects_conflict() {
+        let mut conn = make_conn();
+        let e = make_entry("rev-1", "original");
+        upsert(&mut conn, &e, false).unwrap();
+
+        let metadata = serde_json::to_string(&json!({"source":"test"})).unwrap();
+        let ok = update_with_revision(
+            &mut conn,
+            "rev-1",
+            "merged",
+            "merged",
+            "consolidation",
+            &metadata,
+            None,
+            1,
+        )
+        .unwrap();
+        assert!(ok);
+
+        let stale = update_with_revision(
+            &mut conn,
+            "rev-1",
+            "stale",
+            "stale",
+            "consolidation",
+            &metadata,
+            None,
+            1,
+        )
+        .unwrap();
+        assert!(!stale);
     }
 
     #[test]
