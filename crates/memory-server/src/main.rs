@@ -28,6 +28,66 @@ use std::sync::Arc;
 use std::sync::MutexGuard as StdMutexGuard;
 use std::sync::Mutex as StdMutex;
 use tokio::io::{stdin, stdout};
+
+/// Build a slim JSON representation of a MemoryEntry for MCP output.
+/// Strips internal fields (access_count, last_access, revision, source, vector)
+/// and omits empty strings/arrays to minimize token usage.
+fn slim_entry(e: &MemoryEntry) -> serde_json::Value {
+    let mut obj = serde_json::Map::new();
+    obj.insert("id".into(), json!(e.id));
+    obj.insert("text".into(), json!(e.text));
+    if !e.summary.is_empty() {
+        obj.insert("summary".into(), json!(e.summary));
+    }
+    obj.insert("path".into(), json!(e.path));
+    if !e.topic.is_empty() {
+        obj.insert("topic".into(), json!(e.topic));
+    }
+    if !e.keywords.is_empty() {
+        obj.insert("keywords".into(), json!(e.keywords));
+    }
+    obj.insert("importance".into(), json!(e.importance));
+    obj.insert("timestamp".into(), json!(e.timestamp));
+    obj.insert("category".into(), json!(e.category));
+    obj.insert("scope".into(), json!(e.scope));
+    if !e.persons.is_empty() {
+        obj.insert("persons".into(), json!(e.persons));
+    }
+    if !e.entities.is_empty() {
+        obj.insert("entities".into(), json!(e.entities));
+    }
+    if e.archived {
+        obj.insert("archived".into(), json!(true));
+    }
+    // Only include metadata if non-empty object
+    if let serde_json::Value::Object(ref m) = e.metadata {
+        if !m.is_empty() {
+            obj.insert("metadata".into(), json!(m));
+        }
+    }
+    serde_json::Value::Object(obj)
+}
+
+/// Build a slim search result: entry fields + single relevance score.
+fn slim_search_result(result: &memory_core::SearchResult) -> serde_json::Value {
+    let mut obj = match slim_entry(&result.entry) {
+        serde_json::Value::Object(m) => m,
+        _ => serde_json::Map::new(),
+    };
+    // Round to 3 decimal places
+    obj.insert("relevance".into(), json!((result.score.final_score * 1000.0).round() / 1000.0));
+    serde_json::Value::Object(obj)
+}
+
+/// Build a slim L0 rule entry.
+fn slim_l0_rule(rule: &MemoryEntry) -> serde_json::Value {
+    let mut obj = match slim_entry(rule) {
+        serde_json::Value::Object(m) => m,
+        _ => serde_json::Map::new(),
+    };
+    obj.insert("l0_rule".into(), json!(true));
+    serde_json::Value::Object(obj)
+}
 use tokio_util::sync::CancellationToken;
 
 // ─── Server State ─────────────────────────────────────────────────────────────
@@ -378,12 +438,7 @@ impl MemoryServer {
             .map_err(|e| format!("Search failed: {}", e))?;
         let mut output: Vec<serde_json::Value> = results
             .iter()
-            .map(|result| {
-                json!({
-                    "entry": result.entry,
-                    "score": result.score,
-                })
-            })
+            .map(|r| slim_search_result(r))
             .collect();
 
         if self.pipeline_enabled {
@@ -401,18 +456,7 @@ impl MemoryServer {
                 if !existing_ids.insert(rule.id.clone()) {
                     continue;
                 }
-                output.push(json!({
-                    "entry": rule,
-                    "score": {
-                        "vector": 0.0,
-                        "fts": 0.0,
-                        "symbolic": 0.0,
-                        "decay": 0.0,
-                        "final": 0.0
-                    },
-                    "l0_rule": true,
-                    "source": "L0_rule"
-                }));
+                output.push(slim_l0_rule(&rule));
             }
         }
 
@@ -430,7 +474,7 @@ impl MemoryServer {
             .map_err(|e| format!("Failed to get memory: {}", e))?;
 
         match entry {
-            Some(e) => serde_json::to_string(&e)
+            Some(e) => serde_json::to_string(&slim_entry(&e))
                 .map_err(|e| format!("Failed to serialize: {}", e)),
             None => {
                 serde_json::to_string(&json!({
@@ -450,7 +494,8 @@ impl MemoryServer {
             .list_by_path(&params.path_prefix, params.limit, params.include_archived)
             .map_err(|e| format!("Failed to list memories: {}", e))?;
 
-        serde_json::to_string(&entries)
+        let slim: Vec<serde_json::Value> = entries.iter().map(|e| slim_entry(e)).collect();
+        serde_json::to_string(&slim)
             .map_err(|e| format!("Failed to serialize: {}", e))
     }
 
