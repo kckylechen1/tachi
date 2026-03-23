@@ -132,6 +132,7 @@ Please install the Tachi memory extension for OpenClaw:
 - **🔄 Evolution deduplication**: Utilizing math-based similarities for `HARD_SKIP` and `EVOLVE` updates.
 - **🔌 Dual-DB Architecture**: Global memories (`~/.Tachi/global/memory.db`) shared across all projects, plus per-project memories (`.Tachi/memory.db` at git root) for project-scoped context. Automatic git root detection and legacy migration. No external databases required.
 - **🎯 Tachi Hub**: A unified capability registry for Skills, Plugins, and MCP Servers. Register once, discover from any agent. Includes usage tracking, feedback metrics, and dual-DB inheritance (project overrides global). 67 pre-built skills available out of the box.
+- **🔀 MCP Proxy**: Register child MCP servers once in Tachi — their tools appear transparently to all agents. Shared connection pool with lazy-connect, idle cleanup, circuit breaker, and per-child concurrency control. No more zombie processes.
 
 ---
 

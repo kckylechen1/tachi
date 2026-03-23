@@ -5,6 +5,30 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.0] - 2026-03-23
+
+### Added
+- **MCP Client Proxy (Phase 2)**: Tachi now acts as both MCP server and client. Register child MCP servers via `hub_register(type=mcp)`, their tools appear transparently in `tools/list` with `server__tool` prefix. Agents call them directly — Tachi handles spawn, connection, forwarding, and cleanup.
+- **Connection Pool**: Lazy-connect on first use, reuse across calls, idle cleanup after 5 minutes. No more zombie processes — one Tachi instance manages all child MCP servers.
+- **Circuit Breaker**: Per-child failure tracking (Closed → Open → HalfOpen). Only transport errors trigger circuit open, not tool-level errors.
+- **SSE/Streamable HTTP Transport**: Connect to HTTP-based MCP servers (Linear, Vercel, etc.) alongside stdio servers.
+- **Skill-as-Tool**: Skills registered with `hub_register(type=skill)` can expose callable tools (`tachi_skill_*`) with LLM-backed execution.
+- **Audit Log**: Every proxy call recorded (`tachi_audit_log` tool). Tracks server, tool, duration, success/failure, args hash.
+- **Command Allowlist**: MCP server registration validates commands against trusted list (`npx`, `python3`, `node`, `cargo`, brew paths, etc.). Untrusted commands registered but disabled.
+- **Tool Deny-List**: Per-server `permissions.deny` blocks dangerous tools (e.g. `delete_repo`).
+- **Per-Child Concurrency Semaphore**: `max_concurrency` config per MCP server (default: 1 for stdio).
+- **Timeout Config**: `tool_timeout_ms` and `startup_timeout_ms` per MCP server definition.
+- **`hub_call` Fallback Tool**: Explicit proxy call via `hub_call(server_id, tool_name, args)` when direct tool names are unavailable.
+- **`${VAR}` Env Resolution**: Environment variable references in MCP server definitions resolved at runtime. Missing vars fail with clear error.
+- **TOCTOU Fix**: Per-server connecting lock prevents duplicate child process spawning under concurrent calls.
+
+### Changed
+- **rmcp 0.1 → 1.2**: Major SDK upgrade. `#[tool(tool_box)]` → `#[tool_router]`, `ToolBox` → `ToolRouter`, `rmcp::Error` → `rmcp::ErrorData`, `CallToolRequestParam` → `CallToolRequestParams` (builder pattern), `ServerInfo`/`ListToolsResult` now `#[non_exhaustive]`.
+- **schemars 0.8 → 1.x**: Via rmcp's re-exported `rmcp::schemars`. All 20+ param structs migrated.
+- **Persistent SQLite Connections**: `MemoryServer` holds long-lived `Mutex<MemoryStore>` instead of opening per-request. `init_schema()` runs once at startup.
+- **Call Dispatch Order**: Native tools → Skill tools → Proxy tools (prevents future name shadowing).
+- **Project MCP Security**: Project-scope MCP capabilities with untrusted commands default to `enabled=false`.
+
 ## [0.6.0] - 2026-03-23
 
 ### Changed
