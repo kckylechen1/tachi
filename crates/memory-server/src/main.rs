@@ -20,7 +20,7 @@ use rmcp::{
 };
 use serde::Deserialize;
 use serde_json::{json, Value};
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::future::Future;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -184,6 +184,8 @@ struct MemoryServer {
     tool_cache: Arc<StdMutex<HashMap<String, CachedResult>>>,
     cache_hits: Arc<std::sync::atomic::AtomicU64>,
     cache_misses: Arc<std::sync::atomic::AtomicU64>,
+    // ─── Ghost Whispers (pub/sub) ───────────────────────────────────────────
+    pubsub: Arc<StdMutex<PubSubState>>,
 }
 
 // ─── MCP Client Connection Pool ──────────────────────────────────────────────
@@ -269,6 +271,7 @@ impl MemoryServer {
             tool_cache: Arc::new(StdMutex::new(HashMap::new())),
             cache_hits: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             cache_misses: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            pubsub: Arc::new(StdMutex::new(PubSubState::new())),
         })
     }
 
@@ -976,6 +979,77 @@ struct SyncMemoriesParams {
     /// Maximum entries to return (default: 100)
     #[serde(default = "default_sync_limit")]
     limit: usize,
+}
+
+// ─── Ghost Whispers (Inter-Agent Pub/Sub) ─────────────────────────────────────
+
+const PUBSUB_RING_MAX: usize = 100;
+
+#[derive(Clone)]
+struct PubSubMessage {
+    topic: String,
+    payload: serde_json::Value,
+    publisher: String,
+    timestamp: String,
+    id: String,
+}
+
+struct PubSubState {
+    /// topic → ring buffer of messages (max PUBSUB_RING_MAX per topic)
+    messages: HashMap<String, VecDeque<PubSubMessage>>,
+    /// Global monotonic index per topic (total messages ever published)
+    next_index: HashMap<String, usize>,
+    /// agent_id → (topic → last_seen_global_index)
+    cursors: HashMap<String, HashMap<String, usize>>,
+}
+
+impl PubSubState {
+    fn new() -> Self {
+        Self {
+            messages: HashMap::new(),
+            next_index: HashMap::new(),
+            cursors: HashMap::new(),
+        }
+    }
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+struct GhostPublishParams {
+    /// Topic to publish to (e.g. "build-status", "code-review")
+    topic: String,
+    /// Message payload (any JSON value)
+    payload: serde_json::Value,
+    /// Publisher agent identifier
+    publisher: String,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+struct GhostSubscribeParams {
+    /// Unique agent identifier for cursor tracking
+    agent_id: String,
+    /// Topics to subscribe to and poll for new messages
+    topics: Vec<String>,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+struct ChainStep {
+    /// Skill capability ID (e.g. "skill:summarize")
+    skill_id: String,
+    /// Extra arguments to merge with piped input
+    #[serde(default)]
+    extra_args: Option<serde_json::Value>,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+struct ChainSkillsParams {
+    /// Ordered list of skill steps to execute
+    steps: Vec<ChainStep>,
+    /// Input for the first step
+    initial_input: String,
 }
 
 // ─── Tool Implementations ────────────────────────────────────────────────────────
@@ -2144,6 +2218,203 @@ impl MemoryServer {
             "tool": params.tool_name,
             "content": content_texts,
             "is_error": result.is_error.unwrap_or(false),
+        }))
+        .map_err(|e| format!("serialize: {e}"))
+    }
+
+    // ─── Ghost Whispers (Inter-Agent Pub/Sub) ────────────────────────────────
+
+    #[tool(description = "Publish a message to a Ghost Whispers topic. Other agents can poll for new messages via ghost_subscribe.")]
+    async fn ghost_publish(
+        &self,
+        Parameters(params): Parameters<GhostPublishParams>,
+    ) -> Result<String, String> {
+        let msg_id = uuid::Uuid::new_v4().to_string();
+        let timestamp = Utc::now().to_rfc3339();
+
+        let msg = PubSubMessage {
+            topic: params.topic.clone(),
+            payload: params.payload,
+            publisher: params.publisher.clone(),
+            timestamp: timestamp.clone(),
+            id: msg_id.clone(),
+        };
+
+        let mut state = self.pubsub.lock().unwrap_or_else(|e| e.into_inner());
+        let ring = state.messages.entry(params.topic.clone()).or_insert_with(VecDeque::new);
+        ring.push_back(msg);
+        if ring.len() > PUBSUB_RING_MAX {
+            ring.pop_front();
+        }
+        let idx = state.next_index.entry(params.topic.clone()).or_insert(0);
+        *idx += 1;
+
+        serde_json::to_string(&json!({
+            "id": msg_id,
+            "topic": params.topic,
+            "publisher": params.publisher,
+            "timestamp": timestamp,
+            "global_index": *idx,
+        }))
+        .map_err(|e| format!("serialize: {e}"))
+    }
+
+    #[tool(description = "Subscribe to Ghost Whispers topics and get new messages since last poll. Advances the cursor so the same messages are not returned again.")]
+    async fn ghost_subscribe(
+        &self,
+        Parameters(params): Parameters<GhostSubscribeParams>,
+    ) -> Result<String, String> {
+        let mut state = self.pubsub.lock().unwrap_or_else(|e| e.into_inner());
+
+        // Read current cursors for this agent (clone to release borrow)
+        let prev_cursors: HashMap<String, usize> = state
+            .cursors
+            .get(&params.agent_id)
+            .cloned()
+            .unwrap_or_default();
+
+        let mut new_messages: Vec<serde_json::Value> = Vec::new();
+        let mut new_cursors: HashMap<String, usize> = prev_cursors.clone();
+
+        for topic in &params.topics {
+            let global_idx = state.next_index.get(topic).copied().unwrap_or(0);
+            let cursor = prev_cursors.get(topic).copied().unwrap_or(0);
+
+            if cursor >= global_idx {
+                new_cursors.insert(topic.clone(), global_idx);
+                continue; // no new messages
+            }
+
+            if let Some(ring) = state.messages.get(topic) {
+                let ring_start_idx = if global_idx >= ring.len() {
+                    global_idx - ring.len()
+                } else {
+                    0
+                };
+                let skip = if cursor > ring_start_idx {
+                    cursor - ring_start_idx
+                } else {
+                    0
+                };
+
+                for msg in ring.iter().skip(skip) {
+                    new_messages.push(json!({
+                        "id": msg.id,
+                        "topic": msg.topic,
+                        "payload": msg.payload,
+                        "publisher": msg.publisher,
+                        "timestamp": msg.timestamp,
+                    }));
+                }
+            }
+
+            // Advance cursor to current head
+            new_cursors.insert(topic.clone(), global_idx);
+        }
+
+        // Write back updated cursors
+        state.cursors.insert(params.agent_id.clone(), new_cursors);
+
+        serde_json::to_string(&json!({
+            "agent_id": params.agent_id,
+            "new_count": new_messages.len(),
+            "messages": new_messages,
+        }))
+        .map_err(|e| format!("serialize: {e}"))
+    }
+
+    #[tool(description = "List active Ghost Whispers topics with message counts and last message time.")]
+    async fn ghost_topics(&self) -> Result<String, String> {
+        let state = self.pubsub.lock().unwrap_or_else(|e| e.into_inner());
+
+        let mut topics: Vec<serde_json::Value> = Vec::new();
+        for (topic, ring) in &state.messages {
+            if ring.is_empty() {
+                continue;
+            }
+            let last_msg = ring.back().unwrap();
+            topics.push(json!({
+                "topic": topic,
+                "count": ring.len(),
+                "total_published": state.next_index.get(topic).copied().unwrap_or(0),
+                "last_message_time": last_msg.timestamp,
+                "last_publisher": last_msg.publisher,
+            }));
+        }
+
+        serde_json::to_string(&json!({
+            "active_topics": topics.len(),
+            "topics": topics,
+        }))
+        .map_err(|e| format!("serialize: {e}"))
+    }
+
+    // ─── Skill Chaining (Unix Pipe-Style Composition) ────────────────────────
+
+    #[tool(description = "Execute a chain of skills in sequence (Unix pipe style). Output of each skill feeds as input to the next.")]
+    async fn chain_skills(
+        &self,
+        Parameters(params): Parameters<ChainSkillsParams>,
+    ) -> Result<String, String> {
+        if params.steps.is_empty() {
+            return Err("chain_skills requires at least one step".to_string());
+        }
+
+        let mut current_input = params.initial_input;
+        let mut step_results: Vec<serde_json::Value> = Vec::new();
+
+        for (i, step) in params.steps.iter().enumerate() {
+            let start = Instant::now();
+
+            // Build args: merge extra_args with piped input
+            let mut args = match &step.extra_args {
+                Some(Value::Object(obj)) => Value::Object(obj.clone()),
+                _ => json!({}),
+            };
+            if let Value::Object(ref mut map) = args {
+                map.insert("input".into(), json!(current_input));
+            }
+
+            let run_params = RunSkillParams {
+                skill_id: step.skill_id.clone(),
+                args,
+            };
+
+            match self.run_skill(Parameters(run_params)).await {
+                Ok(output) => {
+                    let elapsed_ms = start.elapsed().as_millis();
+                    step_results.push(json!({
+                        "step": i,
+                        "skill_id": step.skill_id,
+                        "elapsed_ms": elapsed_ms,
+                        "status": "ok",
+                    }));
+                    current_input = output;
+                }
+                Err(e) => {
+                    step_results.push(json!({
+                        "step": i,
+                        "skill_id": step.skill_id,
+                        "status": "error",
+                        "error": e,
+                    }));
+                    return serde_json::to_string(&json!({
+                        "status": "error",
+                        "failed_at_step": i,
+                        "skill_id": step.skill_id,
+                        "error": e,
+                        "steps": step_results,
+                    }))
+                    .map_err(|e| format!("serialize: {e}"));
+                }
+            }
+        }
+
+        serde_json::to_string(&json!({
+            "status": "ok",
+            "total_steps": params.steps.len(),
+            "output": current_input,
+            "steps": step_results,
         }))
         .map_err(|e| format!("serialize: {e}"))
     }
