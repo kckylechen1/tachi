@@ -131,6 +131,7 @@ Please install the Sigil memory extension for OpenClaw:
 - **🧠 3-Tier Context Extraction**: Automatically parses ingestion into three tiers: `L0` (Abstract Summary), `L1` (Overview), and `L2` (Full Text). Agents dynamically retrieve the appropriate depth based on context constraints.
 - **🔄 Evolution deduplication**: Utilizing math-based similarities for `HARD_SKIP` and `EVOLVE` updates.
 - **🔌 Dual-DB Architecture**: Global memories (`~/.sigil/global/memory.db`) shared across all projects, plus per-project memories (`.sigil/memory.db` at git root) for project-scoped context. Automatic git root detection and legacy migration. No external databases required.
+- **🎯 Sigil Hub**: A unified capability registry for Skills, Plugins, and MCP Servers. Register once, discover from any agent. Includes usage tracking, feedback metrics, and dual-DB inheritance (project overrides global). 67 pre-built skills available out of the box.
 
 ---
 

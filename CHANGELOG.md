@@ -5,6 +5,21 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.2] - 2026-03-23
+
+### Added
+- **Sigil Hub Phase 1 — Capability Registry + Discovery**: A unified catalog for Skills, Plugins, and MCP Servers. Any agent connecting to Sigil can discover and retrieve all registered capabilities.
+- **`hub_capabilities` table** in `memory-core`: New SQLite table with CRUD operations for registering, listing, searching, enabling/disabling, and tracking usage metrics of capabilities.
+- **`hub.rs` types module**: `HubCapability` struct with id, type, name, version, description, definition, enabled, usage/success/failure counters, and rolling average rating.
+- **5 new MCP tools**: `hub_register` (register a capability), `hub_discover` (list/search with dual-DB merge, project shadows global), `hub_get` (fetch single capability with project-first fallback), `hub_feedback` (record success/failure/rating), `hub_stats` (aggregated metrics across both DBs).
+- **4 new NAPI methods** for OpenClaw: `hub_register`, `hub_discover`, `hub_get`, `hub_feedback` — same Hub functionality available to Node.js agents.
+- **Skill batch loader** (`scripts/load_skills_to_hub.py`): Scans `~/.claude/skills/` directories, parses YAML frontmatter + full markdown content, and bulk-registers into global Hub. Successfully loaded 67 skills.
+- **Hub dual-DB inheritance**: Project Hub capabilities shadow global ones by ID. Register defaults to project DB, discover/get queries both with project priority.
+
+### Changed
+- **`memory-core` public API**: Added `pub mod hub` and re-exported `HubCapability`. Added 7 Hub methods to `MemoryStore` (hub_register, hub_get, hub_list, hub_search, hub_set_enabled, hub_record_feedback, hub_delete).
+- **MCP tool list**: Server now exposes 15 tools (10 memory + 5 hub).
+
 ## [0.5.0] - 2026-03-23
 
 ### Added
