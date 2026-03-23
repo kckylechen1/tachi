@@ -1,6 +1,6 @@
 <div align="center">
   <img src="assets/banner.png" alt="Sigil Banner" width="800" style="margin-bottom: 20px;" />
-  <h1>✧ 藏经阁（Sigil）记事</h1>
+  <h1>✧ 塔奇（Tachi）记事</h1>
   <p><strong>专为自主灵核（AI Agents）所筑之本地首储、凌波疾行之混合识海阵法</strong></p>
 
   <p>
@@ -38,7 +38,7 @@
 
 ## 💡 一、 概览
 
-**藏经阁（Sigil）** 者，乃专为机巧巨构（Autonomous AI Agents）所塑之潜渊识海也。
+**塔奇（Tachi）** 者，乃专为机巧巨构（Autonomous AI Agents）所塑之潜渊识海也。其名取自《攻壳机动队》之塔奇科马——以共享记忆进化出灵识之机巧战车。
 
 今世之造物，多以片语金石（向量数据库）碎藏执念。然此法极易致其神识胀乱（上下文膨胀），久之则前因后果尽皆遗忘。
 
@@ -71,13 +71,13 @@
      }
    }
 
-【方式二】玄铁炼体（Rust 原生启·最速）：
-   cargo build -p memory-server --release
+【方式二】玄铁炼体（Rust 原生启·最速·推荐）：
+   brew tap kckylechen1/sigil && brew install tachi
    配置 mcp_config.json:
    {
      "mcpServers": {
-       "memory": {
-         "command": "<绝对路径>/sigil/target/release/memory-server",
+       "tachi": {
+         "command": "tachi",
          "env": {
            "VOYAGE_API_KEY": "...",
            "SILICONFLOW_API_KEY": "..."

@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.0] - 2026-03-23
+
+### Changed
+- **Renamed to Tachi (塔奇)**: Project identity renamed from Sigil to Tachi, inspired by Ghost in the Shell's Tachikoma — AI units that evolve through shared memory. Binary now prints `tachi <version>` on `--version`/`-V`.
+- **Homebrew distribution**: `brew tap kckylechen1/sigil && brew install tachi` — one-command install, 7.3MB binary.
+- **`--version` flag**: Added CLI version flag before async runtime initialization.
+- **MCP config**: Binary installs as `tachi` instead of `memory-server`. Config: `{"mcpServers": {"tachi": {"command": "tachi"}}}`.
+
 ## [0.5.2] - 2026-03-23
 
 ### Added

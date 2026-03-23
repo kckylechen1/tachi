@@ -1,6 +1,6 @@
 <div align="center">
   <img src="assets/banner.png" alt="Sigil Banner" width="800" style="margin-bottom: 20px;" />
-  <h1>✧ Sigil</h1>
+  <h1>✧ Tachi (塔奇)</h1>
   <p><strong>A Fast, Local-First Context & Memory Database for Autonomous AI Agents</strong></p>
 
   <p>
@@ -38,7 +38,7 @@
 
 ## 💡 Overview
 
-**Sigil** is an embedded, unified context and memory management database engineered for Autonomous AI Agents.
+**Tachi** is an embedded, unified context and memory management database engineered for Autonomous AI Agents. Named after Ghost in the Shell's Tachikoma — AI units that evolve through shared memory.
 
 Standard memory models often rely on flat vector stores, leading to bloated context windows and a loss of temporal and causal relationships. Sigil addresses this by utilizing a **hierarchical, file-system-like paradigm** combined with **graph-based causal relations**, powered by a highly optimized Rust core. 
 
@@ -71,13 +71,13 @@ Please configure the Sigil local memory MCP server:
      }
    }
 
-[Option B] Native Rust Binary (Fastest):
-   cargo build -p memory-server --release
+[Option B] Native Rust Binary (Fastest — Recommended):
+   brew tap kckylechen1/sigil && brew install tachi
    Configure mcp_config.json:
    {
      "mcpServers": {
-       "memory": {
-         "command": "<absolute-path>/sigil/target/release/memory-server",
+       "tachi": {
+         "command": "tachi",
          "env": {
            "VOYAGE_API_KEY": "...",
            "SILICONFLOW_API_KEY": "..."
