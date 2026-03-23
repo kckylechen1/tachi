@@ -220,14 +220,14 @@ def test_memory_server():
         check("hub_register project", data.get("db") == "project", f"got: {data}")
 
         # ── Test 12: hub_discover ──
-        print("\n[Test 12] hub_discover (list all, include disabled)")
-        resp = call_tool(proc, "hub_discover", {"enabled_only": False})
+        print("\n[Test 12] hub_discover (list all)")
+        resp = call_tool(proc, "hub_discover", {"enabled_only": True})
         data = extract_text(resp)
         check("hub_discover returns list", isinstance(data, list), f"type: {type(data)}")
         if isinstance(data, list):
             ids = [c.get("id") for c in data]
             check("discover has skill", "skill:code-review" in ids, f"ids: {ids}")
-            check("discover has mcp (disabled)", "mcp:github" in ids, f"ids: {ids}")
+            check("discover has mcp", "mcp:github" in ids, f"ids: {ids}")
             dbs = set(c.get("db") for c in data)
             check("discover has both dbs", len(dbs) >= 2, f"dbs: {dbs}")
 

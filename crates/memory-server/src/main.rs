@@ -7,6 +7,7 @@ mod llm;
 mod prompts;
 
 use chrono::Utc;
+use clap::Parser;
 use memory_core::{HubCapability, MemoryEntry, MemoryStore, SearchOptions};
 use rmcp::{
     model::{ServerCapabilities, ServerInfo},
@@ -26,6 +27,20 @@ use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
 use std::time::{Duration, Instant};
 use tokio::io::{stdin, stdout};
+
+// ─── CLI Arguments ────────────────────────────────────────────────────────────
+
+#[derive(Parser, Debug)]
+#[command(name = "tachi", version, about = "Tachi — memory + Hub MCP server")]
+struct Cli {
+    /// Run as HTTP daemon instead of stdio transport
+    #[arg(long)]
+    daemon: bool,
+
+    /// Port for HTTP daemon (default: 6919)
+    #[arg(long, default_value_t = 6919)]
+    port: u16,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DbScope {
@@ -2251,19 +2266,15 @@ impl ServerHandler for MemoryServer {
 // ─── Main ────────────────────────────────────────────────────────────────────────
 
 fn main() {
-    let args: Vec<String> = std::env::args().collect();
-    if args.iter().any(|a| a == "--version" || a == "-V") {
-        println!("tachi {}", env!("CARGO_PKG_VERSION"));
-        std::process::exit(0);
-    }
-    if let Err(e) = tokio_main() {
+    let cli = Cli::parse();
+    if let Err(e) = tokio_main(cli) {
         eprintln!("Fatal: {e}");
         std::process::exit(1);
     }
 }
 
 #[tokio::main]
-async fn tokio_main() -> Result<(), Box<dyn std::error::Error>> {
+async fn tokio_main(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     // Load config from dotenv files (same as before)
     let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
     let expand_user_path = |raw: &str| {
@@ -2458,7 +2469,8 @@ async fn tokio_main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
 
-    eprintln!("Starting Memory MCP Server v{}", env!("CARGO_PKG_VERSION"));
+    eprintln!("Starting Tachi MCP Server v{}", env!("CARGO_PKG_VERSION"));
+    eprintln!("Transport: {}", if cli.daemon { format!("HTTP daemon on port {}", cli.port) } else { "stdio".to_string() });
     eprintln!("Global DB: {}", global_db_path.display());
     if let Some(ref p) = project_db_path {
         eprintln!("Project DB: {}", p.display());
@@ -2470,19 +2482,64 @@ async fn tokio_main() -> Result<(), Box<dyn std::error::Error>> {
         server.global_vec_available, server.project_vec_available
     );
 
-    let transport = (stdin(), stdout());
+    if cli.daemon {
+        // ── HTTP daemon mode ───────────────────────────────────���─────────
+        // TODO: In daemon mode we only use the global DB since there is no
+        //       single project context. Per-session project DB routing will
+        //       require a session-aware factory that resolves the project path
+        //       from a request header or query parameter.
 
-    eprintln!("Starting Memory MCP Server v{}", env!("CARGO_PKG_VERSION"));
+        use rmcp::transport::streamable_http_server::{
+            StreamableHttpServerConfig, StreamableHttpService,
+            session::local::LocalSessionManager,
+        };
+        use tokio_util::sync::CancellationToken;
 
-    let running = rmcp::service::serve_server(server, transport).await?;
+        let ct = CancellationToken::new();
+        let ct_shutdown = ct.clone();
+        let port = cli.port;
 
-    // Graceful shutdown: wait for either MCP quit or SIGINT/SIGTERM
-    tokio::select! {
-        quit_reason = running.waiting() => {
-            eprintln!("Memory MCP Server stopped: {:?}", quit_reason);
+        let service = StreamableHttpService::new(
+            move || Ok(server.clone()),
+            Arc::new(LocalSessionManager::default()),
+            StreamableHttpServerConfig {
+                stateful_mode: true,
+                cancellation_token: ct.child_token(),
+                ..Default::default()
+            },
+        );
+
+        let router = axum::Router::new().nest_service("/mcp", service);
+        let bind_addr = format!("127.0.0.1:{port}");
+        let listener = tokio::net::TcpListener::bind(&bind_addr).await?;
+
+        eprintln!("Tachi daemon listening on http://{bind_addr}");
+
+        tokio::select! {
+            result = axum::serve(listener, router)
+                .with_graceful_shutdown(async move { ct_shutdown.cancelled_owned().await }) => {
+                if let Err(e) = result {
+                    eprintln!("HTTP server error: {e}");
+                }
+            }
+            _ = tokio::signal::ctrl_c() => {
+                eprintln!("Received SIGINT, shutting down gracefully...");
+                ct.cancel();
+            }
         }
-        _ = tokio::signal::ctrl_c() => {
-            eprintln!("Received SIGINT, shutting down gracefully...");
+    } else {
+        // ── stdio mode (default) ─────────────────────────────────────────
+        let transport = (stdin(), stdout());
+        let running = rmcp::service::serve_server(server, transport).await?;
+
+        // Graceful shutdown: wait for either MCP quit or SIGINT/SIGTERM
+        tokio::select! {
+            quit_reason = running.waiting() => {
+                eprintln!("Memory MCP Server stopped: {:?}", quit_reason);
+            }
+            _ = tokio::signal::ctrl_c() => {
+                eprintln!("Received SIGINT, shutting down gracefully...");
+            }
         }
     }
 
