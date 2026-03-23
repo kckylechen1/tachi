@@ -1,8 +1,8 @@
-# Sigil 架构重构与瘦身白皮书
+# Tachi 架构重构与瘦身白皮书
 **(Based on Codex 5.4 & Kimi K2.5 Architecture Review)**
 
 ## 1. 核心定调
-**Sigil 不应该是“试图理解你人生的智能大脑”，而应该是一个“脏活累活分清楚、出错可追、重建不疼的 Reliable Memory Substrate”。**
+**Tachi 不应该是“试图理解你人生的智能大脑”，而应该是一个“脏活累活分清楚、出错可追、重建不疼的 Reliable Memory Substrate”。**
 
 - **放弃幻想**：砍掉旧版脆弱的 `提取 -> 合并 -> 蒸馏 -> 回写` 异步流水线。这套机制在拿 LLM 当数据库状态机用，极易造成语义漂移、状态污染和链式崩溃。
 - **保留优势**：坚守 Rust/SQLite 的强类型、事务性和高性能本地检索优势。
@@ -29,7 +29,7 @@
 - **计算向量/建索引** -> 扔到后台异步跑，失败了也无所谓（只影响召回，不丢数据）。
 
 ## 4. 拒绝 Fork：领域模型（Domain Pack）化
-**针对 Trading/Stock 场景的结论：绝不要 Fork Sigil 内核！**
+**针对 Trading/Stock 场景的结论：绝不要 Fork Tachi 内核！**
 
 - `watchlist` / `fund_position` 本质是领域语义（Schema），不是内核机制。
 - **Core 负责**：怎么存、怎么搜、权限、版本（Domain-agnostic）。

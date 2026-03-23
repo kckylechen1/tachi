@@ -1,4 +1,4 @@
-# Sigil V2: 跨模态、跨领域可扩展记忆底座 (Memory Substrate)
+# Tachi V2: 跨模态、跨领域可扩展记忆底座 (Memory Substrate)
 **(Based on Architecture Review - 2026-03-14)**
 
 ## 核心定位
@@ -10,7 +10,7 @@
 
 ---
 
-## 一、Sigil Core 负责的 4 个基础层
+## 一、Tachi Core 负责的 4 个基础层
 
 Core 不懂业务，它只管抽象的数据流转。
 
@@ -44,7 +44,7 @@ MemoryUnit {
   id: string
   kind: enum           // event | state | memory | derived | artifact
   modality: enum       // text | image | audio | pdf | json | mixed
-  scope: string        // e.g., "user:kyle", "project:sigil"
+  scope: string        // e.g., "user:kyle", "project:Tachi"
   source: string       // 来源追踪
   content_ref: string  // Text body 或指向 S3/本地文件系统的 Blob Pointer
   summary?: string     // 可选摘要
@@ -99,4 +99,4 @@ Domain Pack 不去改动 Core，而是通过注册机制挂载领域知识。一
 1. `trading-pack`（偏高频状态、强数字、低容错）
 2. `medical-pack` 或 `clinical-pack`（偏多模态、大文本、生命安全底线）
 
-只要这两个 Pack 都能用同一套 `MemoryUnit` 跑通读写和检索，Sigil Core V2 的地基就算彻底打成了。
+只要这两个 Pack 都能用同一套 `MemoryUnit` 跑通读写和检索，Tachi Core V2 的地基就算彻底打成了。

@@ -1,4 +1,4 @@
-# Sigil v2: 自治型自进化记忆智能体 PRD
+# Tachi v2: 自治型自进化记忆智能体 PRD
 
 **文档版本**: v2.1 (生产就绪版)
 **修订**: 吸收 Codex & Perplexity 审查意见
@@ -8,7 +8,7 @@
 
 ## 1. 核心系统架构 (Event-Driven Architecture)
 
-Sigil v2 采用**事件溯源 (Event Sourcing)** 架构。客户端仅发送对话事件，所有记忆处理全异步化。
+Tachi v2 采用**事件溯源 (Event Sourcing)** 架构。客户端仅发送对话事件，所有记忆处理全异步化。
 
 ### 1.1 队列表 schema (memory_events)
 修复前序版本中“状态记录不清”的问题：
@@ -85,7 +85,7 @@ CREATE TABLE memories (
 ## 4. 安全与数据治理 (Security & Governance)
 
 - **PII 治理**: Extractor 在提取事实时，自动对敏感信息（如密码、身份证、私密地址）进行脱敏处理。
-- **认证鉴权**: API 访问需携带 `X-Sigil-Key`。
+- **认证鉴权**: API 访问需携带 `X-Tachi-Key`。
 - **时区强制**: 数据库级强制存储 UTC，仅在 API 展示层根据客户端 Locale 转换展示。
 
 ---
