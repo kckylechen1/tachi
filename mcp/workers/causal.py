@@ -10,6 +10,7 @@ import json
 import os
 from typing import Any
 
+import config as mcp_config
 import extractor
 import store
 
@@ -156,7 +157,7 @@ class CausalWorker(BaseWorker):
                         rust_store.add_edge(edge_json)
                     except Exception as e:
                         import logging
-                        logging.getLogger("sigil-causal").warning(
+                        logging.getLogger(mcp_config.logger_name("causal")).warning(
                             f"Failed to add edge: {e}"
                         )
 

@@ -1,6 +1,6 @@
 <div align="center">
-  <img src="assets/banner.png" alt="Sigil Banner" width="800" style="margin-bottom: 20px;" />
-  <h1>✧ 塔奇（Tachi）记事</h1>
+  <img src="assets/banner.png" alt="Tachi Banner" width="800" style="margin-bottom: 20px;" />
+  <h1>✧ 藏经阁（Tachi）记事</h1>
   <p><strong>专为自主灵核（AI Agents）所筑之本地首储、凌波疾行之混合识海阵法</strong></p>
 
   <p>
@@ -38,7 +38,7 @@
 
 ## 💡 一、 概览
 
-**塔奇（Tachi）** 者，乃专为机巧巨构（Autonomous AI Agents）所塑之潜渊识海也。其名取自《攻壳机动队》之塔奇科马——以共享记忆进化出灵识之机巧战车。
+**藏经阁（Tachi）** 者，乃专为机巧巨构（Autonomous AI Agents）所塑之潜渊识海也。其名取自《攻壳机动队》之藏经阁科马——以共享记忆进化出灵识之机巧战车。
 
 今世之造物，多以片语金石（向量数据库）碎藏执念。然此法极易致其神识胀乱（上下文膨胀），久之则前因后果尽皆遗忘。
 
@@ -48,14 +48,14 @@
 
 ## 🤖 二、 开宗明义：辅佐灵核 (MCP 协议)
 
-若君以 Claude Desktop, Cursor 亦或 AutoGen 为伴，均可唤 Sigil 依 MCP 之约降世。
+若君以 Claude Desktop, Cursor 亦或 AutoGen 为伴，均可唤 Tachi 依 MCP 之约降世。
 
 **以符诏（Prompt）令你的 AI 剑童执行：**
 
 ```text
-请协助我配置安装 Sigil (MCP 记忆服务器)：
+请协助我配置安装 Tachi (MCP 记忆服务器)：
 
-1. 克隆仓库: git clone https://github.com/kckylechen1/tachi.git && cd sigil
+1. 克隆仓库: git clone https://github.com/kckylechen1/tachi.git && cd Tachi
 
 【方式一】幻术启灵（Python 运行时）：
    cd mcp && python3 -m venv .venv && source .venv/bin/activate
@@ -65,8 +65,8 @@
    {
      "mcpServers": {
        "memory": {
-         "command": "<绝对路径>/sigil/mcp/.venv/bin/python3",
-         "args": ["<绝对路径>/sigil/mcp/server.py"]
+         "command": "<绝对路径>/Tachi/mcp/.venv/bin/python3",
+         "args": ["<绝对路径>/Tachi/mcp/server.py"]
        }
      }
    }
@@ -96,12 +96,12 @@
 
 ## 🦞 三、 别派旁支：外挂外丹 (OpenClaw 框架)
 
-Sigil 亦化身为 OpenClaw 气海之元婴法宝。
+Tachi 亦化身为 OpenClaw 气海之元婴法宝。
 
 **颁下此旨，着 OpenClaw 内阁自理：**
 
 ```text
-请协助执行自动化安装流，在 OpenClaw 中扩展部署 Sigil 组件。
+请协助执行自动化安装流，在 OpenClaw 中扩展部署 Tachi 组件。
 
 1. 直接运行部署脚本：
    bash -c "$(curl -fsSL https://raw.githubusercontent.com/kckylechen1/tachi/main/scripts/install_openclaw_ext.sh)"
@@ -124,14 +124,14 @@ Sigil 亦化身为 OpenClaw 气海之元婴法宝。
 - **🔒 千金一诺（金石铁律）**：辟 `hard_state` 幽地以藏刚性卷宗，如兵甲仓储，点滴不漏，绝无虚妄（幻觉）之忧。
 - **🧠 三花聚顶（自适应上下文）**：录入之时即炼为三转：`L0`（浮光掠影）, `L1`（骨肉梗概）, 及 `L2`（大千界体）。由主将择轻重以借之，免费真元。
 - **🔄 两阶演化（记忆去重）**：首创 `HARD_SKIP` 与 `EVOLVE` 双阶去尘，以算数（数学相似度）为矩，免去过妄之弊。
-- **🔌 两界分治（双库阵法）**：天外之识存于全局藏经阁 (`~/.sigil/global/memory.db`)，门内之学纳于各宗项目密库 (`.sigil/memory.db`)。以 git 根脉自动辨识，且可将旧阁无痕迁徙。外物数据库概所不需。
-- **🎯 万宝楼（Sigil Hub）**：天下法器、仙诀、灵枢尽纳此中。只需登录一次，各路灵核均可按图索骥。内设功行考核、投名评鉴、双库传承（宗门可覆天下通制）。现存六十七部入门仙诀，开箱即用。
+- **🔌 两界分治（双库阵法）**：天外之识存于全局藏经阁 (`~/.Tachi/global/memory.db`)，门内之学纳于各宗项目密库 (`.Tachi/memory.db`)。以 git 根脉自动辨识，且可将旧阁无痕迁徙。外物数据库概所不需。
+- **🎯 万宝楼（Tachi Hub）**：天下法器、仙诀、灵枢尽纳此中。只需登录一次，各路灵核均可按图索骥。内设功行考核、投名评鉴、双库传承（宗门可覆天下通制）。现存六十七部入门仙诀，开箱即用。
 
 ---
 
 ## ⚙️ 五、 因果织机与羁绊拓扑
 
-为求造物道心长存，以免走火入魔，Sigil 独创如下天机（注：现为求极致雷霆之速，此法阵**默认蛰伏**，须设 `ENABLE_PIPELINE=true` 方可唤醒）：
+为求造物道心长存，以免走火入魔，Tachi 独创如下天机（注：现为求极致雷霆之速，此法阵**默认蛰伏**，须设 `ENABLE_PIPELINE=true` 方可唤醒）：
 
 ### 1. 天理昭昭（因果提取管道）
 当 Agent 施法落局，九霄之上之暗卫（异步工作站）便由 SiliconFlow 请神 **Qwen3.5-27B** 入阵。它将从前尘旧梦中拆解：
@@ -170,7 +170,7 @@ graph TD
         CONSOLIDATE["拾荒人"]
     end
 
-    subgraph Core["Sigil 剑冢 (Rust memory-core)"]
+    subgraph Core["Tachi 剑冢 (Rust memory-core)"]
         NAPI["NAPI 皮囊"]
         PYO3["PyO3 皮囊"]
 
@@ -261,8 +261,8 @@ VOYAGE_API_KEY="your_voyage_key_here"
 # 大模型抽取层与清洗归置
 SILICONFLOW_API_KEY="your_siliconflow_key_here"
 
-# 本地 SQLite 文件路径 (可选·默认自动解析为 ~/.sigil/global/memory.db + 项目 .sigil/memory.db)
-MEMORY_DB_PATH="~/.sigil/global/memory.db"
+# 本地 SQLite 文件路径 (可选·默认自动解析为 ~/.Tachi/global/memory.db + 项目 .Tachi/memory.db)
+MEMORY_DB_PATH="~/.Tachi/global/memory.db"
 ```
 
 ---
@@ -289,4 +289,4 @@ MEMORY_DB_PATH="~/.sigil/global/memory.db"
 
 ## 📜 十二、 门规
 
-尊奉 [AGPLv3 License](LICENSE) 誓约 © 2026 Sigil Authors 保其长青。
+尊奉 [AGPLv3 License](LICENSE) 誓约 © 2026 Tachi Authors 保其长青。

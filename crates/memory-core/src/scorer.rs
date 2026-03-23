@@ -316,18 +316,8 @@ pub fn tokenize(s: &str) -> Vec<String> {
     tokens
 }
 
-/// Check if a character is in a CJK Unified Ideographs block.
-#[inline]
-fn is_cjk(c: char) -> bool {
-    matches!(c,
-        '\u{4E00}'..='\u{9FFF}'   // CJK Unified Ideographs
-        | '\u{3400}'..='\u{4DBF}' // CJK Extension A
-        | '\u{F900}'..='\u{FAFF}' // CJK Compatibility
-        | '\u{3040}'..='\u{309F}' // Hiragana
-        | '\u{30A0}'..='\u{30FF}' // Katakana
-        | '\u{AC00}'..='\u{D7AF}' // Hangul
-    )
-}
+// Re-use is_cjk from noise module (single source of truth)
+use crate::noise::is_cjk;
 
 /// Compute a normalised token-overlap (Jaccard-like) score [0, 1].
 pub fn symbolic_score(query: &str, entry_text: &str, keywords: &[String]) -> f64 {

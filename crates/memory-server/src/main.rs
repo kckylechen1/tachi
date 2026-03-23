@@ -143,8 +143,8 @@ struct McpClientPool {
     connections: std::sync::Mutex<HashMap<String, ChildConnection>>,
     /// Circuit breaker state per server
     circuits: std::sync::Mutex<HashMap<String, (CircuitState, u32)>>,
-    /// Per-child concurrency semaphores
-    semaphores: std::sync::Mutex<HashMap<String, Arc<tokio::sync::Semaphore>>>,
+    /// Per-child concurrency semaphores: (semaphore, configured max_concurrency)
+    semaphores: std::sync::Mutex<HashMap<String, (Arc<tokio::sync::Semaphore>, usize)>>,
     /// Idle TTL before auto-disconnect
     idle_ttl: Duration,
 }
@@ -375,6 +375,58 @@ fn find_git_root() -> Option<PathBuf> {
             return None;
         }
     }
+}
+
+/// Check if a command is in the trusted allowlist for MCP server spawning.
+/// Trusted: common package runners, interpreters, and brew-installed binaries.
+fn is_trusted_command(cmd: &str) -> bool {
+    let basename = std::path::Path::new(cmd)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or(cmd);
+
+    const TRUSTED_BASENAMES: &[&str] = &[
+        "npx", "node", "bun", "deno",
+        "python3", "python", "uv",
+        "cargo", "rustup",
+        "docker", "podman",
+        "tachi",
+    ];
+
+    if TRUSTED_BASENAMES.contains(&basename) {
+        return true;
+    }
+
+    // Allow absolute paths under Homebrew, nvm, cargo, common bin dirs
+    const TRUSTED_PREFIXES: &[&str] = &[
+        "/opt/homebrew/",
+        "/usr/local/bin/",
+        "/usr/bin/",
+        "/bin/",
+    ];
+
+    for prefix in TRUSTED_PREFIXES {
+        if cmd.starts_with(prefix) {
+            return true;
+        }
+    }
+
+    // Allow paths under user's home .cargo/bin, .local/bin, .nvm
+    if let Ok(home) = std::env::var("HOME") {
+        let home_prefixes = [
+            format!("{}/.cargo/bin/", home),
+            format!("{}/.local/bin/", home),
+            format!("{}/.nvm/", home),
+            format!("{}/.bun/bin/", home),
+        ];
+        for prefix in &home_prefixes {
+            if cmd.starts_with(prefix.as_str()) {
+                return true;
+            }
+        }
+    }
+
+    false
 }
 
 fn resolve_env_map(def: &serde_json::Value) -> Result<HashMap<String, String>, String> {
@@ -1328,8 +1380,22 @@ impl MemoryServer {
     #[tool(description = "Register a capability (skill, plugin, or MCP server) in the Hub.")]
     async fn hub_register(&self, #[tool(aggr)] params: HubRegisterParams) -> Result<String, String> {
         let (target_db, warning) = self.resolve_write_scope(&params.scope);
-        // Project-scope MCP capabilities default to disabled for security
-        let auto_enabled = !(params.cap_type == "mcp" && target_db == DbScope::Project);
+
+        // Security: validate MCP server commands against allowlist
+        let auto_enabled = if params.cap_type == "mcp" {
+            let def: serde_json::Value = serde_json::from_str(&params.definition).unwrap_or_default();
+            if def["transport"].as_str().unwrap_or("stdio") == "stdio" {
+                if let Some(cmd) = def["command"].as_str() {
+                    is_trusted_command(cmd)
+                } else {
+                    false
+                }
+            } else {
+                true // SSE/HTTP are URLs, no local exec risk
+            }
+        } else {
+            true
+        };
         let cap = HubCapability {
             id: params.id.clone(),
             cap_type: params.cap_type.clone(),
@@ -1360,7 +1426,12 @@ impl MemoryServer {
             resp.insert("warning".into(), json!(w));
         }
         if !auto_enabled {
-            resp.insert("warning".into(), json!("Project MCP capabilities are disabled by default. Use hub_set_enabled to activate."));
+            let def: serde_json::Value = serde_json::from_str(&params.definition).unwrap_or_default();
+            let cmd = def["command"].as_str().unwrap_or("unknown");
+            resp.insert("warning".into(), json!(format!(
+                "Command '{}' is not in the trusted allowlist. Capability registered but disabled. Use hub_set_enabled to activate after review.", cmd
+            )));
+            resp.insert("enabled".into(), json!(false));
         }
 
         if params.cap_type == "skill" {
@@ -1371,6 +1442,53 @@ impl MemoryServer {
                 Err(e) => {
                     resp.insert("skill_error".into(), json!(e));
                 }
+            }
+
+            // L0 analysis: async background scan of the prompt template
+            let def: serde_json::Value = serde_json::from_str(&params.definition).unwrap_or_default();
+            if def["prompt"].as_str().is_some() {
+                let llm = self.llm.clone();
+                let cap_clone = cap.clone();
+                let desc_empty = params.description.is_empty();
+                let db_path = match target_db {
+                    DbScope::Global => self.global_db_path.clone(),
+                    DbScope::Project => self.project_db_path.clone().unwrap_or_else(|| self.global_db_path.clone()),
+                };
+                let prompt_text = def["prompt"].as_str().unwrap().to_string();
+
+                let cap_id = cap_clone.id.clone();
+
+                tokio::spawn(async move {
+                    match llm.call_llm(
+                        crate::prompts::SKILL_ANALYSIS_PROMPT,
+                        &prompt_text,
+                        None,
+                        0.3,
+                        500,
+                    ).await {
+                        Ok(analysis_raw) => {
+                            let analysis_json: serde_json::Value = serde_json::from_str(
+                                llm::LlmClient::strip_code_fence(&analysis_raw)
+                            ).unwrap_or(serde_json::json!({"summary": analysis_raw}));
+
+                            // Auto-fill description if it was empty
+                            if desc_empty {
+                                if let Some(summary) = analysis_json["summary"].as_str() {
+                                    let mut updated_cap = cap_clone;
+                                    updated_cap.description = summary.to_string();
+                                    if let Ok(store) = MemoryStore::open(db_path.to_str().unwrap_or("")) {
+                                        let _ = store.hub_register(&updated_cap);
+                                    }
+                                }
+                            }
+                            eprintln!("[skill-analysis] {}: {:?}", cap_id, analysis_json);
+                        }
+                        Err(e) => {
+                            eprintln!("[skill-analysis] failed for {}: {}", cap_id, e);
+                        }
+                    }
+                });
+                resp.insert("analysis".into(), json!("pending (async)"));
             }
         } else if params.cap_type == "mcp" {
             // Auto-discover tools from child MCP server
@@ -1929,13 +2047,20 @@ impl MemoryServer {
             }
         }
 
-        // 3. Acquire per-child concurrency permit
+        // 3. Acquire per-child concurrency permit (rebuild if max_concurrency changed)
         let semaphore = {
             let mut sems = self.pool.semaphores.lock().unwrap();
             let max_conc = cap_def["max_concurrency"].as_u64().unwrap_or(1) as usize;
-            sems.entry(server_name.to_string())
-                .or_insert_with(|| Arc::new(tokio::sync::Semaphore::new(max_conc)))
-                .clone()
+            let needs_rebuild = sems.get(server_name)
+                .map(|(_, cached_max)| *cached_max != max_conc)
+                .unwrap_or(true);
+            if needs_rebuild {
+                sems.insert(
+                    server_name.to_string(),
+                    (Arc::new(tokio::sync::Semaphore::new(max_conc)), max_conc),
+                );
+            }
+            sems.get(server_name).unwrap().0.clone()
         };
         let _permit = semaphore.acquire().await
             .map_err(|_| rmcp::Error::internal_error("semaphore closed", None))?;

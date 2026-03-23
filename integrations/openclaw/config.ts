@@ -1,7 +1,7 @@
 import path from "node:path";
-import os from "node:os";
 import { fileURLToPath } from "node:url";
 import { Type, type Static } from "@sinclair/typebox";
+import { defaultDbPath, resolveUserPath } from "./constants.js";
 
 // ============================================================================
 // Memory Entry Schema (matches Phase 2 architecture)
@@ -80,8 +80,8 @@ export const defaultConfig: BridgeConfig = {
     ? path.resolve(workspaceRoot, "scripts/memory_builder_prompt.txt")
     : path.resolve(repoRoot, "scripts/memory_builder_prompt.txt"),
   dbPath: process.env.MEMORY_DB_PATH
-    ? path.resolve(process.env.MEMORY_DB_PATH.replace(/^~/, os.homedir()))
-    : path.resolve(pluginDataDir, "memory.db"),
+    ? resolveUserPath(process.env.MEMORY_DB_PATH)
+    : defaultDbPath,
   shadowStorePath: path.resolve(
     pluginDataDir,
     "shadow-store.jsonl",

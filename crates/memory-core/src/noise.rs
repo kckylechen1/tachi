@@ -111,9 +111,9 @@ lazy_static! {
 /// Longer queries only skip via explicit full-string patterns (affirmations etc.)
 const SKIP_MAX_CHARS: usize = 40;
 
-/// Check if a character is CJK.
+/// Check if a character is CJK (shared with scorer.rs).
 #[inline]
-fn is_cjk(c: char) -> bool {
+pub fn is_cjk(c: char) -> bool {
     matches!(c,
         '\u{4E00}'..='\u{9FFF}'   // CJK Unified Ideographs
         | '\u{3400}'..='\u{4DBF}' // CJK Extension A

@@ -31,7 +31,7 @@ impl LlmClient {
             .map_err(|_| "SILICONFLOW_API_KEY environment variable not set".to_string())?;
 
         let siliconflow_model = std::env::var("SILICONFLOW_MODEL")
-            .unwrap_or_else(|_| "Qwen/Qwen2.5-7B-Instruct".to_string());
+            .unwrap_or_else(|_| "Qwen/Qwen3.5-27B".to_string());
 
         let summary_model = std::env::var("SUMMARY_MODEL")
             .unwrap_or_else(|_| siliconflow_model.clone());
@@ -179,7 +179,7 @@ impl LlmClient {
     }
 
     /// Remove ```json markdown code fences from response
-    fn strip_code_fence(text: &str) -> &str {
+    pub fn strip_code_fence(text: &str) -> &str {
         let text = text.trim();
         if text.starts_with("```json") {
             text[7..].trim()

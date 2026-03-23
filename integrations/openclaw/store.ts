@@ -1,6 +1,6 @@
 import fs from "node:fs/promises";
 import path from "node:path";
-import { JsMemoryStore } from "@chaoxlabs/sigil-node";
+import { JsMemoryStore } from "@chaoxlabs/tachi-node";
 import type { BridgeConfig, MemoryEntry } from "./config.js";
 
 export class MemoryStore {

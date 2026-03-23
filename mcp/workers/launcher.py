@@ -1,10 +1,11 @@
-"""Worker lifecycle manager for Sigil MCP server."""
+"""Worker lifecycle manager for Tachi MCP server."""
 
 import asyncio
 import logging
 
 from memory_core_py import MemoryStore
 
+import config as mcp_config
 import store
 from event_queue import init_event_queue
 from workers.causal import CausalWorker
@@ -12,7 +13,7 @@ from workers.consolidator import ConsolidatorWorker
 from workers.distiller import DistillerWorker
 from workers.extractor import ExtractorWorker
 
-logger = logging.getLogger("sigil-workers")
+logger = logging.getLogger(mcp_config.logger_name("workers"))
 
 
 class WorkerLauncher:

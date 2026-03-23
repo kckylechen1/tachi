@@ -3,7 +3,7 @@
 set -euo pipefail
 
 echo "========================================================"
-echo "🦞 Installing Sigil Memory as OpenClaw Extension"
+echo "🦞 Installing Tachi Memory as OpenClaw Extension"
 echo "========================================================"
 echo ""
 
@@ -20,17 +20,17 @@ require_cmd npm
 require_cmd cargo
 
 # 1. Determine target directory
-TARGET_DIR="${SIGIL_INSTALL_DIR:-$HOME/sigil}"
+TARGET_DIR="${TACHI_INSTALL_DIR:-${SIGIL_INSTALL_DIR:-$HOME/tachi}}"
 OPENCLAW_PLUGIN_DIR="$TARGET_DIR/integrations/openclaw"
 NATIVE_MODULE_DIR="$TARGET_DIR/crates/memory-node"
 
 if [ -d "$TARGET_DIR" ]; then
-    echo ">> Found existing Sigil repo at $TARGET_DIR. Pulling latest..."
+    echo ">> Found existing Tachi repo at $TARGET_DIR. Pulling latest..."
     cd "$TARGET_DIR"
     git pull origin main
 else
-    echo ">> Cloning Sigil repository to $TARGET_DIR..."
-    git clone https://github.com/kckylechen1/sigil.git "$TARGET_DIR"
+    echo ">> Cloning Tachi repository to $TARGET_DIR..."
+    git clone https://github.com/kckylechen1/tachi.git "$TARGET_DIR"
     cd "$TARGET_DIR"
 fi
 
@@ -112,7 +112,7 @@ echo "✅ Successfully linked to $SYMLINK_PATH"
 echo ""
 # 5. Final Instructions
 echo "========================================================"
-echo "🎉 Sigil installation complete!"
+echo "🎉 Tachi installation complete!"
 echo "========================================================"
 echo ""
 echo "Next Steps:"

@@ -24,8 +24,9 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any
 from memory_core_py import MemoryStore
+import config as mcp_config
 
-DB_PATH = os.environ.get("MEMORY_DB_PATH", os.path.expanduser("~/.sigil/memory.db"))
+DB_PATH = mcp_config.DB_PATH
 
 # ── Dedup thresholds ─────────────────────────────────────────────────────────
 # Inspired by A-Mem (NeurIPS 2025) and arXiv:2602.00959:
@@ -287,7 +288,7 @@ def hybrid_search(
         return legacy_results
     except Exception as e:
         import logging
-        logging.getLogger("sigil-store").exception("Hybrid search failed")
+        logging.getLogger(mcp_config.logger_name("store")).exception("Hybrid search failed")
         raise
 
 

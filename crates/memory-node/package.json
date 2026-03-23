@@ -1,5 +1,5 @@
 {
-  "name": "@chaoxlabs/sigil-node",
+  "name": "@chaoxlabs/tachi-node",
   "version": "0.3.0",
   "description": "High-performance memory storage & hybrid search engine (Rust native module)",
   "main": "index.js",

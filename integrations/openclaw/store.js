@@ -1,6 +1,6 @@
 import fs from "node:fs/promises";
 import path from "node:path";
-import { JsMemoryStore } from "@chaoxlabs/sigil-node";
+import { JsMemoryStore } from "@chaoxlabs/tachi-node";
 export class MemoryStore {
     store;
     constructor(dbPath) {

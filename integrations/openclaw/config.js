@@ -1,6 +1,6 @@
 import path from "node:path";
-import os from "node:os";
 import { fileURLToPath } from "node:url";
+import { defaultDbPath, resolveUserPath } from "./constants.js";
 const moduleDir = path.dirname(fileURLToPath(import.meta.url));
 const pluginDataDir = path.resolve(moduleDir, "data");
 const workspaceRoot = process.env.OPENCLAW_WORKSPACE || "";
@@ -10,8 +10,8 @@ export const defaultConfig = {
         ? path.resolve(workspaceRoot, "scripts/memory_builder_prompt.txt")
         : path.resolve(repoRoot, "scripts/memory_builder_prompt.txt"),
     dbPath: process.env.MEMORY_DB_PATH
-        ? path.resolve(process.env.MEMORY_DB_PATH.replace(/^~/, os.homedir()))
-        : path.resolve(pluginDataDir, "memory.db"),
+        ? resolveUserPath(process.env.MEMORY_DB_PATH)
+        : defaultDbPath,
     shadowStorePath: path.resolve(pluginDataDir, "shadow-store.jsonl"),
     auditLogPath: path.resolve(pluginDataDir, "audit-log.jsonl"),
     topK: 6,

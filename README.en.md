@@ -1,6 +1,6 @@
 <div align="center">
-  <img src="assets/banner.png" alt="Sigil Banner" width="800" style="margin-bottom: 20px;" />
-  <h1>✧ Tachi (塔奇)</h1>
+  <img src="assets/banner_en.png" alt="Tachi Banner" width="800" style="margin-bottom: 20px;" />
+  <h1>✧ Tachi</h1>
   <p><strong>A Fast, Local-First Context & Memory Database for Autonomous AI Agents</strong></p>
 
   <p>
@@ -40,22 +40,22 @@
 
 **Tachi** is an embedded, unified context and memory management database engineered for Autonomous AI Agents. Named after Ghost in the Shell's Tachikoma — AI units that evolve through shared memory.
 
-Standard memory models often rely on flat vector stores, leading to bloated context windows and a loss of temporal and causal relationships. Sigil addresses this by utilizing a **hierarchical, file-system-like paradigm** combined with **graph-based causal relations**, powered by a highly optimized Rust core. 
+Standard memory models often rely on flat vector stores, leading to bloated context windows and a loss of temporal and causal relationships. Tachi addresses this by utilizing a **hierarchical, file-system-like paradigm** combined with **graph-based causal relations**, powered by a highly optimized Rust core. 
 
-Whether integrated as a [Model Context Protocol (MCP)](https://modelcontextprotocol.io/) server or used as a native extension in frameworks like OpenClaw, Sigil delivers sub-millisecond, multi-modal semantic retrieval with **zero external database dependencies**.
+Whether integrated as a [Model Context Protocol (MCP)](https://modelcontextprotocol.io/) server or used as a native extension in frameworks like OpenClaw, Tachi delivers sub-millisecond, multi-modal semantic retrieval with **zero external database dependencies**.
 
 ---
 
 ## 🤖 Quick Start: Coding Agents (MCP)
 
-For environments like Claude Desktop, Cursor, or AutoGen, Sigil operates natively as an MCP server.
+For environments like Claude Desktop, Cursor, or AutoGen, Tachi operates natively as an MCP server.
 
 **Prompt your Assistant with the following instructions:**
 
 ```text
-Please configure the Sigil local memory MCP server:
+Please configure the Tachi local memory MCP server:
 
-1. Clone repository: git clone https://github.com/kckylechen1/tachi.git && cd sigil
+1. Clone repository: git clone https://github.com/kckylechen1/tachi.git && cd Tachi
 
 [Option A] Python Runtime:
    cd mcp && python3 -m venv .venv && source .venv/bin/activate
@@ -65,8 +65,8 @@ Please configure the Sigil local memory MCP server:
    {
      "mcpServers": {
        "memory": {
-         "command": "<absolute-path>/sigil/mcp/.venv/bin/python3",
-         "args": ["<absolute-path>/sigil/mcp/server.py"]
+         "command": "<absolute-path>/Tachi/mcp/.venv/bin/python3",
+         "args": ["<absolute-path>/Tachi/mcp/server.py"]
        }
      }
    }
@@ -102,12 +102,12 @@ IMPORTANT Database Safety Rules:
 
 ## 🦞 Quick Start: Frameworks (OpenClaw)
 
-Sigil can be integrated as a native OpenClaw extension plugin.
+Tachi can be integrated as a native OpenClaw extension plugin.
 
 **Prompt your OpenClaw IDE Assistant with the following instructions:**
 
 ```text
-Please install the Sigil memory extension for OpenClaw:
+Please install the Tachi memory extension for OpenClaw:
 
 1. Execute the installation script:
    bash -c "$(curl -fsSL https://raw.githubusercontent.com/kckylechen1/tachi/main/scripts/install_openclaw_ext.sh)"
@@ -130,14 +130,14 @@ Please install the Sigil memory extension for OpenClaw:
 - **🔒 Hard State Engine**: Introduced a deterministic Key-Value store independent of vector memory. Useful for tracking trading watchlists or rigid state.
 - **🧠 3-Tier Context Extraction**: Automatically parses ingestion into three tiers: `L0` (Abstract Summary), `L1` (Overview), and `L2` (Full Text). Agents dynamically retrieve the appropriate depth based on context constraints.
 - **🔄 Evolution deduplication**: Utilizing math-based similarities for `HARD_SKIP` and `EVOLVE` updates.
-- **🔌 Dual-DB Architecture**: Global memories (`~/.sigil/global/memory.db`) shared across all projects, plus per-project memories (`.sigil/memory.db` at git root) for project-scoped context. Automatic git root detection and legacy migration. No external databases required.
-- **🎯 Sigil Hub**: A unified capability registry for Skills, Plugins, and MCP Servers. Register once, discover from any agent. Includes usage tracking, feedback metrics, and dual-DB inheritance (project overrides global). 67 pre-built skills available out of the box.
+- **🔌 Dual-DB Architecture**: Global memories (`~/.Tachi/global/memory.db`) shared across all projects, plus per-project memories (`.Tachi/memory.db` at git root) for project-scoped context. Automatic git root detection and legacy migration. No external databases required.
+- **🎯 Tachi Hub**: A unified capability registry for Skills, Plugins, and MCP Servers. Register once, discover from any agent. Includes usage tracking, feedback metrics, and dual-DB inheritance (project overrides global). 67 pre-built skills available out of the box.
 
 ---
 
 ## ⚙️ Causal Worker Pipeline & Memory Relations
 
-Sigil incorporates advanced reasoning components to maintain long-term logical consistency (Note: this pipeline is **disabled by default** to prioritize latency; enable it with `ENABLE_PIPELINE=true`):
+Tachi incorporates advanced reasoning components to maintain long-term logical consistency (Note: this pipeline is **disabled by default** to prioritize latency; enable it with `ENABLE_PIPELINE=true`):
 
 ### 1. The Causal Extraction Pipeline
 When an agent submits execution logs, an asynchronous worker utilizes **Qwen3.5-27B** via SiliconFlow to analyze the interaction and extract:
@@ -174,7 +174,7 @@ graph TD
         CONSOLIDATE["Session Consolidator"]
     end
 
-    subgraph Core["Sigil Core (Rust memory-core)"]
+    subgraph Core["Tachi Core (Rust memory-core)"]
         NAPI["NAPI Binding"]
         PYO3["PyO3 Binding"]
 
@@ -265,20 +265,20 @@ VOYAGE_API_KEY="your_voyage_key_here"
 # LLM Extractor & Distiller
 SILICONFLOW_API_KEY="your_siliconflow_key_here"
 
-# Database path (Optional — auto-resolves to ~/.sigil/global/memory.db + .sigil/memory.db per project)
-MEMORY_DB_PATH="~/.sigil/global/memory.db"
+# Database path (Optional — auto-resolves to ~/.Tachi/global/memory.db + .Tachi/memory.db per project)
+MEMORY_DB_PATH="~/.Tachi/global/memory.db"
 ```
 
 ---
 
 ## 🛡️ Database Safety
 
-> **Important**: Sigil uses SQLite in WAL mode for maximum single-writer performance. Violating the rules below may corrupt the database.
+> **Important**: Tachi uses SQLite in WAL mode for maximum single-writer performance. Violating the rules below may corrupt the database.
 
 | Rule | Why |
 |------|-----|
 | **Single instance only** | The server acquires an exclusive file lock (`memory.db.lock`) at startup. If you see "Another memory-server instance is already running", stop the duplicate process. |
-| **No cloud-synced paths** | iCloud, Dropbox, OneDrive, and Google Drive are **incompatible** with SQLite WAL. Use a local-only directory (e.g., `~/.sigil/`). |
+| **No cloud-synced paths** | iCloud, Dropbox, OneDrive, and Google Drive are **incompatible** with SQLite WAL. Use a local-only directory (e.g., `~/.Tachi/`). |
 | **No concurrent CLI writes** | Do not run `sqlite3` INSERT/UPDATE on the database while the server is running. Read-only queries are safe with `PRAGMA busy_timeout = 5000`. |
 | **Auto-recovery on startup** | The server runs `PRAGMA quick_check` on startup and auto-backfills an empty FTS index from the main `memories` table. |
 | **Graceful shutdown** | The server handles SIGINT/SIGTERM to flush WAL and run `PRAGMA optimize` before exit. Avoid `kill -9`. |
@@ -295,7 +295,7 @@ MEMORY_DB_PATH="~/.sigil/global/memory.db"
 
 ## 🤝 Contributing
 
-Contributions to Sigil are welcome. To establish a local development environment:
+Contributions to Tachi are welcome. To establish a local development environment:
 1. Ensure Rust (`rustc>=1.75`) is installed.
 2. Install build utilities: `cargo install maturin cargo-watch`.
 3. The core storage API is located at `crates/memory-core/src/lib.rs`.
@@ -307,4 +307,4 @@ Commit messages must conform to the [Conventional Commits](https://www.conventio
 
 ## 📜 License
 
-[AGPLv3 License](LICENSE) © 2026 Sigil Authors.
+[AGPLv3 License](LICENSE) © 2026 Tachi Authors.

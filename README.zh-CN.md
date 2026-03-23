@@ -1,6 +1,6 @@
 <div align="center">
-  <img src="assets/banner.png" alt="Sigil Banner" width="800" style="margin-bottom: 20px;" />
-  <h1>✧ 塔奇 (Tachi)</h1>
+  <img src="assets/banner.png" alt="Tachi Banner" width="800" style="margin-bottom: 20px;" />
+  <h1>✧ 藏经阁 (Tachi)</h1>
   <p><strong>专为自主智能体（AI Agents）打造的本地优先、高性能混合上下文数据库</strong></p>
 
   <p>
@@ -38,7 +38,7 @@
 
 ## 💡 概览
 
-**塔奇（Tachi）** 是一个专为全自主智能体（Autonomous AI Agents）设计的嵌入式上下文与记忆管理数据库系统。名字源自《攻壳机动队》中的塔奇科马——通过共享记忆进化出自我意识的 AI 单元。
+**藏经阁（Tachi）** 是一个专为全自主智能体（Autonomous AI Agents）设计的嵌入式上下文与记忆管理数据库系统。名字源自《攻壳机动队》中的藏经阁科马——通过共享记忆进化出自我意识的 AI 单元。
 
 当前的 AI 记忆模型大多依赖于向量数据库存储扁平化的文本片段。这种设计极易导致 Agent 的上下文视窗膨胀，并在长时间运行中丢失关键的因果和时间联系。
 
@@ -48,14 +48,14 @@
 
 ## 🤖 快速开始: Coding Agents (MCP 协议)
 
-对于使用 Claude Desktop, Cursor, 或是 AutoGen 等框架的用户，Sigil 提供了基于模型上下文协议（MCP）的开箱即用支持。
+对于使用 Claude Desktop, Cursor, 或是 AutoGen 等框架的用户，Tachi 提供了基于模型上下文协议（MCP）的开箱即用支持。
 
 **将以下系统指令输入给你的个人 AI Assistant 进行自动部署：**
 
 ```text
-请协助我配置安装 Sigil (MCP 记忆服务器)：
+请协助我配置安装 Tachi (MCP 记忆服务器)：
 
-1. 克隆仓库: git clone https://github.com/kckylechen1/tachi.git && cd sigil
+1. 克隆仓库: git clone https://github.com/kckylechen1/tachi.git && cd Tachi
 
 【方式一】Python 运行时：
    cd mcp && python3 -m venv .venv && source .venv/bin/activate
@@ -65,8 +65,8 @@
    {
      "mcpServers": {
        "memory": {
-         "command": "<绝对路径>/sigil/mcp/.venv/bin/python3",
-         "args": ["<绝对路径>/sigil/mcp/server.py"]
+         "command": "<绝对路径>/Tachi/mcp/.venv/bin/python3",
+         "args": ["<绝对路径>/Tachi/mcp/server.py"]
        }
      }
    }
@@ -96,12 +96,12 @@
 
 ## 🦞 快速开始: OpenClaw 框架
 
-Sigil 支持以外部扩展插件的形式桥接运行于 OpenClaw 内核。
+Tachi 支持以外部扩展插件的形式桥接运行于 OpenClaw 内核。
 
 **将以下指令发送至你的 OpenClaw 对话窗交由 Agent 处理：**
 
 ```text
-请协助执行自动化安装流，在 OpenClaw 中扩展部署 Sigil 组件。
+请协助执行自动化安装流，在 OpenClaw 中扩展部署 Tachi 组件。
 
 1. 直接运行部署脚本：
    bash -c "$(curl -fsSL https://raw.githubusercontent.com/kckylechen1/tachi/main/scripts/install_openclaw_ext.sh)"
@@ -124,17 +124,17 @@ Sigil 支持以外部扩展插件的形式桥接运行于 OpenClaw 内核。
 - **🔒 强状态隔离**：引入了确定性并独立于向量的强状态 `hard_state` KV 引擎，适合存放监视清单、明确仓位等避免幻觉影响的事务。
 - **🧠 三级自适应上下文分层**：数据接入时将自动被提纯为三个深度：`L0`（摘要提要）, `L1`（段落概览）, 与 `L2`（完整内容）。
 - **🔄 两阶演化（记忆去重）**：首创基于数学相似度阈值的 `HARD_SKIP` 与 `EVOLVE` 两阶段查重去重算法。
-- **🔌 双库架构**：全局记忆 (`~/.sigil/global/memory.db`) 跨项目共享（用户偏好、通用知识），每个项目独立数据库 (`.sigil/memory.db` 位于 git 仓库根目录) 存储项目级上下文。自动检测 git 根目录，自动迁移旧版数据库。无需任何外部独立数据库依赖。
-- **🎯 Sigil Hub 能力中心**：统一的 Skill / Plugin / MCP Server 注册与发现中心。注册一次，所有 Agent 均可发现并使用。内置使用追踪、反馈评分、双库继承（项目级覆盖全局）。开箱即用 67 个预置 Skill。
+- **🔌 双库架构**：全局记忆 (`~/.Tachi/global/memory.db`) 跨项目共享（用户偏好、通用知识），每个项目独立数据库 (`.Tachi/memory.db` 位于 git 仓库根目录) 存储项目级上下文。自动检测 git 根目录，自动迁移旧版数据库。无需任何外部独立数据库依赖。
+- **🎯 Tachi Hub 能力中心**：统一的 Skill / Plugin / MCP Server 注册与发现中心。注册一次，所有 Agent 均可发现并使用。内置使用追踪、反馈评分、双库继承（项目级覆盖全局）。开箱即用 67 个预置 Skill。
 
 ---
 
 ## ⚙️ 因果工作台与记忆关联
 
-为保证 Agent 系统级别的长期逻辑稳定性，Sigil 引入了深度推理组件（注：为减小资源消耗提升极速响应，这些重型处理模型管道已**默认禁用**，可配置环境变量 `ENABLE_PIPELINE=true` 激活）：
+为保证 Agent 系统级别的长期逻辑稳定性，Tachi 引入了深度推理组件（注：为减小资源消耗提升极速响应，这些重型处理模型管道已**默认禁用**，可配置环境变量 `ENABLE_PIPELINE=true` 激活）：
 
 ### 1. 结构化因果提取管道 (The Causal Extraction Pipeline)
-当 Agent 完成一轮复杂交互后，Sigil 的完全异步工作站将被唤醒。利用通过 SiliconFlow 接入的 **Qwen3.5-27B** 模型，工具站将解构 Agent 的日志并提取：
+当 Agent 完成一轮复杂交互后，Tachi 的完全异步工作站将被唤醒。利用通过 SiliconFlow 接入的 **Qwen3.5-27B** 模型，工具站将解构 Agent 的日志并提取：
 *   `Causes`：触发本次操作的根本起因。
 *   `Decisions`：采取方案背后的推演逻辑。
 *   `Results`：落地的具体结果状态。
@@ -168,7 +168,7 @@ graph TD
         CONSOLIDATE["记忆碎片合并清理站"]
     end
 
-    subgraph Core["Sigil 核心 (Rust memory-core)"]
+    subgraph Core["Tachi 核心 (Rust memory-core)"]
         NAPI["NAPI Binding"]
         PYO3["PyO3 Binding"]
 
@@ -259,8 +259,8 @@ VOYAGE_API_KEY="your_voyage_key_here"
 # 大模型抽取层与清洗归置
 SILICONFLOW_API_KEY="your_siliconflow_key_here"
 
-# 本地 SQLite 文件（可选 — 默认自动解析为 ~/.sigil/global/memory.db + 每个项目 .sigil/memory.db）
-MEMORY_DB_PATH="~/.sigil/global/memory.db"
+# 本地 SQLite 文件（可选 — 默认自动解析为 ~/.Tachi/global/memory.db + 每个项目 .Tachi/memory.db）
+MEMORY_DB_PATH="~/.Tachi/global/memory.db"
 ```
 
 ---
@@ -287,4 +287,4 @@ MEMORY_DB_PATH="~/.sigil/global/memory.db"
 
 ## 📜 开源协议
 
-基于 [AGPLv3 License](LICENSE) © 2026 Sigil Authors。
+基于 [AGPLv3 License](LICENSE) © 2026 Tachi Authors。

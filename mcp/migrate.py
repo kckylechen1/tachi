@@ -3,8 +3,9 @@ import os
 import sqlite3
 from datetime import datetime, timezone
 from memory_core_py import MemoryStore
+import config as mcp_config
 
-DB_PATH = os.environ.get("MEMORY_DB_PATH", os.path.expanduser("~/.sigil/memory.db"))
+DB_PATH = mcp_config.DB_PATH
 
 def migrate():
     print(f"Migrating {DB_PATH} ...")

@@ -15,10 +15,10 @@
     "build:ts": "tsc -p tsconfig.json",
     "build": "npm run build:ts",
     "typecheck": "tsc --noEmit -p tsconfig.json",
-    "postinstall": "node --input-type=module -e \"import('@chaoxlabs/sigil-node').then(m => console.log('✓ native module OK')).catch(e => { console.error('✗ native module failed:', e.message); process.exit(1) })\""
+    "postinstall": "node --input-type=module -e \"import('@chaoxlabs/tachi-node').then(m => console.log('✓ native module OK')).catch(e => { console.error('✗ native module failed:', e.message); process.exit(1) })\""
   },
   "dependencies": {
-    "@chaoxlabs/sigil-node": "^0.3.0",
+    "@chaoxlabs/tachi-node": "file:../../crates/memory-node",
     "@sinclair/typebox": "^0.34.48"
   },
   "devDependencies": {
