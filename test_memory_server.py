@@ -308,6 +308,27 @@ def test_memory_server():
         data = extract_text(resp)
         check("hub_call add", "42" in str(data.get("content", [])), f"got: {data}")
 
+        # ── Test 18: tools/list includes proxy tools ──
+        print("\n[Test 18] tools/list includes proxy tools")
+        resp = send_request(proc, {
+            "jsonrpc": "2.0", "id": next_id(), "method": "tools/list",
+            "params": {},
+        })
+        tool_names = []
+        try:
+            tool_names = [t["name"] for t in resp["result"]["tools"]]
+        except (KeyError, TypeError):
+            pass
+        check("tools/list has native tools", "save_memory" in tool_names, f"tools: {tool_names[:5]}...")
+        check("tools/list has proxy echo", "test-echo__echo" in tool_names, f"tools: {[t for t in tool_names if 'echo' in t]}")
+        check("tools/list has proxy add", "test-echo__add" in tool_names, f"tools: {[t for t in tool_names if 'add' in t]}")
+
+        # ── Test 19: call proxy tool directly (via transparent name) ──
+        print("\n[Test 19] call proxy tool directly")
+        resp = call_tool(proc, "test-echo__echo", {"text": "transparent proxy works"})
+        data = extract_text(resp)
+        check("proxy echo works", "transparent proxy works" in str(data), f"got: {data}")
+
         print(f"\n{'='*40}")
         print(f"Results: {passed} passed, {failed} failed")
         return failed == 0
