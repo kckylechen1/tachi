@@ -19,10 +19,8 @@ use rmcp::{
 };
 use serde::Deserialize;
 use serde_json::{json, Value};
-use std::collections::hash_map::DefaultHasher;
 use std::collections::{HashMap, HashSet};
 use std::future::Future;
-use std::hash::{Hash, Hasher};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
@@ -1272,10 +1270,8 @@ impl MemoryServer {
 
     #[tool(description = "Ingest a conversation event and extract facts from messages.")]
     async fn ingest_event(&self, Parameters(params): Parameters<IngestEventParams>) -> Result<String, String> {
-        let mut hasher = DefaultHasher::new();
-        params.conversation_id.hash(&mut hasher);
-        params.turn_id.hash(&mut hasher);
-        let event_hash = format!("{:x}", hasher.finish());
+        // Stable hash: deterministic key from conversation+turn IDs (no DefaultHasher)
+        let event_hash = stable_hash(&format!("{}:{}", params.conversation_id, params.turn_id));
         let (target_db, _warning) = self.resolve_write_scope("project");
 
         // Concatenate message contents for fact extraction
@@ -1290,13 +1286,14 @@ impl MemoryServer {
             return Ok("No content to process.".to_string());
         }
 
-        // Check dedup with per-request DB open
-        let already_processed = self.with_store_for_scope(target_db, |store| {
+        // Atomic dedup: try to claim the event first via INSERT OR IGNORE.
+        // If another concurrent call already claimed it, we skip.
+        let claimed = self.with_store_for_scope(target_db, |store| {
             store
-                .is_event_processed(&event_hash, "ingest")
-                .map_err(|e| format!("Failed to check event dedup: {e}"))
+                .try_claim_event(&event_hash, &format!("{}:{}", params.conversation_id, params.turn_id), "ingest")
+                .map_err(|e| format!("Failed to claim event: {e}"))
         })?;
-        if already_processed {
+        if !claimed {
             return Ok(format!("Event already processed (hash: {})", event_hash));
         }
 
@@ -1323,15 +1320,6 @@ impl MemoryServer {
                     }
                 }
             }
-
-            store
-                .mark_event_processed(
-                    &event_hash,
-                    &format!("{}:{}", params.conversation_id, params.turn_id),
-                    "ingest",
-                )
-                .map_err(|e| format!("Failed to mark event processed: {e}"))?;
-
             Ok(())
         })?;
 
@@ -2152,11 +2140,7 @@ impl MemoryServer {
         let success = final_result.is_ok();
         let error_kind = final_result.as_ref().err().map(|e| format!("{e}"));
         let timestamp = Utc::now().to_rfc3339();
-        let args_hash = format!("{:x}", {
-            let mut h = DefaultHasher::new();
-            format!("{:?}", arguments).hash(&mut h);
-            h.finish()
-        });
+        let args_hash = stable_hash(&format!("{:?}", arguments));
         let _ = self.with_global_store(|store| {
             store.audit_log_insert(
                 &timestamp, server_name, tool_name, &args_hash,
@@ -2473,7 +2457,6 @@ async fn tokio_main() -> Result<(), Box<dyn std::error::Error>> {
         eprintln!("Pipeline workers: DISABLED (set ENABLE_PIPELINE=true to enable)");
     }
 
-    let transport = (stdin(), stdout());
 
     eprintln!("Starting Memory MCP Server v{}", env!("CARGO_PKG_VERSION"));
     eprintln!("Global DB: {}", global_db_path.display());
@@ -2486,12 +2469,35 @@ async fn tokio_main() -> Result<(), Box<dyn std::error::Error>> {
         "Vector search: global={}, project={}",
         server.global_vec_available, server.project_vec_available
     );
-    eprintln!("Tools: save_memory, search_memory, get_memory, list_memories, memory_stats, set_state, get_state, extract_facts, ingest_event, get_pipeline_status, hub_register, hub_discover, hub_get, hub_feedback, hub_stats, hub_call, run_skill");
+
+    let transport = (stdin(), stdout());
+
+    eprintln!("Starting Memory MCP Server v{}", env!("CARGO_PKG_VERSION"));
 
     let running = rmcp::service::serve_server(server, transport).await?;
-    let quit_reason = running.waiting().await?;
 
-    eprintln!("Memory MCP Server stopped: {:?}", quit_reason);
+    // Graceful shutdown: wait for either MCP quit or SIGINT/SIGTERM
+    tokio::select! {
+        quit_reason = running.waiting() => {
+            eprintln!("Memory MCP Server stopped: {:?}", quit_reason);
+        }
+        _ = tokio::signal::ctrl_c() => {
+            eprintln!("Received SIGINT, shutting down gracefully...");
+        }
+    }
 
     Ok(())
+}
+
+/// Stable hash function (FNV-1a). Deterministic across Rust toolchain versions,
+/// unlike DefaultHasher which uses SipHash with randomized keys.
+fn stable_hash(input: &str) -> String {
+    const FNV_OFFSET: u64 = 0xcbf29ce484222325;
+    const FNV_PRIME: u64 = 0x100000001b3;
+    let mut hash = FNV_OFFSET;
+    for byte in input.as_bytes() {
+        hash ^= *byte as u64;
+        hash = hash.wrapping_mul(FNV_PRIME);
+    }
+    format!("{:016x}", hash)
 }
