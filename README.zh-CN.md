@@ -13,7 +13,7 @@
     <img src="https://img.shields.io/badge/Python-3.10%2B-blue.svg" alt="Python Version">
     <img src="https://img.shields.io/badge/Integration-MCP_Server-purple" alt="Integration: MCP">
     <img src="https://img.shields.io/badge/Integration-OpenClaw-cyan" alt="Integration: OpenClaw">
-    <img src="https://img.shields.io/github/v/release/kckylechen1/sigil.svg" alt="Release Version">
+    <img src="https://img.shields.io/github/v/release/kckylechen1/tachi.svg" alt="Release Version">
   </p>
 </div>
 
@@ -55,7 +55,7 @@
 ```text
 请协助我配置安装 Sigil (MCP 记忆服务器)：
 
-1. 克隆仓库: git clone https://github.com/kckylechen1/sigil.git && cd sigil
+1. 克隆仓库: git clone https://github.com/kckylechen1/tachi.git && cd sigil
 
 【方式一】Python 运行时：
    cd mcp && python3 -m venv .venv && source .venv/bin/activate
@@ -72,7 +72,7 @@
    }
 
 【方式二】Rust 原生二进制（最快·推荐）：
-   brew tap kckylechen1/sigil && brew install tachi
+   brew tap kckylechen1/tachi && brew install tachi
    配置 mcp_config.json:
    {
      "mcpServers": {
@@ -104,7 +104,7 @@ Sigil 支持以外部扩展插件的形式桥接运行于 OpenClaw 内核。
 请协助执行自动化安装流，在 OpenClaw 中扩展部署 Sigil 组件。
 
 1. 直接运行部署脚本：
-   bash -c "$(curl -fsSL https://raw.githubusercontent.com/kckylechen1/sigil/main/scripts/install_openclaw_ext.sh)"
+   bash -c "$(curl -fsSL https://raw.githubusercontent.com/kckylechen1/tachi/main/scripts/install_openclaw_ext.sh)"
 
 2. 此脚本将负责拉取代码与编译原生的 Rust NAPI 库，进行集成验证并在 extensions 库中建立软链接。
 

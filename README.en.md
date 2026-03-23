@@ -13,7 +13,7 @@
     <img src="https://img.shields.io/badge/Python-3.10%2B-blue.svg" alt="Python Version">
     <img src="https://img.shields.io/badge/Integration-MCP_Server-purple" alt="Integration: MCP">
     <img src="https://img.shields.io/badge/Integration-OpenClaw-cyan" alt="Integration: OpenClaw">
-    <img src="https://img.shields.io/github/v/release/kckylechen1/sigil.svg" alt="Release Version">
+    <img src="https://img.shields.io/github/v/release/kckylechen1/tachi.svg" alt="Release Version">
   </p>
 </div>
 
@@ -55,7 +55,7 @@ For environments like Claude Desktop, Cursor, or AutoGen, Sigil operates nativel
 ```text
 Please configure the Sigil local memory MCP server:
 
-1. Clone repository: git clone https://github.com/kckylechen1/sigil.git && cd sigil
+1. Clone repository: git clone https://github.com/kckylechen1/tachi.git && cd sigil
 
 [Option A] Python Runtime:
    cd mcp && python3 -m venv .venv && source .venv/bin/activate
@@ -72,7 +72,7 @@ Please configure the Sigil local memory MCP server:
    }
 
 [Option B] Native Rust Binary (Fastest — Recommended):
-   brew tap kckylechen1/sigil && brew install tachi
+   brew tap kckylechen1/tachi && brew install tachi
    Configure mcp_config.json:
    {
      "mcpServers": {
@@ -110,7 +110,7 @@ Sigil can be integrated as a native OpenClaw extension plugin.
 Please install the Sigil memory extension for OpenClaw:
 
 1. Execute the installation script:
-   bash -c "$(curl -fsSL https://raw.githubusercontent.com/kckylechen1/sigil/main/scripts/install_openclaw_ext.sh)"
+   bash -c "$(curl -fsSL https://raw.githubusercontent.com/kckylechen1/tachi/main/scripts/install_openclaw_ext.sh)"
 
 2. The script automates cloning, building the Rust NAPI module, compiling the extension, and symlinking to the OpenClaw plugin directory.
 
