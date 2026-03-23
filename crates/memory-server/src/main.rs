@@ -9,11 +9,14 @@ mod prompts;
 use chrono::Utc;
 use memory_core::{HubCapability, MemoryEntry, MemoryStore, SearchOptions};
 use rmcp::{
-    model::{ServerCapabilities, ServerInfo, ToolsCapability},
-    tool,
+    model::{ServerCapabilities, ServerInfo},
+    tool, tool_router,
+    handler::server::{tool::ToolRouter, wrapper::Parameters},
+    transport::StreamableHttpClientTransport,
     ServerHandler,
+    schemars,
+    schemars::JsonSchema,
 };
-use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::collections::hash_map::DefaultHasher;
@@ -123,6 +126,7 @@ struct MemoryServer {
     skill_tools: Arc<StdMutex<HashMap<String, String>>>,
     skill_tool_defs: Arc<StdMutex<HashMap<String, rmcp::model::Tool>>>,
     pool: Arc<McpClientPool>,
+    tool_router: ToolRouter<Self>,
 }
 
 // ─── MCP Client Connection Pool ──────────────────────────────────────────────
@@ -204,6 +208,7 @@ impl MemoryServer {
             skill_tools: Arc::new(StdMutex::new(HashMap::new())),
             skill_tool_defs: Arc::new(StdMutex::new(HashMap::new())),
             pool: Arc::new(McpClientPool::new()),
+            tool_router: Self::tool_router(),
         })
     }
 
@@ -253,7 +258,7 @@ impl MemoryServer {
         }
     }
 
-    fn get_capability(&self, cap_id: &str) -> Result<HubCapability, rmcp::Error> {
+    fn get_capability(&self, cap_id: &str) -> Result<HubCapability, rmcp::ErrorData> {
         let mut found = None;
         if self.project_db_path.is_some() {
             found = self
@@ -262,7 +267,7 @@ impl MemoryServer {
                         .hub_get(cap_id)
                         .map_err(|e| format!("hub get project: {e}"))
                 })
-                .map_err(|e| rmcp::Error::internal_error(e, None))?;
+                .map_err(|e| rmcp::ErrorData::internal_error(e, None))?;
         }
         if found.is_none() {
             found = self
@@ -271,9 +276,9 @@ impl MemoryServer {
                         .hub_get(cap_id)
                         .map_err(|e| format!("hub get global: {e}"))
                 })
-                .map_err(|e| rmcp::Error::internal_error(e, None))?;
+                .map_err(|e| rmcp::ErrorData::internal_error(e, None))?;
         }
-        found.ok_or_else(|| rmcp::Error::invalid_params(format!("Capability '{cap_id}' not found"), None))
+        found.ok_or_else(|| rmcp::ErrorData::invalid_params(format!("Capability '{cap_id}' not found"), None))
     }
 
     fn register_skill_tool(&self, cap: &HubCapability) -> Result<String, String> {
@@ -292,26 +297,26 @@ impl MemoryServer {
     async fn call_skill_tool(
         &self,
         tool_name: &str,
-        arguments: Option<serde_json::Map<String, serde_json::Value>>,
-    ) -> Result<rmcp::model::CallToolResult, rmcp::Error> {
+        arguments: Option<rmcp::model::JsonObject>,
+    ) -> Result<rmcp::model::CallToolResult, rmcp::ErrorData> {
         let skill_id = self
             .skill_tools
             .lock()
-            .map_err(|e| rmcp::Error::internal_error(e.to_string(), None))?
+            .map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?
             .get(tool_name)
             .cloned()
             .ok_or_else(|| {
-                rmcp::Error::invalid_params(format!("Skill tool '{}' not found", tool_name), None)
+                rmcp::ErrorData::invalid_params(format!("Skill tool '{}' not found", tool_name), None)
             })?;
 
         let cap = self.get_capability(&skill_id)?;
         let def: Value = serde_json::from_str(&cap.definition)
-            .map_err(|e| rmcp::Error::invalid_params(format!("Invalid skill definition JSON: {e}"), None))?;
+            .map_err(|e| rmcp::ErrorData::invalid_params(format!("Invalid skill definition JSON: {e}"), None))?;
 
         let args = arguments.unwrap_or_default();
         let args_value = Value::Object(args.clone());
         let args_json = serde_json::to_string_pretty(&args_value)
-            .map_err(|e| rmcp::Error::internal_error(format!("serialize args: {e}"), None))?;
+            .map_err(|e| rmcp::ErrorData::internal_error(format!("serialize args: {e}"), None))?;
 
         let mut prompt = def
             .get("prompt")
@@ -352,7 +357,7 @@ impl MemoryServer {
             self.llm
                 .call_llm(system, &prompt, model, temperature, max_tokens)
                 .await
-                .map_err(|e| rmcp::Error::internal_error(format!("skill execution failed: {e}"), None))?
+                .map_err(|e| rmcp::ErrorData::internal_error(format!("skill execution failed: {e}"), None))?
         };
 
         make_text_tool_result(&json!({
@@ -480,14 +485,14 @@ fn value_to_template_text(v: &Value) -> String {
     }
 }
 
-fn make_text_tool_result(payload: &Value) -> Result<rmcp::model::CallToolResult, rmcp::Error> {
+fn make_text_tool_result(payload: &Value) -> Result<rmcp::model::CallToolResult, rmcp::ErrorData> {
     let text = serde_json::to_string(payload)
-        .map_err(|e| rmcp::Error::internal_error(format!("serialize response: {e}"), None))?;
+        .map_err(|e| rmcp::ErrorData::internal_error(format!("serialize response: {e}"), None))?;
     serde_json::from_value(json!({
         "content": [{"type": "text", "text": text}],
         "isError": false
     }))
-    .map_err(|e| rmcp::Error::internal_error(format!("build MCP response: {e}"), None))
+    .map_err(|e| rmcp::ErrorData::internal_error(format!("build MCP response: {e}"), None))
 }
 
 fn build_skill_tool_from_cap(cap: &HubCapability) -> Result<(String, rmcp::model::Tool), String> {
@@ -897,12 +902,12 @@ fn default_audit_limit() -> usize {
 
 // ─── Tool Implementations ────────────────────────────────────────────────────────
 
-#[tool(tool_box)]
+#[tool_router]
 impl MemoryServer {
     #[tool(description = "Save a memory entry to the store. Creates a new entry or updates an existing one if id is provided.")]
     async fn save_memory(
         &self,
-        #[tool(aggr)] params: SaveMemoryParams,
+        Parameters(params): Parameters<SaveMemoryParams>,
     ) -> Result<String, String> {
         let id = params.id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
         let timestamp = Utc::now().to_rfc3339();
@@ -963,7 +968,7 @@ impl MemoryServer {
     #[tool(description = "Search memory entries using hybrid search (vector + FTS + symbolic). Returns ranked results with scores.")]
     async fn search_memory(
         &self,
-        #[tool(aggr)] params: SearchMemoryParams,
+        Parameters(params): Parameters<SearchMemoryParams>,
     ) -> Result<String, String> {
         let pipeline_enabled = self.pipeline_enabled;
 
@@ -1057,7 +1062,7 @@ impl MemoryServer {
     #[tool(description = "Get a single memory entry by ID.")]
     async fn get_memory(
         &self,
-        #[tool(aggr)] params: GetMemoryParams,
+        Parameters(params): Parameters<GetMemoryParams>,
     ) -> Result<String, String> {
         if self.project_db_path.is_some() {
             let project_entry = self.with_project_store(|store| {
@@ -1091,7 +1096,7 @@ impl MemoryServer {
     #[tool(description = "List memory entries under a path prefix.")]
     async fn list_memories(
         &self,
-        #[tool(aggr)] params: ListMemoriesParams,
+        Parameters(params): Parameters<ListMemoriesParams>,
     ) -> Result<String, String> {
         let mut combined_entries: Vec<(MemoryEntry, DbScope)> = Vec::new();
 
@@ -1189,7 +1194,7 @@ impl MemoryServer {
     #[tool(description = "Set a key-value pair in server state (stored in hard_state table).")]
     async fn set_state(
         &self,
-        #[tool(aggr)] params: SetStateParams,
+        Parameters(params): Parameters<SetStateParams>,
     ) -> Result<String, String> {
         let value_json = serde_json::to_string(&params.value)
             .map_err(|e| format!("Failed to serialize value: {}", e))?;
@@ -1211,7 +1216,7 @@ impl MemoryServer {
     #[tool(description = "Get a value from server state by key.")]
     async fn get_state(
         &self,
-        #[tool(aggr)] params: GetStateParams,
+        Parameters(params): Parameters<GetStateParams>,
     ) -> Result<String, String> {
         self.with_global_store(|store| match store.get_state_kv("mcp", &params.key) {
             Ok(Some((value, version))) => {
@@ -1235,7 +1240,7 @@ impl MemoryServer {
     }
 
     #[tool(description = "Extract structured facts from text using LLM and save to memory.")]
-    async fn extract_facts(&self, #[tool(aggr)] params: ExtractFactsParams) -> Result<String, String> {
+    async fn extract_facts(&self, Parameters(params): Parameters<ExtractFactsParams>) -> Result<String, String> {
         // Do async LLM work before opening DB
         let facts = self.llm.extract_facts(&params.text).await?;
         if facts.is_empty() {
@@ -1266,7 +1271,7 @@ impl MemoryServer {
     }
 
     #[tool(description = "Ingest a conversation event and extract facts from messages.")]
-    async fn ingest_event(&self, #[tool(aggr)] params: IngestEventParams) -> Result<String, String> {
+    async fn ingest_event(&self, Parameters(params): Parameters<IngestEventParams>) -> Result<String, String> {
         let mut hasher = DefaultHasher::new();
         params.conversation_id.hash(&mut hasher);
         params.turn_id.hash(&mut hasher);
@@ -1385,7 +1390,7 @@ impl MemoryServer {
     }
 
     #[tool(description = "Register a capability (skill, plugin, or MCP server) in the Hub.")]
-    async fn hub_register(&self, #[tool(aggr)] params: HubRegisterParams) -> Result<String, String> {
+    async fn hub_register(&self, Parameters(params): Parameters<HubRegisterParams>) -> Result<String, String> {
         let (target_db, warning) = self.resolve_write_scope(&params.scope);
 
         // Security: validate MCP server commands against allowlist
@@ -1536,7 +1541,7 @@ impl MemoryServer {
                             cmd.env(k, v);
                         }
 
-                        match rmcp::transport::TokioChildProcess::new(&mut cmd) {
+                        match rmcp::transport::TokioChildProcess::new(cmd) {
                             Ok(transport) => match rmcp::ServiceExt::serve((), transport).await {
                                 Ok(client) => match client.peer().list_all_tools().await {
                                     Ok(tools) => {
@@ -1594,8 +1599,8 @@ impl MemoryServer {
                 }
                 "sse" => {
                     if let Some(url) = def["url"].as_str() {
-                        match rmcp::transport::SseTransport::start(url).await {
-                            Ok(transport) => match rmcp::ServiceExt::serve((), transport).await {
+                        let transport = StreamableHttpClientTransport::from_uri(url);
+                        match rmcp::ServiceExt::serve((), transport).await {
                                 Ok(client) => match client.peer().list_all_tools().await {
                                     Ok(tools) => {
                                         let tools_count = tools.len();
@@ -1640,14 +1645,7 @@ impl MemoryServer {
                                         json!(format!("SSE handshake failed: {e}")),
                                     );
                                 }
-                            },
-                            Err(e) => {
-                                resp.insert(
-                                    "discovery_error".into(),
-                                    json!(format!("SSE connect failed: {e}")),
-                                );
                             }
-                        }
                     }
                 }
                 other => {
@@ -1664,7 +1662,7 @@ impl MemoryServer {
     }
 
     #[tool(description = "Discover available capabilities (skills, plugins, MCP servers) in the Hub.")]
-    async fn hub_discover(&self, #[tool(aggr)] params: HubDiscoverParams) -> Result<String, String> {
+    async fn hub_discover(&self, Parameters(params): Parameters<HubDiscoverParams>) -> Result<String, String> {
         let cap_type = params.cap_type.as_deref();
 
         let global_caps = self.with_global_store(|store| {
@@ -1721,7 +1719,7 @@ impl MemoryServer {
     }
 
     #[tool(description = "Get a specific capability from the Hub by ID.")]
-    async fn hub_get(&self, #[tool(aggr)] params: HubGetParams) -> Result<String, String> {
+    async fn hub_get(&self, Parameters(params): Parameters<HubGetParams>) -> Result<String, String> {
         if self.project_db_path.is_some() {
             if let Some(cap) = self.with_project_store(|store| {
                 store
@@ -1753,7 +1751,7 @@ impl MemoryServer {
     }
 
     #[tool(description = "Record feedback for a Hub capability invocation.")]
-    async fn hub_feedback(&self, #[tool(aggr)] params: HubFeedbackParams) -> Result<String, String> {
+    async fn hub_feedback(&self, Parameters(params): Parameters<HubFeedbackParams>) -> Result<String, String> {
         if self.project_db_path.is_some() {
             let found = self.with_project_store(|store| {
                 store
@@ -1814,7 +1812,7 @@ impl MemoryServer {
     }
 
     #[tool(description = "Execute a registered Skill from the Hub using the internal LLM pipeline.")]
-    async fn run_skill(&self, #[tool(aggr)] params: RunSkillParams) -> Result<String, String> {
+    async fn run_skill(&self, Parameters(params): Parameters<RunSkillParams>) -> Result<String, String> {
         let cap = {
             let mut found = None;
             if self.project_db_path.is_some() {
@@ -1867,7 +1865,7 @@ impl MemoryServer {
     #[tool(description = "View audit log of proxy tool calls through the Hub.")]
     async fn tachi_audit_log(
         &self,
-        #[tool(aggr)] params: AuditLogParams,
+        Parameters(params): Parameters<AuditLogParams>,
     ) -> Result<String, String> {
         self.with_global_store(|store| {
             let entries = store
@@ -1880,7 +1878,7 @@ impl MemoryServer {
     #[tool(description = "Call a tool on a registered MCP server through the Hub using the shared connection pool.")]
     async fn hub_call(
         &self,
-        #[tool(aggr)] params: HubCallParams,
+        Parameters(params): Parameters<HubCallParams>,
     ) -> Result<String, String> {
         let server_name = params
             .server_id
@@ -1917,7 +1915,7 @@ impl MemoryServer {
 impl MemoryServer {
     /// Atomically check if connection exists and create if not.
     /// Prevents TOCTOU race where two concurrent calls both spawn a child.
-    async fn ensure_child_connected(&self, server_name: &str) -> Result<(), rmcp::Error> {
+    async fn ensure_child_connected(&self, server_name: &str) -> Result<(), rmcp::ErrorData> {
         // Check under lock
         {
             let conns = self.pool.connections.lock().unwrap();
@@ -1943,7 +1941,7 @@ impl MemoryServer {
         self.connect_child(server_name).await
     }
 
-    async fn connect_child(&self, server_name: &str) -> Result<(), rmcp::Error> {
+    async fn connect_child(&self, server_name: &str) -> Result<(), rmcp::ErrorData> {
         let server_id = format!("mcp:{}", server_name);
 
         let cap = {
@@ -1959,12 +1957,12 @@ impl MemoryServer {
                     .unwrap_or(None);
             }
             found.ok_or_else(|| {
-                rmcp::Error::invalid_params(format!("MCP server '{}' not found", server_id), None)
+                rmcp::ErrorData::invalid_params(format!("MCP server '{}' not found", server_id), None)
             })?
         };
 
         let def: serde_json::Value = serde_json::from_str(&cap.definition)
-            .map_err(|e| rmcp::Error::internal_error(format!("bad definition: {e}"), None))?;
+            .map_err(|e| rmcp::ErrorData::internal_error(format!("bad definition: {e}"), None))?;
 
         let transport_type = def["transport"].as_str().unwrap_or("stdio");
 
@@ -1972,13 +1970,13 @@ impl MemoryServer {
             "stdio" => {
                 let command = def["command"]
                     .as_str()
-                    .ok_or_else(|| rmcp::Error::internal_error("missing command", None))?;
+                    .ok_or_else(|| rmcp::ErrorData::internal_error("missing command", None))?;
                 let args: Vec<String> = def["args"]
                     .as_array()
                     .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
                     .unwrap_or_default();
                 let env_map = resolve_env_map(&def)
-                    .map_err(|e| rmcp::Error::internal_error(e, None))?;
+                    .map_err(|e| rmcp::ErrorData::internal_error(e, None))?;
 
                 let mut cmd = tokio::process::Command::new(command);
                 cmd.args(&args).env_clear();
@@ -1992,25 +1990,23 @@ impl MemoryServer {
                     cmd.env(k, v);
                 }
 
-                let transport = rmcp::transport::TokioChildProcess::new(&mut cmd)
-                    .map_err(|e| rmcp::Error::internal_error(format!("spawn: {e}"), None))?;
+                let transport = rmcp::transport::TokioChildProcess::new(cmd)
+                    .map_err(|e| rmcp::ErrorData::internal_error(format!("spawn: {e}"), None))?;
                 rmcp::ServiceExt::serve((), transport)
                     .await
-                    .map_err(|e| rmcp::Error::internal_error(format!("handshake: {e}"), None))?
+                    .map_err(|e| rmcp::ErrorData::internal_error(format!("handshake: {e}"), None))?
             }
             "sse" => {
                 let url = def["url"]
                     .as_str()
-                    .ok_or_else(|| rmcp::Error::internal_error("missing url for SSE", None))?;
-                let transport = rmcp::transport::SseTransport::start(url)
-                    .await
-                    .map_err(|e| rmcp::Error::internal_error(format!("SSE connect: {e}"), None))?;
+                    .ok_or_else(|| rmcp::ErrorData::internal_error("missing url for SSE", None))?;
+                let transport = StreamableHttpClientTransport::from_uri(url);
                 rmcp::ServiceExt::serve((), transport)
                     .await
-                    .map_err(|e| rmcp::Error::internal_error(format!("SSE handshake: {e}"), None))?
+                    .map_err(|e| rmcp::ErrorData::internal_error(format!("SSE handshake: {e}"), None))?
             }
             other => {
-                return Err(rmcp::Error::internal_error(
+                return Err(rmcp::ErrorData::internal_error(
                     format!("unsupported transport: {other}"),
                     None,
                 ));
@@ -2032,7 +2028,7 @@ impl MemoryServer {
         server_name: &str,
         tool_name: &str,
         arguments: Option<serde_json::Map<String, serde_json::Value>>,
-    ) -> Result<rmcp::model::CallToolResult, rmcp::Error> {
+    ) -> Result<rmcp::model::CallToolResult, rmcp::ErrorData> {
         // 0. Look up capability for deny-list and timeout config
         let server_id = format!("mcp:{}", server_name);
         let cap_def = {
@@ -2055,7 +2051,7 @@ impl MemoryServer {
         if let Some(deny_list) = cap_def["permissions"]["deny"].as_array() {
             let denied: Vec<&str> = deny_list.iter().filter_map(|v| v.as_str()).collect();
             if denied.contains(&tool_name) {
-                return Err(rmcp::Error::invalid_params(
+                return Err(rmcp::ErrorData::invalid_params(
                     format!("Tool '{}' is denied by permissions policy on '{}'", tool_name, server_name),
                     None,
                 ));
@@ -2069,7 +2065,7 @@ impl MemoryServer {
                 match state {
                     CircuitState::Open { until } => {
                         if Instant::now() < *until {
-                            return Err(rmcp::Error::internal_error(
+                            return Err(rmcp::ErrorData::internal_error(
                                 format!("Circuit open for '{}', retry after cooldown", server_name),
                                 None,
                             ));
@@ -2098,16 +2094,16 @@ impl MemoryServer {
             sems.get(server_name).unwrap().0.clone()
         };
         let _permit = semaphore.acquire().await
-            .map_err(|_| rmcp::Error::internal_error("semaphore closed", None))?;
+            .map_err(|_| rmcp::ErrorData::internal_error("semaphore closed", None))?;
 
         // 4. Ensure connection exists (atomic check-and-connect to avoid TOCTOU race)
         self.ensure_child_connected(server_name).await?;
 
         // 5. Get peer and call tool with timeout
-        let call_params = rmcp::model::CallToolRequestParam {
-            name: std::borrow::Cow::Owned(tool_name.to_string()),
-            arguments: arguments.clone(),
-        };
+        let mut call_params = rmcp::model::CallToolRequestParams::new(tool_name.to_string());
+        if let Some(ref args) = arguments {
+            call_params = call_params.with_arguments(args.clone());
+        }
 
         let peer = {
             let mut conns = self.pool.connections.lock().unwrap();
@@ -2115,7 +2111,7 @@ impl MemoryServer {
                 conn.last_used = Instant::now();
                 conn.client.peer().clone()
             } else {
-                return Err(rmcp::Error::internal_error("connection lost", None));
+                return Err(rmcp::ErrorData::internal_error("connection lost", None));
             }
         };
 
@@ -2140,12 +2136,12 @@ impl MemoryServer {
             Ok(Err(e)) => {
                 // Transport/protocol error — increment circuit breaker
                 self.record_circuit_failure(server_name);
-                Err(rmcp::Error::internal_error(format!("proxy call failed: {e}"), None))
+                Err(rmcp::ErrorData::internal_error(format!("proxy call failed: {e}"), None))
             }
             Err(_timeout) => {
                 // Timeout — increment circuit breaker
                 self.record_circuit_failure(server_name);
-                Err(rmcp::Error::internal_error(
+                Err(rmcp::ErrorData::internal_error(
                     format!("Tool call '{}' on '{}' timed out after {}ms", tool_name, server_name, timeout_ms),
                     None,
                 ))
@@ -2196,27 +2192,19 @@ impl MemoryServer {
 
 impl ServerHandler for MemoryServer {
     fn get_info(&self) -> ServerInfo {
-        ServerInfo {
-            instructions: Some(
-                "Tachi — memory + Hub for AI agents. \
-                Provides hybrid search, memory storage, skill registry, and MCP server proxy."
-                    .into(),
-            ),
-            capabilities: ServerCapabilities {
-                tools: Some(ToolsCapability::default()),
-                ..Default::default()
-            },
-            ..Default::default()
-        }
+        ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
+            .with_instructions("Tachi — memory + Hub for AI agents. Provides hybrid search, memory storage, skill registry, and MCP server proxy.")
     }
 
     fn list_tools(
         &self,
-        _: rmcp::model::PaginatedRequestParam,
+        _: Option<rmcp::model::PaginatedRequestParams>,
         _: rmcp::service::RequestContext<rmcp::service::RoleServer>,
-    ) -> impl Future<Output = Result<rmcp::model::ListToolsResult, rmcp::Error>> + Send + '_ {
+    ) -> impl Future<Output = Result<rmcp::model::ListToolsResult, rmcp::ErrorData>> + Send + '_ {
         async move {
-            let mut tools = Self::tool_box().list();
+            let mut tools = self.tool_router.list_all();
+
+            // Add proxy tools from registered MCP servers
             if let Ok(proxy) = self.proxy_tools.lock() {
                 for (server_name, server_tools) in proxy.iter() {
                     for tool in server_tools {
@@ -2227,30 +2215,31 @@ impl ServerHandler for MemoryServer {
                     }
                 }
             }
+            // Add skill tools
             if let Ok(skill_defs) = self.skill_tool_defs.lock() {
                 tools.extend(skill_defs.values().cloned());
             }
 
             Ok(rmcp::model::ListToolsResult {
-                next_cursor: None,
                 tools,
+                ..Default::default()
             })
         }
     }
 
     fn call_tool(
         &self,
-        params: rmcp::model::CallToolRequestParam,
+        params: rmcp::model::CallToolRequestParams,
         context: rmcp::service::RequestContext<rmcp::service::RoleServer>,
-    ) -> impl Future<Output = Result<rmcp::model::CallToolResult, rmcp::Error>> + Send + '_ {
+    ) -> impl Future<Output = Result<rmcp::model::CallToolResult, rmcp::ErrorData>> + Send + '_ {
         async move {
             let name = params.name.as_ref();
 
             // 1. Native tools first (highest priority)
-            if Self::tool_box().map.contains_key(name) {
+            if self.tool_router.has_route(name) {
                 let context =
                     rmcp::handler::server::tool::ToolCallContext::new(self, params, context);
-                return Self::tool_box().call(context).await;
+                return self.tool_router.call(context).await;
             }
 
             // 2. Skill tools (tachi_skill_*)
@@ -2270,7 +2259,7 @@ impl ServerHandler for MemoryServer {
                     .await;
             }
 
-            Err(rmcp::Error::invalid_params("tool not found", None))
+            Err(rmcp::ErrorData::invalid_params("tool not found", None))
         }
     }
 }

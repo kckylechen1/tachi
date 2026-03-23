@@ -5,7 +5,7 @@ edition = "2021"
 
 [dependencies]
 memory-core = { path = "../memory-core" }
-rmcp = { version = "0.1", features = ["server", "transport-io", "macros", "client", "transport-child-process", "transport-sse"] }
+rmcp = { version = "1.2", features = ["server", "transport-io", "macros", "client", "transport-child-process", "transport-streamable-http-client", "transport-streamable-http-client-reqwest", "server-side-http", "schemars"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tokio = { version = "1", features = ["full"] }
@@ -13,10 +13,10 @@ tokio-util = "0.7"
 async-trait = "0.1"
 uuid = { workspace = true }
 chrono = { workspace = true }
-schemars = "0.8"
+clap = { version = "4", features = ["derive"] }
 dirs = "5.0"
 dotenvy = "0.15"
-reqwest = { version = "0.12", features = ["json"] }
+reqwest = { package = "reqwest", version = "0.12", features = ["json"] }
 async-openai = "0.27"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
