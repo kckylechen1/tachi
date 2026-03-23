@@ -1277,7 +1277,7 @@ impl ServerHandler for MemoryServer {
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     if args.iter().any(|a| a == "--version" || a == "-V") {
-        println!("sigil {}", env!("CARGO_PKG_VERSION"));
+        println!("tachi {}", env!("CARGO_PKG_VERSION"));
         std::process::exit(0);
     }
     if let Err(e) = tokio_main() {
