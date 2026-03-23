@@ -927,15 +927,9 @@ impl MemoryServer {
         let requested_scope = params.scope.clone();
         let (target_db, warning) = self.resolve_write_scope(&requested_scope);
 
-        // Generate L0 summary if not provided (async LLM work before DB open)
-        let summary = if params.summary.is_empty() {
-            self.llm.generate_summary(&params.text).await?
-        } else {
-            params.summary
-        };
-
-        // Generate embedding (async LLM work before DB open)
-        let vector = self.llm.embed_voyage(&params.text, "document").await.ok();
+        // Use caller-provided summary or leave empty for background enrichment
+        let summary = params.summary;
+        let needs_summary = summary.is_empty();
 
         let entry = MemoryEntry {
             id: id.clone(),
@@ -943,7 +937,7 @@ impl MemoryServer {
             summary,
             text: params.text,
             importance: params.importance,
-            timestamp,
+            timestamp: timestamp.clone(),
             category: params.category,
             topic: params.topic,
             keywords: params.keywords,
@@ -957,19 +951,54 @@ impl MemoryServer {
             last_access: None,
             revision: 1,
             metadata: serde_json::json!({}),
-            vector,
+            vector: None,
         };
 
+        // Write immediately with empty summary/vector
         self.with_store_for_scope(target_db, |store| {
             store
                 .upsert(&entry)
                 .map_err(|e| format!("Failed to save memory: {}", e))
         })?;
 
+        // Spawn background enrichment (embedding + summary)
+        let server = self.clone();
+        let enrich_id = id.clone();
+        let enrich_text = entry.text.clone();
+        tokio::spawn(async move {
+            let mut enriched_entry = entry;
+
+            // Generate embedding
+            match server.llm.embed_voyage(&enrich_text, "document").await {
+                Ok(vec) => enriched_entry.vector = Some(vec),
+                Err(e) => eprintln!("[enrichment] embedding failed for {enrich_id}: {e}"),
+            }
+
+            // Generate summary if not provided
+            if needs_summary {
+                match server.llm.generate_summary(&enrich_text).await {
+                    Ok(s) => enriched_entry.summary = s,
+                    Err(e) => eprintln!("[enrichment] summary failed for {enrich_id}: {e}"),
+                }
+            }
+
+            // Update entry with enriched data
+            if let Err(e) = server.with_store_for_scope(target_db, |store| {
+                store
+                    .upsert(&enriched_entry)
+                    .map_err(|e| format!("Failed to update enriched entry: {e}"))
+            }) {
+                eprintln!("[enrichment] DB update failed for {enrich_id}: {e}");
+            } else {
+                eprintln!("[enrichment] completed for {enrich_id}");
+            }
+        });
+
         let mut response = serde_json::Map::new();
         response.insert("id".into(), json!(id));
-        response.insert("timestamp".into(), json!(entry.timestamp));
+        response.insert("timestamp".into(), json!(timestamp));
         response.insert("db".into(), json!(target_db.as_str()));
+        response.insert("status".into(), json!("saved (enrichment pending)"));
         if let Some(warning) = warning {
             response.insert("warning".into(), json!(warning));
         }
@@ -1254,33 +1283,45 @@ impl MemoryServer {
 
     #[tool(description = "Extract structured facts from text using LLM and save to memory.")]
     async fn extract_facts(&self, Parameters(params): Parameters<ExtractFactsParams>) -> Result<String, String> {
-        // Do async LLM work before opening DB
-        let facts = self.llm.extract_facts(&params.text).await?;
-        if facts.is_empty() {
-            return Ok("No facts extracted.".to_string());
-        }
-
         let (target_db, _warning) = self.resolve_write_scope("project");
 
-        self.with_store_for_scope(target_db, |store| {
-            let mut saved = 0;
-
-            for fact in &facts {
-                let Some(entry) = fact_to_entry(
-                    fact,
-                    "extraction",
-                    serde_json::json!({"source": params.source}),
-                ) else {
-                    continue;
-                };
-
-                if store.upsert(&entry).is_ok() {
-                    saved += 1;
+        // Spawn LLM extraction in background
+        let server = self.clone();
+        let text = params.text.clone();
+        let source = params.source.clone();
+        tokio::spawn(async move {
+            match server.llm.extract_facts(&text).await {
+                Ok(facts) if facts.is_empty() => {
+                    eprintln!("[extract_facts] no facts extracted");
                 }
+                Ok(facts) => {
+                    let count = facts.len();
+                    let saved = server.with_store_for_scope(target_db, |store| {
+                        let mut saved = 0;
+                        for fact in &facts {
+                            let Some(entry) = fact_to_entry(
+                                fact,
+                                "extraction",
+                                serde_json::json!({"source": source}),
+                            ) else {
+                                continue;
+                            };
+                            if store.upsert(&entry).is_ok() {
+                                saved += 1;
+                            }
+                        }
+                        Ok(saved)
+                    });
+                    match saved {
+                        Ok(n) => eprintln!("[extract_facts] saved {n}/{count} facts"),
+                        Err(e) => eprintln!("[extract_facts] DB write failed: {e}"),
+                    }
+                }
+                Err(e) => eprintln!("[extract_facts] LLM extraction failed: {e}"),
             }
+        });
 
-            Ok(format!("Extracted and saved {} facts from text.", saved))
-        })
+        Ok("extraction queued".to_string())
     }
 
     #[tool(description = "Ingest a conversation event and extract facts from messages.")]
@@ -1312,37 +1353,46 @@ impl MemoryServer {
             return Ok(format!("Event already processed (hash: {})", event_hash));
         }
 
-        // Do async LLM work before opening DB for writes
-        let facts = self.llm.extract_facts(&combined_text).await?;
-        let mut saved = 0;
-
-        self.with_store_for_scope(target_db, |store| {
-            if !facts.is_empty() {
-                for fact in &facts {
-                    let Some(entry) = fact_to_entry(
-                        fact,
-                        &format!("conversation:{}", params.conversation_id),
-                        serde_json::json!({
-                            "conversation_id": params.conversation_id,
-                            "turn_id": params.turn_id,
-                        }),
-                    ) else {
-                        continue;
-                    };
-
-                    if store.upsert(&entry).is_ok() {
-                        saved += 1;
+        // Spawn LLM fact extraction in background
+        let server = self.clone();
+        let conversation_id = params.conversation_id.clone();
+        let turn_id = params.turn_id.clone();
+        tokio::spawn(async move {
+            match server.llm.extract_facts(&combined_text).await {
+                Ok(facts) if facts.is_empty() => {
+                    eprintln!("[ingest_event] no facts extracted from {conversation_id}:{turn_id}");
+                }
+                Ok(facts) => {
+                    let count = facts.len();
+                    let saved = server.with_store_for_scope(target_db, |store| {
+                        let mut saved = 0;
+                        for fact in &facts {
+                            let Some(entry) = fact_to_entry(
+                                fact,
+                                &format!("conversation:{conversation_id}"),
+                                serde_json::json!({
+                                    "conversation_id": conversation_id,
+                                    "turn_id": turn_id,
+                                }),
+                            ) else {
+                                continue;
+                            };
+                            if store.upsert(&entry).is_ok() {
+                                saved += 1;
+                            }
+                        }
+                        Ok(saved)
+                    });
+                    match saved {
+                        Ok(n) => eprintln!("[ingest_event] saved {n}/{count} facts for {conversation_id}:{turn_id}"),
+                        Err(e) => eprintln!("[ingest_event] DB write failed: {e}"),
                     }
                 }
+                Err(e) => eprintln!("[ingest_event] LLM extraction failed for {conversation_id}:{turn_id}: {e}"),
             }
-            Ok(())
-        })?;
+        });
 
-        if facts.is_empty() {
-            Ok("No facts extracted from event.".to_string())
-        } else {
-            Ok(format!("Ingested event: extracted and saved {} facts.", saved))
-        }
+        Ok(format!("event claimed, processing in background (hash: {})", event_hash))
     }
 
     #[tool(description = "Get pipeline status and statistics.")]
