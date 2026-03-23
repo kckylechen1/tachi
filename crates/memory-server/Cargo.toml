@@ -15,6 +15,7 @@ uuid = { workspace = true }
 chrono = { workspace = true }
 schemars = "0.8"
 dirs = "5.0"
+dotenvy = "0.15"
 reqwest = { version = "0.12", features = ["json"] }
 async-openai = "0.27"
 tracing = "0.1"

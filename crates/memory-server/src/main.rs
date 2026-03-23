@@ -1,13 +1,9 @@
 // main.rs — Memory MCP Server
 //
 // Rust MCP server using rmcp SDK to expose memory-core functionality.
-// Replaces the Python mcp/server.py implementation.
-
-#[cfg(unix)]
-use std::os::unix::io::AsRawFd;
+// Stateless design: each tool opens its own DB connection per-request.
 
 mod llm;
-mod pipeline;
 mod prompts;
 
 use chrono::Utc;
@@ -25,8 +21,6 @@ use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::MutexGuard as StdMutexGuard;
-use std::sync::Mutex as StdMutex;
 use tokio::io::{stdin, stdout};
 
 /// Build a slim JSON representation of a MemoryEntry for MCP output.
@@ -88,14 +82,13 @@ fn slim_l0_rule(rule: &MemoryEntry) -> serde_json::Value {
     obj.insert("l0_rule".into(), json!(true));
     serde_json::Value::Object(obj)
 }
-use tokio_util::sync::CancellationToken;
 
 // ─── Server State ─────────────────────────────────────────────────────────────
 
 #[derive(Clone)]
 #[allow(dead_code)]
 struct MemoryServer {
-    store: Arc<StdMutex<MemoryStore>>,
+    db_path: Arc<PathBuf>,
     vec_available: bool,
     llm: Arc<llm::LlmClient>,
     pipeline_enabled: bool,
@@ -103,35 +96,27 @@ struct MemoryServer {
 
 impl MemoryServer {
     fn new(db_path: PathBuf) -> Result<Self, Box<dyn std::error::Error>> {
-        let store = MemoryStore::open(db_path.to_str().unwrap())?;
-        let vec_available = store.vec_available;
+        // Detect vec_available once at startup with a temporary connection
+        let tmp_store = MemoryStore::open(db_path.to_str().unwrap())?;
+        let vec_available = tmp_store.vec_available;
+        drop(tmp_store);
+
         let llm = Arc::new(llm::LlmClient::new()?);
         let pipeline_enabled = std::env::var("ENABLE_PIPELINE")
             .map(|v| v == "true" || v == "1")
             .unwrap_or(false);
         Ok(Self {
-            store: Arc::new(StdMutex::new(store)),
+            db_path: Arc::new(db_path),
             vec_available,
             llm,
             pipeline_enabled,
         })
     }
 
-    fn lock_store(&self) -> Result<StdMutexGuard<'_, MemoryStore>, String> {
-        self.store
-            .lock()
-            .map_err(|e| format!("memory store lock poisoned: {e}"))
-    }
-
-    fn prepare_shutdown(&self) {
-        match self.lock_store() {
-            Ok(store) => {
-                if let Err(e) = store.prepare_shutdown() {
-                    eprintln!("Failed to flush database on shutdown: {e}");
-                }
-            }
-            Err(e) => eprintln!("Failed to lock database on shutdown: {e}"),
-        }
+    fn with_store<T>(&self, f: impl FnOnce(&mut MemoryStore) -> Result<T, String>) -> Result<T, String> {
+        let mut store = MemoryStore::open(self.db_path.to_str().unwrap())
+            .map_err(|e| format!("open store: {e}"))?;
+        f(&mut store)
     }
 }
 
@@ -335,6 +320,16 @@ fn default_extraction_source() -> String {
     "extraction".to_string()
 }
 
+/// A single message in a conversation turn
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+struct Message {
+    /// Role of the message sender (e.g., "user", "assistant", "system")
+    #[allow(dead_code)]
+    role: String,
+    /// Content of the message
+    content: String,
+}
+
 #[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 struct IngestEventParams {
@@ -345,7 +340,7 @@ struct IngestEventParams {
     turn_id: String,
 
     /// Messages in the conversation turn
-    messages: Vec<serde_json::Value>,
+    messages: Vec<Message>,
 }
 
 // ─── Tool Implementations ────────────────────────────────────────────────────────
@@ -360,14 +355,14 @@ impl MemoryServer {
         let id = params.id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
         let timestamp = Utc::now().to_rfc3339();
 
-        // Generate L0 summary if not provided
+        // Generate L0 summary if not provided (async LLM work before DB open)
         let summary = if params.summary.is_empty() {
             self.llm.generate_summary(&params.text).await?
         } else {
             params.summary
         };
 
-        // Generate embedding (do this BEFORE locking the store)
+        // Generate embedding (async LLM work before DB open)
         let vector = self.llm.embed_voyage(&params.text, "document").await.ok();
 
         let entry = MemoryEntry {
@@ -393,21 +388,11 @@ impl MemoryServer {
             vector,
         };
 
-        {
-            let mut store = self.lock_store()?;
+        self.with_store(|store| {
             store
                 .upsert(&entry)
-                .map_err(|e| format!("Failed to save memory: {}", e))?;
-        }
-
-        if self.pipeline_enabled {
-            let store = self.store.clone();
-            let llm = self.llm.clone();
-            let mid = id.clone();
-            tokio::spawn(async move {
-                pipeline::run_consolidator(store, llm, mid).await;
-            });
-        }
+                .map_err(|e| format!("Failed to save memory: {}", e))
+        })?;
 
         serde_json::to_string(&json!({
             "id": id,
@@ -432,35 +417,38 @@ impl MemoryServer {
         };
         opts.vec_available = self.vec_available;
 
-        let mut store = self.lock_store()?;
-        let results = store
-            .search(&params.query, Some(opts))
-            .map_err(|e| format!("Search failed: {}", e))?;
-        let mut output: Vec<serde_json::Value> = results
-            .iter()
-            .map(|r| slim_search_result(r))
-            .collect();
+        let pipeline_enabled = self.pipeline_enabled;
 
-        if self.pipeline_enabled {
-            let mut existing_ids: HashSet<String> = results
+        self.with_store(|store| {
+            let results = store
+                .search(&params.query, Some(opts))
+                .map_err(|e| format!("Search failed: {}", e))?;
+            let mut output: Vec<serde_json::Value> = results
                 .iter()
-                .map(|r| r.entry.id.clone())
+                .map(|r| slim_search_result(r))
                 .collect();
-            let rules = store
-                .list_by_path("/behavior/global_rules", 50, false)
-                .unwrap_or_default();
-            for rule in rules {
-                if !is_active_global_rule(&rule) {
-                    continue;
-                }
-                if !existing_ids.insert(rule.id.clone()) {
-                    continue;
-                }
-                output.push(slim_l0_rule(&rule));
-            }
-        }
 
-        serde_json::to_string(&output).map_err(|e| format!("Failed to serialize response: {}", e))
+            if pipeline_enabled {
+                let mut existing_ids: HashSet<String> = results
+                    .iter()
+                    .map(|r| r.entry.id.clone())
+                    .collect();
+                let rules = store
+                    .list_by_path("/behavior/global_rules", 50, false)
+                    .unwrap_or_default();
+                for rule in rules {
+                    if !is_active_global_rule(&rule) {
+                        continue;
+                    }
+                    if !existing_ids.insert(rule.id.clone()) {
+                        continue;
+                    }
+                    output.push(slim_l0_rule(&rule));
+                }
+            }
+
+            serde_json::to_string(&output).map_err(|e| format!("Failed to serialize response: {}", e))
+        })
     }
 
     #[tool(description = "Get a single memory entry by ID.")]
@@ -468,20 +456,21 @@ impl MemoryServer {
         &self,
         #[tool(aggr)] params: GetMemoryParams,
     ) -> Result<String, String> {
-        let store = self.lock_store()?;
-        let entry = store
-            .get_with_options(&params.id, params.include_archived)
-            .map_err(|e| format!("Failed to get memory: {}", e))?;
+        self.with_store(|store| {
+            let entry = store
+                .get_with_options(&params.id, params.include_archived)
+                .map_err(|e| format!("Failed to get memory: {}", e))?;
 
-        match entry {
-            Some(e) => serde_json::to_string(&slim_entry(&e))
-                .map_err(|e| format!("Failed to serialize: {}", e)),
-            None => {
-                serde_json::to_string(&json!({
-                    "error": "Memory not found"
-                })).map_err(|e| format!("Failed to serialize: {}", e))
+            match entry {
+                Some(e) => serde_json::to_string(&slim_entry(&e))
+                    .map_err(|e| format!("Failed to serialize: {}", e)),
+                None => {
+                    serde_json::to_string(&json!({
+                        "error": "Memory not found"
+                    })).map_err(|e| format!("Failed to serialize: {}", e))
+                }
             }
-        }
+        })
     }
 
     #[tool(description = "List memory entries under a path prefix.")]
@@ -489,25 +478,27 @@ impl MemoryServer {
         &self,
         #[tool(aggr)] params: ListMemoriesParams,
     ) -> Result<String, String> {
-        let store = self.lock_store()?;
-        let entries = store
-            .list_by_path(&params.path_prefix, params.limit, params.include_archived)
-            .map_err(|e| format!("Failed to list memories: {}", e))?;
+        self.with_store(|store| {
+            let entries = store
+                .list_by_path(&params.path_prefix, params.limit, params.include_archived)
+                .map_err(|e| format!("Failed to list memories: {}", e))?;
 
-        let slim: Vec<serde_json::Value> = entries.iter().map(|e| slim_entry(e)).collect();
-        serde_json::to_string(&slim)
-            .map_err(|e| format!("Failed to serialize: {}", e))
+            let slim: Vec<serde_json::Value> = entries.iter().map(|e| slim_entry(e)).collect();
+            serde_json::to_string(&slim)
+                .map_err(|e| format!("Failed to serialize: {}", e))
+        })
     }
 
     #[tool(description = "Get aggregate statistics about the memory store.")]
     async fn memory_stats(&self) -> Result<String, String> {
-        let store = self.lock_store()?;
-        let stats = store
-            .stats(false)
-            .map_err(|e| format!("Failed to get stats: {}", e))?;
+        self.with_store(|store| {
+            let stats = store
+                .stats(false)
+                .map_err(|e| format!("Failed to get stats: {}", e))?;
 
-        serde_json::to_string(&stats)
-            .map_err(|e| format!("Failed to serialize: {}", e))
+            serde_json::to_string(&stats)
+                .map_err(|e| format!("Failed to serialize: {}", e))
+        })
     }
 
     #[tool(description = "Set a key-value pair in server state (stored in hard_state table).")]
@@ -518,15 +509,16 @@ impl MemoryServer {
         let value_json = serde_json::to_string(&params.value)
             .map_err(|e| format!("Failed to serialize value: {}", e))?;
 
-        let store = self.lock_store()?;
-        let version = store.set_state("mcp", &params.key, &value_json)
-            .map_err(|e| format!("Failed to set state: {}", e))?;
+        self.with_store(|store| {
+            let version = store.set_state("mcp", &params.key, &value_json)
+                .map_err(|e| format!("Failed to set state: {}", e))?;
 
-        serde_json::to_string(&json!({
-            "key": params.key,
-            "value": params.value,
-            "version": version
-        })).map_err(|e| format!("Failed to serialize response: {}", e))
+            serde_json::to_string(&json!({
+                "key": params.key,
+                "value": params.value,
+                "version": version
+            })).map_err(|e| format!("Failed to serialize response: {}", e))
+        })
     }
 
     #[tool(description = "Get a value from server state by key.")]
@@ -534,89 +526,89 @@ impl MemoryServer {
         &self,
         #[tool(aggr)] params: GetStateParams,
     ) -> Result<String, String> {
-        let store = self.lock_store()?;
+        self.with_store(|store| {
+            match store.get_state_kv("mcp", &params.key) {
+                Ok(Some((value, version))) => {
+                    let parsed_value: serde_json::Value = serde_json::from_str(&value)
+                        .unwrap_or_else(|_| serde_json::json!(value));
 
-        match store.get_state_kv("mcp", &params.key) {
-            Ok(Some((value, version))) => {
-                // Parse the value JSON to return it as a proper JSON value
-                let parsed_value: serde_json::Value = serde_json::from_str(&value)
-                    .unwrap_or_else(|_| serde_json::json!(value));
-
-                serde_json::to_string(&json!({
-                    "key": params.key,
-                    "value": parsed_value,
-                    "version": version
-                })).map_err(|e| format!("Failed to serialize: {}", e))
+                    serde_json::to_string(&json!({
+                        "key": params.key,
+                        "value": parsed_value,
+                        "version": version
+                    })).map_err(|e| format!("Failed to serialize: {}", e))
+                }
+                Ok(None) => {
+                    serde_json::to_string(&json!({
+                        "key": params.key,
+                        "error": "not found"
+                    })).map_err(|e| format!("Failed to serialize: {}", e))
+                }
+                Err(e) => Err(format!("Failed to get state: {}", e)),
             }
-            Ok(None) => {
-                serde_json::to_string(&json!({
-                    "key": params.key,
-                    "error": "not found"
-                })).map_err(|e| format!("Failed to serialize: {}", e))
-            }
-            Err(e) => Err(format!("Failed to get state: {}", e)),
-        }
+        })
     }
 
     #[tool(description = "Extract structured facts from text using LLM and save to memory.")]
     async fn extract_facts(&self, #[tool(aggr)] params: ExtractFactsParams) -> Result<String, String> {
+        // Do async LLM work before opening DB
         let facts = self.llm.extract_facts(&params.text).await?;
         if facts.is_empty() {
             return Ok("No facts extracted.".to_string());
         }
 
-        let mut store = self.lock_store()?;
-        let mut saved = 0;
+        self.with_store(|store| {
+            let mut saved = 0;
 
-        for fact in &facts {
-            let text = fact["text"].as_str().unwrap_or("").to_string();
-            if text.is_empty() {
-                continue;
+            for fact in &facts {
+                let text = fact["text"].as_str().unwrap_or("").to_string();
+                if text.is_empty() {
+                    continue;
+                }
+
+                let topic = fact["topic"].as_str().unwrap_or("").to_string();
+                let importance = fact["importance"].as_f64().unwrap_or(0.7);
+                let keywords: Vec<String> = fact["keywords"]
+                    .as_array()
+                    .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+                    .unwrap_or_default();
+                let scope = fact["scope"].as_str().unwrap_or("general").to_string();
+                let summary = text.chars().take(100).collect::<String>();
+
+                let entry = MemoryEntry {
+                    id: uuid::Uuid::new_v4().to_string(),
+                    path: format!("/{}/{}", scope, topic.replace(' ', "_")),
+                    summary,
+                    text,
+                    importance,
+                    timestamp: Utc::now().to_rfc3339(),
+                    category: "fact".to_string(),
+                    topic,
+                    keywords,
+                    persons: vec![],
+                    entities: vec![],
+                    location: String::new(),
+                    source: "extraction".to_string(),
+                    scope,
+                    archived: false,
+                    access_count: 0,
+                    last_access: None,
+                    revision: 1,
+                    metadata: serde_json::json!({"source": params.source}),
+                    vector: None,
+                };
+
+                if store.upsert(&entry).is_ok() {
+                    saved += 1;
+                }
             }
 
-            let topic = fact["topic"].as_str().unwrap_or("").to_string();
-            let importance = fact["importance"].as_f64().unwrap_or(0.7);
-            let keywords: Vec<String> = fact["keywords"]
-                .as_array()
-                .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
-                .unwrap_or_default();
-            let scope = fact["scope"].as_str().unwrap_or("general").to_string();
-            let summary = text.chars().take(100).collect::<String>();
-
-            let entry = MemoryEntry {
-                id: uuid::Uuid::new_v4().to_string(),
-                path: format!("/{}/{}", scope, topic.replace(' ', "_")),
-                summary,
-                text,
-                importance,
-                timestamp: Utc::now().to_rfc3339(),
-                category: "fact".to_string(),
-                topic,
-                keywords,
-                persons: vec![],
-                entities: vec![],
-                location: String::new(),
-                source: "extraction".to_string(),
-                scope,
-                archived: false,
-                access_count: 0,
-                last_access: None,
-                revision: 1,
-                metadata: serde_json::json!({"source": params.source}),
-                vector: None, // no embedding for extracted facts (too many API calls)
-            };
-
-            if store.upsert(&entry).is_ok() {
-                saved += 1;
-            }
-        }
-
-        Ok(format!("Extracted and saved {} facts from text.", saved))
+            Ok(format!("Extracted and saved {} facts from text.", saved))
+        })
     }
 
     #[tool(description = "Ingest a conversation event and extract facts from messages.")]
     async fn ingest_event(&self, #[tool(aggr)] params: IngestEventParams) -> Result<String, String> {
-        let event_id = format!("{}|{}", params.conversation_id, params.turn_id);
         let mut hasher = DefaultHasher::new();
         params.conversation_id.hash(&mut hasher);
         params.turn_id.hash(&mut hasher);
@@ -626,7 +618,7 @@ impl MemoryServer {
         let combined_text: String = params
             .messages
             .iter()
-            .filter_map(|m| m["content"].as_str())
+            .map(|m| m.content.as_str())
             .collect::<Vec<&str>>()
             .join("\n");
 
@@ -634,31 +626,21 @@ impl MemoryServer {
             return Ok("No content to process.".to_string());
         }
 
-        {
-            let store = self.lock_store()?;
-            let already_processed = store
+        // Check dedup with per-request DB open
+        let already_processed = self.with_store(|store| {
+            store
                 .is_event_processed(&event_hash, "ingest")
-                .map_err(|e| format!("Failed to check event dedup: {e}"))?;
-            if already_processed {
-                return Ok(format!("Event already processed (hash: {})", event_hash));
-            }
+                .map_err(|e| format!("Failed to check event dedup: {e}"))
+        })?;
+        if already_processed {
+            return Ok(format!("Event already processed (hash: {})", event_hash));
         }
 
-        if self.pipeline_enabled {
-            let store = self.store.clone();
-            let llm = self.llm.clone();
-            let msgs = params.messages.clone();
-            let eid = event_id.clone();
-            tokio::spawn(async move {
-                pipeline::run_causal(store, llm, msgs, eid).await;
-            });
-        }
-
-        // Reuse extract_facts logic
+        // Do async LLM work before opening DB for writes
         let facts = self.llm.extract_facts(&combined_text).await?;
         let mut saved = 0;
-        {
-            let mut store = self.lock_store()?;
+
+        self.with_store(|store| {
             if !facts.is_empty() {
                 for fact in &facts {
                     let text = fact["text"].as_str().unwrap_or("").to_string();
@@ -714,7 +696,9 @@ impl MemoryServer {
                     "ingest",
                 )
                 .map_err(|e| format!("Failed to mark event processed: {e}"))?;
-        }
+
+            Ok(())
+        })?;
 
         if facts.is_empty() {
             Ok("No facts extracted from event.".to_string())
@@ -725,45 +709,21 @@ impl MemoryServer {
 
     #[tool(description = "Get pipeline status and statistics.")]
     async fn get_pipeline_status(&self) -> Result<String, String> {
-        let store = self.lock_store()?;
+        self.with_store(|store| {
+            let stats = store.stats(false).map_err(|e| format!("Failed to get stats: {}", e))?;
 
-        // Get basic stats from the store
-        let stats = store.stats(false).map_err(|e| format!("Failed to get stats: {}", e))?;
-
-        serde_json::to_string(&json!({
-            "status": "running",
-            "workers": if self.pipeline_enabled { "rust_async" } else { "disabled" },
-            "total_entries": stats.total,
-            "by_scope": stats.by_scope,
-            "by_category": stats.by_category,
-            "vec_available": self.vec_available,
-            "pipeline_enabled": self.pipeline_enabled,
-        }))
-        .map_err(|e| format!("Failed to serialize response: {}", e))
+            serde_json::to_string(&json!({
+                "status": "running",
+                "workers": if self.pipeline_enabled { "rust_async" } else { "disabled" },
+                "total_entries": stats.total,
+                "by_scope": stats.by_scope,
+                "by_category": stats.by_category,
+                "vec_available": self.vec_available,
+                "pipeline_enabled": self.pipeline_enabled,
+            }))
+            .map_err(|e| format!("Failed to serialize response: {}", e))
+        })
     }
-}
-
-#[cfg(unix)]
-async fn wait_for_shutdown_signal() {
-    use tokio::signal::unix::{signal, SignalKind};
-
-    let sigint = signal(SignalKind::interrupt());
-    let sigterm = signal(SignalKind::terminate());
-
-    if let (Ok(mut sigint), Ok(mut sigterm)) = (sigint, sigterm) {
-        tokio::select! {
-            _ = sigint.recv() => {}
-            _ = sigterm.recv() => {}
-            _ = tokio::signal::ctrl_c() => {}
-        }
-    } else {
-        let _ = tokio::signal::ctrl_c().await;
-    }
-}
-
-#[cfg(not(unix))]
-async fn wait_for_shutdown_signal() {
-    let _ = tokio::signal::ctrl_c().await;
 }
 
 // ─── ServerHandler Implementation ────────────────────────────────────────────────
@@ -790,6 +750,18 @@ impl ServerHandler for MemoryServer {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Load config from dotenv files (low→high priority, later wins):
+    //   1. ~/.secrets/master.env      (shared API keys)
+    //   2. ~/.sigil/config.env        (user-level defaults)
+    //   3. .sigil/config.env          (project-level overrides, e.g. MEMORY_DB_PATH)
+    //   4. Process env vars           (MCP harness overrides, highest priority)
+    // dotenvy::from_path_override means later files override earlier ones,
+    // but process env vars set before launch always win.
+    let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
+    let _ = dotenvy::from_path(home.join(".secrets/master.env"));
+    let _ = dotenvy::from_path_override(home.join(".sigil/config.env"));
+    let _ = dotenvy::from_path_override(PathBuf::from(".sigil/config.env"));
+
     let db_path = std::env::var("MEMORY_DB_PATH")
         .map(PathBuf::from)
         .unwrap_or_else(|_| {
@@ -804,33 +776,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         tokio::fs::create_dir_all(parent).await?;
     }
 
-    // ── Single-instance guard via flock ──────────────────────────────────────
-    // Prevents multiple server processes from writing to the same database,
-    // which is a common cause of WAL corruption.
-    let lock_path = db_path.with_extension("db.lock");
-    let _lock_file = acquire_instance_lock(&lock_path)?;
-
     let server = MemoryServer::new(db_path.clone())?;
 
-    if server.pipeline_enabled {
-        eprintln!("Pipeline workers: ENABLED");
-        let distiller_store = server.store.clone();
-        let distiller_llm = server.llm.clone();
-        tokio::spawn(async move {
-            pipeline::run_distiller(distiller_store, distiller_llm, 7200).await;
-        });
-    } else {
-        eprintln!("Pipeline workers: DISABLED (set ENABLE_PIPELINE=true to enable)");
-    }
-
-    // ── Startup integrity check ────────────────────────────────────────────
-    {
-        let store = server.lock_store().map_err(|e| format!("lock: {e}"))?;
+    // ── Startup integrity check (per-request open) ─────────────────────────
+    server.with_store(|store| {
         match store.quick_check() {
             Ok(true) => eprintln!("Database integrity: OK"),
             Ok(false) => eprintln!("WARNING: Database may be corrupted! Run PRAGMA integrity_check for details."),
             Err(e) => eprintln!("WARNING: Could not check database integrity: {e}"),
         }
+        Ok(())
+    }).map_err(|e| format!("startup check: {e}"))?;
+
+    if server.pipeline_enabled {
+        eprintln!("Pipeline workers: ENABLED (external)");
+    } else {
+        eprintln!("Pipeline workers: DISABLED (set ENABLE_PIPELINE=true to enable)");
     }
 
     let transport = (stdin(), stdout());
@@ -840,63 +801,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     eprintln!("Vector search: {}", server.vec_available);
     eprintln!("Tools: save_memory, search_memory, get_memory, list_memories, memory_stats, set_state, get_state, extract_facts, ingest_event, get_pipeline_status");
 
-    let shutdown_token = CancellationToken::new();
-    let running = rmcp::service::serve_server_with_ct(server, transport, shutdown_token.clone()).await?;
-    let shutdown_server = running.service().clone();
-    let final_server = running.service().clone();
-    tokio::spawn(async move {
-        wait_for_shutdown_signal().await;
-        eprintln!("Shutdown signal received, stopping Memory MCP Server...");
-        shutdown_server.prepare_shutdown();
-        shutdown_token.cancel();
-    });
-
+    let running = rmcp::service::serve_server(server, transport).await?;
     let quit_reason = running.waiting().await?;
-    final_server.prepare_shutdown();
+
     eprintln!("Memory MCP Server stopped: {:?}", quit_reason);
 
     Ok(())
-}
-
-/// Acquire an advisory file lock to detect multiple server instances.
-/// Returns the lock File which must be kept alive for the process lifetime.
-/// Multiple instances are allowed (busy_timeout handles coordination),
-/// but a warning is emitted so users know about potential contention.
-#[cfg(unix)]
-fn acquire_instance_lock(path: &std::path::Path) -> Result<std::fs::File, Box<dyn std::error::Error>> {
-    let file = std::fs::OpenOptions::new()
-        .create(true)
-        .write(true)
-        .truncate(false)
-        .open(path)?;
-
-    // Try non-blocking exclusive lock — warn but don't fail
-    let ret = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
-    if ret != 0 {
-        eprintln!(
-            "WARNING: Another memory-server instance may be accessing this database (lock file: {}). \
-             Concurrent access is supported via busy_timeout, but avoid heavy parallel writes.",
-            path.display()
-        );
-    }
-
-    // Write PID for debugging
-    use std::io::Write;
-    let mut f = &file;
-    let _ = f.write_all(format!("{}", std::process::id()).as_bytes());
-    let _ = f.flush();
-
-    Ok(file)
-}
-
-#[cfg(not(unix))]
-fn acquire_instance_lock(path: &std::path::Path) -> Result<std::fs::File, Box<dyn std::error::Error>> {
-    // On non-Unix, just create the file as a marker (no real locking)
-    let file = std::fs::OpenOptions::new()
-        .create(true)
-        .write(true)
-        .truncate(false)
-        .open(path)?;
-    eprintln!("WARNING: File locking not supported on this platform. Ensure only one instance runs.");
-    Ok(file)
 }
