@@ -5,12 +5,14 @@
 
 pub mod db;
 pub mod error;
+pub mod hub;
 pub mod noise;
 pub mod scorer;
 pub mod search;
 pub mod types;
 
 pub use error::MemoryError;
+pub use hub::HubCapability;
 pub use types::{HybridScore, MemoryEntry, MemoryEdge, GraphExpandResult, SearchResult, StatsResult};
 pub use search::{SearchOptions, hybrid_search};
 pub use scorer::HybridWeights;
@@ -265,5 +267,42 @@ impl MemoryStore {
     /// Get a deterministic key-value state.
     pub fn get_state_kv(&self, namespace: &str, key: &str) -> Result<Option<(String, u32)>, MemoryError> {
         db::get_state(&self.conn, namespace, key)
+    }
+
+    // ─── Hub Operations ──────────────────────────────────────────────────────
+
+    /// Register or update a hub capability (skill, plugin, or MCP server).
+    pub fn hub_register(&self, cap: &HubCapability) -> Result<(), MemoryError> {
+        db::hub_upsert(&self.conn, cap)
+    }
+
+    /// Get a single hub capability by ID.
+    pub fn hub_get(&self, id: &str) -> Result<Option<HubCapability>, MemoryError> {
+        db::hub_get(&self.conn, id)
+    }
+
+    /// List hub capabilities, optionally filtered by type and enabled status.
+    pub fn hub_list(&self, cap_type: Option<&str>, enabled_only: bool) -> Result<Vec<HubCapability>, MemoryError> {
+        db::hub_list(&self.conn, cap_type, enabled_only)
+    }
+
+    /// Search hub capabilities by name/description.
+    pub fn hub_search(&self, query: &str, cap_type: Option<&str>) -> Result<Vec<HubCapability>, MemoryError> {
+        db::hub_search(&self.conn, query, cap_type)
+    }
+
+    /// Enable or disable a hub capability.
+    pub fn hub_set_enabled(&self, id: &str, enabled: bool) -> Result<bool, MemoryError> {
+        db::hub_set_enabled(&self.conn, id, enabled)
+    }
+
+    /// Record feedback for a hub capability invocation.
+    pub fn hub_record_feedback(&self, id: &str, success: bool, rating: Option<f64>) -> Result<(), MemoryError> {
+        db::hub_record_feedback(&self.conn, id, success, rating)
+    }
+
+    /// Delete a hub capability.
+    pub fn hub_delete(&self, id: &str) -> Result<bool, MemoryError> {
+        db::hub_delete(&self.conn, id)
     }
 }

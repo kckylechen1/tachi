@@ -192,6 +192,82 @@ def test_memory_server():
         check("pipeline status", data.get("status") == "running")
         check("pipeline has global_vec", "global_vec_available" in data or "vec_available" in str(data))
 
+        # ── Test 10: hub_register (global) ──
+        print("\n[Test 10] hub_register (global)")
+        resp = call_tool(proc, "hub_register", {
+            "id": "skill:code-review",
+            "cap_type": "skill",
+            "name": "Code Review",
+            "description": "Review code diffs for bugs and style issues",
+            "definition": '{"prompt": "Review this diff..."}',
+            "scope": "global",
+        })
+        data = extract_text(resp)
+        check("hub_register global", data.get("db") == "global", f"got: {data}")
+        check("hub_register id", data.get("id") == "skill:code-review")
+
+        # ── Test 11: hub_register (project) ──
+        print("\n[Test 11] hub_register (project)")
+        resp = call_tool(proc, "hub_register", {
+            "id": "mcp:github",
+            "cap_type": "mcp",
+            "name": "GitHub MCP",
+            "description": "GitHub API integration",
+            "definition": '{"command": "gh-mcp-server"}',
+            "scope": "project",
+        })
+        data = extract_text(resp)
+        check("hub_register project", data.get("db") == "project", f"got: {data}")
+
+        # ── Test 12: hub_discover ──
+        print("\n[Test 12] hub_discover (list all)")
+        resp = call_tool(proc, "hub_discover", {"enabled_only": True})
+        data = extract_text(resp)
+        check("hub_discover returns list", isinstance(data, list), f"type: {type(data)}")
+        if isinstance(data, list):
+            ids = [c.get("id") for c in data]
+            check("discover has skill", "skill:code-review" in ids, f"ids: {ids}")
+            check("discover has mcp", "mcp:github" in ids, f"ids: {ids}")
+            dbs = set(c.get("db") for c in data)
+            check("discover has both dbs", len(dbs) >= 2, f"dbs: {dbs}")
+
+        # ── Test 13: hub_discover (search) ──
+        print("\n[Test 13] hub_discover (search)")
+        resp = call_tool(proc, "hub_discover", {"query": "code review"})
+        data = extract_text(resp)
+        check("hub_search returns list", isinstance(data, list))
+        if isinstance(data, list) and len(data) > 0:
+            check("hub_search finds skill", data[0].get("id") == "skill:code-review")
+
+        # ── Test 14: hub_get ──
+        print("\n[Test 14] hub_get")
+        resp = call_tool(proc, "hub_get", {"id": "skill:code-review"})
+        data = extract_text(resp)
+        check("hub_get found", data.get("id") == "skill:code-review", f"got: {data}")
+        check("hub_get has definition", "prompt" in data.get("definition", ""))
+
+        # ── Test 15: hub_feedback ──
+        print("\n[Test 15] hub_feedback")
+        resp = call_tool(proc, "hub_feedback", {
+            "id": "skill:code-review",
+            "success": True,
+            "rating": 4.5,
+        })
+        data = extract_text(resp)
+        check("hub_feedback recorded", data.get("recorded") == True, f"got: {data}")
+
+        # verify metrics updated
+        resp = call_tool(proc, "hub_get", {"id": "skill:code-review"})
+        data = extract_text(resp)
+        check("hub_feedback uses incremented", data.get("uses", 0) >= 1, f"uses: {data.get('uses')}")
+
+        # ── Test 16: hub_stats ──
+        print("\n[Test 16] hub_stats")
+        resp = call_tool(proc, "hub_stats")
+        data = extract_text(resp)
+        check("hub_stats total", data.get("total_capabilities", 0) >= 2, f"got: {data}")
+        check("hub_stats by_type", "skill" in data.get("by_type", {}), f"got: {data.get('by_type')}")
+
         # ── Summary ──
         print(f"\n{'='*40}")
         print(f"Results: {passed} passed, {failed} failed")

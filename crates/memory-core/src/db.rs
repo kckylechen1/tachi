@@ -123,6 +123,27 @@ pub fn init_schema(conn: &Connection) -> Result<(), MemoryError> {
             created_at TEXT NOT NULL DEFAULT '',
             PRIMARY KEY (event_hash, worker)
         );
+
+        -- Hub capability registry (skills, plugins, MCP servers)
+        CREATE TABLE IF NOT EXISTS hub_capabilities (
+            id          TEXT PRIMARY KEY,
+            type        TEXT NOT NULL,
+            name        TEXT NOT NULL,
+            version     INTEGER NOT NULL DEFAULT 1,
+            description TEXT NOT NULL DEFAULT '',
+            definition  TEXT NOT NULL DEFAULT '',
+            enabled     INTEGER NOT NULL DEFAULT 1,
+            uses        INTEGER NOT NULL DEFAULT 0,
+            successes   INTEGER NOT NULL DEFAULT 0,
+            failures    INTEGER NOT NULL DEFAULT 0,
+            avg_rating  REAL NOT NULL DEFAULT 0.0,
+            last_used   TEXT,
+            created_at  TEXT NOT NULL DEFAULT '',
+            updated_at  TEXT NOT NULL DEFAULT ''
+        );
+        CREATE INDEX IF NOT EXISTS idx_hub_cap_type ON hub_capabilities(type);
+        CREATE INDEX IF NOT EXISTS idx_hub_cap_name ON hub_capabilities(name);
+        CREATE INDEX IF NOT EXISTS idx_hub_cap_enabled ON hub_capabilities(enabled);
     "#)?;
 
     // Forward-compatible migrations for existing DB files created before
@@ -1305,6 +1326,214 @@ pub fn archive_memory(conn: &Connection, id: &str) -> Result<bool, MemoryError> 
         params![now, id],
     )?;
     Ok(conn.changes() > 0)
+}
+
+// ─── Hub Capability Operations ───────────────────────────────────────────────
+
+use crate::hub::HubCapability;
+
+/// Insert or update a hub capability.
+pub fn hub_upsert(
+    conn: &Connection,
+    cap: &HubCapability,
+) -> Result<(), MemoryError> {
+    let now = now_utc_iso();
+    conn.execute(
+        "INSERT INTO hub_capabilities (id, type, name, version, description, definition, enabled, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?8)
+         ON CONFLICT(id) DO UPDATE SET
+           type = excluded.type,
+           name = excluded.name,
+           version = excluded.version,
+           description = excluded.description,
+           definition = excluded.definition,
+           enabled = excluded.enabled,
+           updated_at = excluded.updated_at",
+        params![
+            &cap.id,
+            &cap.cap_type,
+            &cap.name,
+            cap.version,
+            &cap.description,
+            &cap.definition,
+            cap.enabled as i32,
+            &now,
+        ],
+    )?;
+    Ok(())
+}
+
+/// Get a single hub capability by ID.
+pub fn hub_get(
+    conn: &Connection,
+    id: &str,
+) -> Result<Option<HubCapability>, MemoryError> {
+    let mut stmt = conn.prepare(
+        "SELECT id, type, name, version, description, definition, enabled,
+                uses, successes, failures, avg_rating, last_used, created_at, updated_at
+         FROM hub_capabilities WHERE id = ?1"
+    )?;
+    let result = stmt.query_row(params![id], |row| {
+        Ok(hub_cap_from_row(row))
+    });
+    match result {
+        Ok(cap) => Ok(Some(cap)),
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+        Err(e) => Err(MemoryError::from(e)),
+    }
+}
+
+/// List hub capabilities, optionally filtered by type and enabled status.
+pub fn hub_list(
+    conn: &Connection,
+    cap_type: Option<&str>,
+    enabled_only: bool,
+) -> Result<Vec<HubCapability>, MemoryError> {
+    let mut sql = String::from(
+        "SELECT id, type, name, version, description, definition, enabled,
+                uses, successes, failures, avg_rating, last_used, created_at, updated_at
+         FROM hub_capabilities WHERE 1=1"
+    );
+    let mut param_values: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
+
+    if let Some(t) = cap_type {
+        sql.push_str(" AND type = ?");
+        param_values.push(Box::new(t.to_string()));
+    }
+    if enabled_only {
+        sql.push_str(" AND enabled = 1");
+    }
+    sql.push_str(" ORDER BY name ASC");
+
+    let mut stmt = conn.prepare(&sql)?;
+    let params_refs: Vec<&dyn rusqlite::types::ToSql> = param_values.iter().map(|b| b.as_ref()).collect();
+    let rows = stmt.query_map(params_refs.as_slice(), |row| {
+        Ok(hub_cap_from_row(row))
+    })?;
+
+    let mut caps = Vec::new();
+    for row in rows {
+        caps.push(row?);
+    }
+    Ok(caps)
+}
+
+/// Search hub capabilities by name/description using LIKE.
+pub fn hub_search(
+    conn: &Connection,
+    query: &str,
+    cap_type: Option<&str>,
+) -> Result<Vec<HubCapability>, MemoryError> {
+    let pattern = format!("%{}%", query);
+    let mut sql = String::from(
+        "SELECT id, type, name, version, description, definition, enabled,
+                uses, successes, failures, avg_rating, last_used, created_at, updated_at
+         FROM hub_capabilities
+         WHERE (name LIKE ?1 OR description LIKE ?1)"
+    );
+    let mut param_values: Vec<Box<dyn rusqlite::types::ToSql>> = vec![Box::new(pattern)];
+
+    if let Some(t) = cap_type {
+        sql.push_str(" AND type = ?2");
+        param_values.push(Box::new(t.to_string()));
+    }
+    sql.push_str(" ORDER BY uses DESC, name ASC");
+
+    let mut stmt = conn.prepare(&sql)?;
+    let params_refs: Vec<&dyn rusqlite::types::ToSql> = param_values.iter().map(|b| b.as_ref()).collect();
+    let rows = stmt.query_map(params_refs.as_slice(), |row| {
+        Ok(hub_cap_from_row(row))
+    })?;
+
+    let mut caps = Vec::new();
+    for row in rows {
+        caps.push(row?);
+    }
+    Ok(caps)
+}
+
+/// Enable or disable a hub capability. Returns true if the row was found.
+pub fn hub_set_enabled(
+    conn: &Connection,
+    id: &str,
+    enabled: bool,
+) -> Result<bool, MemoryError> {
+    let now = now_utc_iso();
+    conn.execute(
+        "UPDATE hub_capabilities SET enabled = ?1, updated_at = ?2 WHERE id = ?3",
+        params![enabled as i32, &now, id],
+    )?;
+    Ok(conn.changes() > 0)
+}
+
+/// Record feedback for a hub capability invocation.
+pub fn hub_record_feedback(
+    conn: &Connection,
+    id: &str,
+    success: bool,
+    rating: Option<f64>,
+) -> Result<(), MemoryError> {
+    let now = now_utc_iso();
+    // Update counters
+    conn.execute(
+        "UPDATE hub_capabilities SET
+           uses = uses + 1,
+           successes = successes + ?1,
+           failures = failures + ?2,
+           last_used = ?3,
+           updated_at = ?3
+         WHERE id = ?4",
+        params![
+            success as i32,
+            (!success) as i32,
+            &now,
+            id,
+        ],
+    )?;
+
+    // Update running average rating if provided
+    if let Some(r) = rating {
+        conn.execute(
+            "UPDATE hub_capabilities SET
+               avg_rating = CASE
+                 WHEN uses <= 1 THEN ?1
+                 ELSE avg_rating + (?1 - avg_rating) / uses
+               END
+             WHERE id = ?2",
+            params![r, id],
+        )?;
+    }
+
+    Ok(())
+}
+
+/// Delete a hub capability. Returns true if found and deleted.
+pub fn hub_delete(
+    conn: &Connection,
+    id: &str,
+) -> Result<bool, MemoryError> {
+    conn.execute("DELETE FROM hub_capabilities WHERE id = ?1", params![id])?;
+    Ok(conn.changes() > 0)
+}
+
+/// Helper: build HubCapability from a row.
+fn hub_cap_from_row(row: &rusqlite::Row) -> HubCapability {
+    HubCapability {
+        id: row.get_unwrap(0),
+        cap_type: row.get_unwrap(1),
+        name: row.get_unwrap(2),
+        version: row.get_unwrap::<_, u32>(3),
+        description: row.get_unwrap(4),
+        definition: row.get_unwrap(5),
+        enabled: row.get_unwrap::<_, i32>(6) != 0,
+        uses: row.get_unwrap::<_, i64>(7) as u64,
+        successes: row.get_unwrap::<_, i64>(8) as u64,
+        failures: row.get_unwrap::<_, i64>(9) as u64,
+        avg_rating: row.get_unwrap(10),
+        last_used: row.get_unwrap(11),
+        created_at: row.get_unwrap(12),
+        updated_at: row.get_unwrap(13),
+    }
 }
 
 #[cfg(test)]

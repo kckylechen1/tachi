@@ -235,6 +235,59 @@ impl JsMemoryStore {
         serde_json::to_string(&result)
             .map_err(|e| napi::Error::from_reason(e.to_string()))
     }
+
+    // ─── Hub Operations ──────────────────────────────────────────────────────
+
+    /// Register a hub capability. `cap_json` is a JSON string of HubCapability.
+    #[napi]
+    pub fn hub_register(&self, cap_json: String) -> napi::Result<()> {
+        let cap: memory_core::HubCapability = serde_json::from_str(&cap_json)
+            .map_err(|e| napi::Error::from_reason(format!("invalid capability JSON: {e}")))?;
+        self.inner
+            .lock().unwrap_or_else(|e| e.into_inner())
+            .hub_register(&cap)
+            .map_err(|e| napi::Error::from_reason(e.to_string()))
+    }
+
+    /// Discover hub capabilities. Returns JSON string of HubCapability[].
+    /// Optional query for search, optional cap_type filter.
+    #[napi]
+    pub fn hub_discover(&self, query: Option<String>, cap_type: Option<String>) -> napi::Result<String> {
+        let store = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        let caps = if let Some(ref q) = query {
+            store.hub_search(q, cap_type.as_deref())
+                .map_err(|e| napi::Error::from_reason(e.to_string()))?
+        } else {
+            store.hub_list(cap_type.as_deref(), true)
+                .map_err(|e| napi::Error::from_reason(e.to_string()))?
+        };
+        serde_json::to_string(&caps)
+            .map_err(|e| napi::Error::from_reason(e.to_string()))
+    }
+
+    /// Get a single hub capability by ID. Returns JSON string or null.
+    #[napi]
+    pub fn hub_get(&self, id: String) -> napi::Result<Option<String>> {
+        let cap = self.inner
+            .lock().unwrap_or_else(|e| e.into_inner())
+            .hub_get(&id)
+            .map_err(|e| napi::Error::from_reason(e.to_string()))?;
+        match cap {
+            Some(c) => serde_json::to_string(&c)
+                .map(Some)
+                .map_err(|e| napi::Error::from_reason(e.to_string())),
+            None => Ok(None),
+        }
+    }
+
+    /// Record feedback for a hub capability invocation.
+    #[napi]
+    pub fn hub_feedback(&self, id: String, success: bool, rating: Option<f64>) -> napi::Result<()> {
+        self.inner
+            .lock().unwrap_or_else(|e| e.into_inner())
+            .hub_record_feedback(&id, success, rating)
+            .map_err(|e| napi::Error::from_reason(e.to_string()))
+    }
 }
 
 /// Check if text is noise.

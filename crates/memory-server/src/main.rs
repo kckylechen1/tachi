@@ -7,7 +7,7 @@ mod llm;
 mod prompts;
 
 use chrono::Utc;
-use memory_core::{MemoryEntry, MemoryStore, SearchOptions};
+use memory_core::{HubCapability, MemoryEntry, MemoryStore, SearchOptions};
 use rmcp::{
     model::{ServerCapabilities, ServerInfo, ToolsCapability},
     tool,
@@ -431,6 +431,72 @@ struct IngestEventParams {
 
     /// Messages in the conversation turn
     messages: Vec<Message>,
+}
+
+#[allow(dead_code)]
+fn default_hub_version() -> u32 {
+    1
+}
+
+#[allow(dead_code)]
+fn default_true() -> bool {
+    true
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+struct HubRegisterParams {
+    /// Unique capability ID, e.g. "skill:code-review", "mcp:github"
+    id: String,
+    /// Type: "skill" | "plugin" | "mcp"
+    cap_type: String,
+    /// Human-readable name
+    name: String,
+    /// Short description
+    #[serde(default)]
+    description: String,
+    /// JSON string of capability definition (prompt template, manifest, config)
+    #[serde(default)]
+    definition: String,
+    /// Version number
+    #[serde(default = "default_hub_version")]
+    version: u32,
+    /// Target database scope: "global" or "project" (default)
+    #[serde(default = "default_scope")]
+    scope: String,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+struct HubDiscoverParams {
+    /// Optional search query (searches name + description)
+    #[serde(default)]
+    query: Option<String>,
+    /// Optional type filter: "skill" | "plugin" | "mcp"
+    #[serde(default)]
+    cap_type: Option<String>,
+    /// Only return enabled capabilities (default: true)
+    #[serde(default = "default_true")]
+    enabled_only: bool,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+struct HubGetParams {
+    /// Capability ID to retrieve
+    id: String,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+struct HubFeedbackParams {
+    /// Capability ID
+    id: String,
+    /// Whether the invocation was successful
+    success: bool,
+    /// Optional user rating (0.0 - 5.0)
+    #[serde(default)]
+    rating: Option<f64>,
 }
 
 // ─── Tool Implementations ────────────────────────────────────────────────────────
@@ -999,6 +1065,191 @@ impl MemoryServer {
         }))
         .map_err(|e| format!("Failed to serialize response: {}", e))
     }
+
+    #[tool(description = "Register a capability (skill, plugin, or MCP server) in the Hub.")]
+    async fn hub_register(&self, #[tool(aggr)] params: HubRegisterParams) -> Result<String, String> {
+        let (target_db, warning) = self.resolve_write_scope(&params.scope);
+        let cap = HubCapability {
+            id: params.id.clone(),
+            cap_type: params.cap_type,
+            name: params.name,
+            version: params.version,
+            description: params.description,
+            definition: params.definition,
+            enabled: true,
+            uses: 0,
+            successes: 0,
+            failures: 0,
+            avg_rating: 0.0,
+            last_used: None,
+            created_at: String::new(),
+            updated_at: String::new(),
+        };
+        self.with_store_for_scope(target_db, |store| {
+            store
+                .hub_register(&cap)
+                .map_err(|e| format!("Failed to register: {e}"))
+        })?;
+        let mut resp = serde_json::Map::new();
+        resp.insert("id".into(), json!(params.id));
+        resp.insert("db".into(), json!(target_db.as_str()));
+        resp.insert("version".into(), json!(params.version));
+        if let Some(w) = warning {
+            resp.insert("warning".into(), json!(w));
+        }
+        serde_json::to_string(&serde_json::Value::Object(resp))
+            .map_err(|e| format!("serialize: {e}"))
+    }
+
+    #[tool(description = "Discover available capabilities (skills, plugins, MCP servers) in the Hub.")]
+    async fn hub_discover(&self, #[tool(aggr)] params: HubDiscoverParams) -> Result<String, String> {
+        let cap_type = params.cap_type.as_deref();
+
+        let global_caps = self.with_global_store(|store| {
+            if let Some(ref q) = params.query {
+                store
+                    .hub_search(q, cap_type)
+                    .map_err(|e| format!("hub search global: {e}"))
+            } else {
+                store
+                    .hub_list(cap_type, params.enabled_only)
+                    .map_err(|e| format!("hub list global: {e}"))
+            }
+        })?;
+
+        let project_caps = if self.project_db_path.is_some() {
+            self.with_project_store(|store| {
+                if let Some(ref q) = params.query {
+                    store
+                        .hub_search(q, cap_type)
+                        .map_err(|e| format!("hub search project: {e}"))
+                } else {
+                    store
+                        .hub_list(cap_type, params.enabled_only)
+                        .map_err(|e| format!("hub list project: {e}"))
+                }
+            })?
+        } else {
+            vec![]
+        };
+
+        let mut seen = HashSet::new();
+        let mut output: Vec<serde_json::Value> = Vec::new();
+
+        for cap in &project_caps {
+            seen.insert(cap.id.clone());
+            let mut obj = serde_json::to_value(cap).unwrap_or(json!(null));
+            if let Some(o) = obj.as_object_mut() {
+                o.insert("db".into(), json!("project"));
+            }
+            output.push(obj);
+        }
+        for cap in &global_caps {
+            if !seen.insert(cap.id.clone()) {
+                continue;
+            }
+            let mut obj = serde_json::to_value(cap).unwrap_or(json!(null));
+            if let Some(o) = obj.as_object_mut() {
+                o.insert("db".into(), json!("global"));
+            }
+            output.push(obj);
+        }
+
+        serde_json::to_string(&output).map_err(|e| format!("serialize: {e}"))
+    }
+
+    #[tool(description = "Get a specific capability from the Hub by ID.")]
+    async fn hub_get(&self, #[tool(aggr)] params: HubGetParams) -> Result<String, String> {
+        if self.project_db_path.is_some() {
+            if let Some(cap) = self.with_project_store(|store| {
+                store
+                    .hub_get(&params.id)
+                    .map_err(|e| format!("hub get project: {e}"))
+            })? {
+                let mut obj = serde_json::to_value(&cap).unwrap_or(json!(null));
+                if let Some(o) = obj.as_object_mut() {
+                    o.insert("db".into(), json!("project"));
+                }
+                return serde_json::to_string(&obj).map_err(|e| format!("serialize: {e}"));
+            }
+        }
+        match self.with_global_store(|store| {
+            store
+                .hub_get(&params.id)
+                .map_err(|e| format!("hub get global: {e}"))
+        })? {
+            Some(cap) => {
+                let mut obj = serde_json::to_value(&cap).unwrap_or(json!(null));
+                if let Some(o) = obj.as_object_mut() {
+                    o.insert("db".into(), json!("global"));
+                }
+                serde_json::to_string(&obj).map_err(|e| format!("serialize: {e}"))
+            }
+            None => serde_json::to_string(&json!({"error": "Capability not found"}))
+                .map_err(|e| format!("serialize: {e}")),
+        }
+    }
+
+    #[tool(description = "Record feedback for a Hub capability invocation.")]
+    async fn hub_feedback(&self, #[tool(aggr)] params: HubFeedbackParams) -> Result<String, String> {
+        if self.project_db_path.is_some() {
+            let found = self.with_project_store(|store| {
+                store
+                    .hub_get(&params.id)
+                    .map_err(|e| format!("hub get: {e}"))
+            })?;
+            if found.is_some() {
+                self.with_project_store(|store| {
+                    store
+                        .hub_record_feedback(&params.id, params.success, params.rating)
+                        .map_err(|e| format!("feedback: {e}"))
+                })?;
+                return serde_json::to_string(&json!({"id": params.id, "recorded": true, "db": "project"}))
+                    .map_err(|e| format!("serialize: {e}"));
+            }
+        }
+        self.with_global_store(|store| {
+            store
+                .hub_record_feedback(&params.id, params.success, params.rating)
+                .map_err(|e| format!("feedback: {e}"))
+        })?;
+        serde_json::to_string(&json!({"id": params.id, "recorded": true, "db": "global"}))
+            .map_err(|e| format!("serialize: {e}"))
+    }
+
+    #[tool(description = "Get Hub capability statistics and metrics.")]
+    async fn hub_stats(&self) -> Result<String, String> {
+        let global_caps = self.with_global_store(|store| {
+            store.hub_list(None, false).map_err(|e| format!("hub list: {e}"))
+        })?;
+        let project_caps = if self.project_db_path.is_some() {
+            self.with_project_store(|store| {
+                store.hub_list(None, false).map_err(|e| format!("hub list: {e}"))
+            })?
+        } else {
+            vec![]
+        };
+
+        let total = global_caps.len() + project_caps.len();
+        let mut by_type: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+        let all_caps: Vec<&HubCapability> = global_caps.iter().chain(project_caps.iter()).collect();
+        for cap in &all_caps {
+            *by_type.entry(cap.cap_type.clone()).or_insert(0) += 1;
+        }
+        let total_uses: u64 = all_caps.iter().map(|c| c.uses).sum();
+        let total_successes: u64 = all_caps.iter().map(|c| c.successes).sum();
+
+        serde_json::to_string(&json!({
+            "total_capabilities": total,
+            "by_type": by_type,
+            "total_uses": total_uses,
+            "total_successes": total_successes,
+            "success_rate": if total_uses > 0 { total_successes as f64 / total_uses as f64 } else { 0.0 },
+            "global_count": global_caps.len(),
+            "project_count": project_caps.len(),
+        }))
+        .map_err(|e| format!("serialize: {e}"))
+    }
 }
 
 // ─── ServerHandler Implementation ────────────────────────────────────────────────
@@ -1116,7 +1367,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "Vector search: global={}, project={}",
         server.global_vec_available, server.project_vec_available
     );
-    eprintln!("Tools: save_memory, search_memory, get_memory, list_memories, memory_stats, set_state, get_state, extract_facts, ingest_event, get_pipeline_status");
+    eprintln!("Tools: save_memory, search_memory, get_memory, list_memories, memory_stats, set_state, get_state, extract_facts, ingest_event, get_pipeline_status, hub_register, hub_discover, hub_get, hub_feedback, hub_stats");
 
     let running = rmcp::service::serve_server(server, transport).await?;
     let quit_reason = running.waiting().await?;
