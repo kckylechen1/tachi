@@ -60,3 +60,6 @@ venv.bak/
 # Local test data
 data/
 .envrc
+
+# Design docs (local only)
+docs/superpowers/
