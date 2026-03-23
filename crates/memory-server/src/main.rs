@@ -1274,8 +1274,20 @@ impl ServerHandler for MemoryServer {
 
 // ─── Main ────────────────────────────────────────────────────────────────────────
 
+fn main() {
+    let args: Vec<String> = std::env::args().collect();
+    if args.iter().any(|a| a == "--version" || a == "-V") {
+        println!("sigil {}", env!("CARGO_PKG_VERSION"));
+        std::process::exit(0);
+    }
+    if let Err(e) = tokio_main() {
+        eprintln!("Fatal: {e}");
+        std::process::exit(1);
+    }
+}
+
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+async fn tokio_main() -> Result<(), Box<dyn std::error::Error>> {
     // Load config from dotenv files (same as before)
     let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
     let _ = dotenvy::from_path(home.join(".secrets/master.env"));
