@@ -269,6 +269,45 @@ def test_memory_server():
         check("hub_stats by_type", "skill" in data.get("by_type", {}), f"got: {data.get('by_type')}")
 
         # ── Summary ──
+        # ── Test 17: hub_call (MCP proxy spike) ──
+        print("\n[Test 17] hub_call (MCP proxy)")
+        # First register the test echo MCP server
+        import os as _os
+        echo_server_path = _os.path.join(_os.path.dirname(__file__), "tests/test_echo_mcp_server.py")
+        resp = call_tool(proc, "hub_register", {
+            "id": "mcp:test-echo",
+            "cap_type": "mcp",
+            "name": "Test Echo Server",
+            "description": "Test MCP server with echo and add tools",
+            "definition": json.dumps({
+                "transport": "stdio",
+                "command": "python3",
+                "args": [echo_server_path],
+            }),
+            "scope": "global",
+        })
+        data = extract_text(resp)
+        check("register mcp server", data.get("id") == "mcp:test-echo", f"got: {data}")
+
+        # Call echo tool through hub_call
+        resp = call_tool(proc, "hub_call", {
+            "server_id": "mcp:test-echo",
+            "tool_name": "echo",
+            "arguments": {"text": "hello from tachi"},
+        })
+        data = extract_text(resp)
+        check("hub_call echo", "hello from tachi" in str(data.get("content", [])), f"got: {data}")
+        check("hub_call not error", data.get("is_error") == False, f"got: {data}")
+
+        # Call add tool through hub_call
+        resp = call_tool(proc, "hub_call", {
+            "server_id": "mcp:test-echo",
+            "tool_name": "add",
+            "arguments": {"a": 17, "b": 25},
+        })
+        data = extract_text(resp)
+        check("hub_call add", "42" in str(data.get("content", [])), f"got: {data}")
+
         print(f"\n{'='*40}")
         print(f"Results: {passed} passed, {failed} failed")
         return failed == 0

@@ -5,7 +5,7 @@ edition = "2021"
 
 [dependencies]
 memory-core = { path = "../memory-core" }
-rmcp = { version = "0.1", features = ["server", "transport-io", "macros"] }
+rmcp = { version = "0.1", features = ["server", "transport-io", "macros", "client", "transport-child-process"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tokio = { version = "1", features = ["full"] }

@@ -330,6 +330,61 @@ struct SearchMemoryParams {
     graph_relation_filter: Option<String>,
 }
 
+impl SearchMemoryParams {
+    /// Build SearchOptions from params, only differing by vec_available per DB.
+    fn to_search_options(&self, vec_available: bool) -> SearchOptions {
+        SearchOptions {
+            top_k: self.top_k,
+            path_prefix: self.path_prefix.clone(),
+            include_archived: self.include_archived,
+            candidates_per_channel: self.candidates_per_channel,
+            mmr_threshold: self.mmr_threshold,
+            graph_expand_hops: self.graph_expand_hops,
+            graph_relation_filter: self.graph_relation_filter.clone(),
+            vec_available,
+            ..Default::default()
+        }
+    }
+}
+
+/// Build a MemoryEntry from a JSON fact value (shared by extract_facts and ingest_event).
+fn fact_to_entry(fact: &serde_json::Value, source: &str, metadata: serde_json::Value) -> Option<MemoryEntry> {
+    let text = fact["text"].as_str().unwrap_or("").to_string();
+    if text.is_empty() {
+        return None;
+    }
+    let topic = fact["topic"].as_str().unwrap_or("").to_string();
+    let importance = fact["importance"].as_f64().unwrap_or(0.7);
+    let keywords: Vec<String> = fact["keywords"]
+        .as_array()
+        .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+        .unwrap_or_default();
+    let scope = fact["scope"].as_str().unwrap_or("general").to_string();
+    let summary = text.chars().take(100).collect::<String>();
+    Some(MemoryEntry {
+        id: uuid::Uuid::new_v4().to_string(),
+        path: format!("/{}/{}", scope, topic.replace(' ', "_")),
+        summary,
+        text,
+        importance,
+        timestamp: Utc::now().to_rfc3339(),
+        category: "fact".to_string(),
+        topic,
+        keywords,
+        persons: vec![],
+        entities: vec![],
+        location: String::new(),
+        source: source.to_string(),
+        scope,
+        archived: false,
+        access_count: 0,
+        last_access: None,
+        revision: 1,
+        metadata,
+        vector: None,
+    })
+}
+
 #[allow(dead_code)]
 fn default_top_k() -> usize {
     6
@@ -499,6 +554,18 @@ struct HubFeedbackParams {
     rating: Option<f64>,
 }
 
+#[allow(dead_code)]
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+struct HubCallParams {
+    /// MCP server capability ID (e.g. "mcp:github")
+    server_id: String,
+    /// Tool name to call on the child MCP server
+    tool_name: String,
+    /// JSON arguments to pass to the tool
+    #[serde(default)]
+    arguments: serde_json::Value,
+}
+
 // ─── Tool Implementations ────────────────────────────────────────────────────────
 
 #[tool(tool_box)]
@@ -573,17 +640,7 @@ impl MemoryServer {
 
         let mut combined_results: Vec<(memory_core::SearchResult, DbScope)> = Vec::new();
 
-        let mut global_opts = SearchOptions {
-            top_k: params.top_k,
-            path_prefix: params.path_prefix.clone(),
-            include_archived: params.include_archived,
-            candidates_per_channel: params.candidates_per_channel,
-            mmr_threshold: params.mmr_threshold,
-            graph_expand_hops: params.graph_expand_hops,
-            graph_relation_filter: params.graph_relation_filter.clone(),
-            ..Default::default()
-        };
-        global_opts.vec_available = self.global_vec_available;
+        let global_opts = params.to_search_options(self.global_vec_available);
 
         let global_results = self.with_global_store(|store| {
             store
@@ -593,17 +650,7 @@ impl MemoryServer {
         combined_results.extend(global_results.into_iter().map(|r| (r, DbScope::Global)));
 
         if self.project_db_path.is_some() {
-            let mut project_opts = SearchOptions {
-                top_k: params.top_k,
-                path_prefix: params.path_prefix.clone(),
-                include_archived: params.include_archived,
-                candidates_per_channel: params.candidates_per_channel,
-                mmr_threshold: params.mmr_threshold,
-                graph_expand_hops: params.graph_expand_hops,
-                graph_relation_filter: params.graph_relation_filter.clone(),
-                ..Default::default()
-            };
-            project_opts.vec_available = self.project_vec_available;
+            let project_opts = params.to_search_options(self.project_vec_available);
 
             let project_results = self.with_project_store(|store| {
                 store
@@ -872,41 +919,12 @@ impl MemoryServer {
             let mut saved = 0;
 
             for fact in &facts {
-                let text = fact["text"].as_str().unwrap_or("").to_string();
-                if text.is_empty() {
+                let Some(entry) = fact_to_entry(
+                    fact,
+                    "extraction",
+                    serde_json::json!({"source": params.source}),
+                ) else {
                     continue;
-                }
-
-                let topic = fact["topic"].as_str().unwrap_or("").to_string();
-                let importance = fact["importance"].as_f64().unwrap_or(0.7);
-                let keywords: Vec<String> = fact["keywords"]
-                    .as_array()
-                    .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
-                    .unwrap_or_default();
-                let scope = fact["scope"].as_str().unwrap_or("general").to_string();
-                let summary = text.chars().take(100).collect::<String>();
-
-                let entry = MemoryEntry {
-                    id: uuid::Uuid::new_v4().to_string(),
-                    path: format!("/{}/{}", scope, topic.replace(' ', "_")),
-                    summary,
-                    text,
-                    importance,
-                    timestamp: Utc::now().to_rfc3339(),
-                    category: "fact".to_string(),
-                    topic,
-                    keywords,
-                    persons: vec![],
-                    entities: vec![],
-                    location: String::new(),
-                    source: "extraction".to_string(),
-                    scope,
-                    archived: false,
-                    access_count: 0,
-                    last_access: None,
-                    revision: 1,
-                    metadata: serde_json::json!({"source": params.source}),
-                    vector: None,
                 };
 
                 if store.upsert(&entry).is_ok() {
@@ -955,44 +973,15 @@ impl MemoryServer {
         self.with_store_for_scope(target_db, |store| {
             if !facts.is_empty() {
                 for fact in &facts {
-                    let text = fact["text"].as_str().unwrap_or("").to_string();
-                    if text.is_empty() {
-                        continue;
-                    }
-
-                    let topic = fact["topic"].as_str().unwrap_or("").to_string();
-                    let importance = fact["importance"].as_f64().unwrap_or(0.7);
-                    let keywords: Vec<String> = fact["keywords"]
-                        .as_array()
-                        .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
-                        .unwrap_or_default();
-                    let scope = fact["scope"].as_str().unwrap_or("general").to_string();
-                    let summary = text.chars().take(100).collect::<String>();
-
-                    let entry = MemoryEntry {
-                        id: uuid::Uuid::new_v4().to_string(),
-                        path: format!("/{}/{}", scope, topic.replace(' ', "_")),
-                        summary,
-                        text,
-                        importance,
-                        timestamp: Utc::now().to_rfc3339(),
-                        category: "fact".to_string(),
-                        topic,
-                        keywords,
-                        persons: vec![],
-                        entities: vec![],
-                        location: String::new(),
-                        source: format!("conversation:{}", params.conversation_id),
-                        scope,
-                        archived: false,
-                        access_count: 0,
-                        last_access: None,
-                        revision: 1,
-                        metadata: serde_json::json!({
+                    let Some(entry) = fact_to_entry(
+                        fact,
+                        &format!("conversation:{}", params.conversation_id),
+                        serde_json::json!({
                             "conversation_id": params.conversation_id,
                             "turn_id": params.turn_id,
                         }),
-                        vector: None,
+                    ) else {
+                        continue;
                     };
 
                     if store.upsert(&entry).is_ok() {
@@ -1250,6 +1239,117 @@ impl MemoryServer {
         }))
         .map_err(|e| format!("serialize: {e}"))
     }
+
+    #[tool(description = "Call a tool on a registered MCP server through the Hub. Spawns the child server, connects, executes the tool, and returns the result.")]
+    async fn hub_call(
+        &self,
+        #[tool(aggr)] params: HubCallParams,
+    ) -> Result<String, String> {
+        // Look up the MCP server definition from Hub (project first, then global)
+        let cap = {
+            let mut found = None;
+            if self.project_db_path.is_some() {
+                found = self.with_project_store(|store| {
+                    store.hub_get(&params.server_id).map_err(|e| format!("hub get: {e}"))
+                })?;
+            }
+            if found.is_none() {
+                found = self.with_global_store(|store| {
+                    store.hub_get(&params.server_id).map_err(|e| format!("hub get: {e}"))
+                })?;
+            }
+            found.ok_or_else(|| format!("MCP server '{}' not found in Hub", params.server_id))?
+        };
+
+        if cap.cap_type != "mcp" {
+            return Err(format!("'{}' is type '{}', not 'mcp'", params.server_id, cap.cap_type));
+        }
+
+        // Parse the server definition
+        let def: serde_json::Value = serde_json::from_str(&cap.definition)
+            .map_err(|e| format!("invalid definition JSON: {e}"))?;
+
+        let transport_type = def["transport"].as_str().unwrap_or("stdio");
+        if transport_type != "stdio" {
+            return Err("Only stdio transport is supported in this version".to_string());
+        }
+
+        let command = def["command"].as_str()
+            .ok_or_else(|| "definition missing 'command' field".to_string())?;
+        let args: Vec<String> = def["args"].as_array()
+            .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+            .unwrap_or_default();
+
+        // Resolve ${VAR} references in env
+        let env_map: std::collections::HashMap<String, String> = if let Some(env_obj) = def["env"].as_object() {
+            let mut resolved = std::collections::HashMap::new();
+            for (k, v) in env_obj {
+                if let Some(val) = v.as_str() {
+                    let resolved_val = if val.starts_with("${") && val.ends_with('}') {
+                        let var_name = &val[2..val.len()-1];
+                        std::env::var(var_name).unwrap_or_default()
+                    } else {
+                        val.to_string()
+                    };
+                    resolved.insert(k.clone(), resolved_val);
+                }
+            }
+            resolved
+        } else {
+            std::collections::HashMap::new()
+        };
+
+        // Spawn child MCP server and connect as client
+        let mut cmd = tokio::process::Command::new(command);
+        cmd.args(&args);
+        // Only pass explicit env, not full parent env
+        cmd.env_clear();
+        // But inherit PATH so command can be found
+        if let Ok(path) = std::env::var("PATH") {
+            cmd.env("PATH", &path);
+        }
+        if let Ok(home) = std::env::var("HOME") {
+            cmd.env("HOME", &home);
+        }
+        for (k, v) in &env_map {
+            cmd.env(k, v);
+        }
+
+        let transport = rmcp::transport::TokioChildProcess::new(&mut cmd)
+            .map_err(|e| format!("failed to spawn '{}': {e}", command))?;
+
+        let client = rmcp::ServiceExt::serve((), transport).await
+            .map_err(|e| format!("MCP handshake failed with '{}': {e}", command))?;
+
+        // Call the tool
+        let call_params = rmcp::model::CallToolRequestParam {
+            name: std::borrow::Cow::Owned(params.tool_name.clone()),
+            arguments: params.arguments.as_object().cloned(),
+        };
+
+        let result = client.peer().call_tool(call_params).await
+            .map_err(|e| format!("tool call '{}' failed: {e}", params.tool_name))?;
+
+        // Shut down the child
+        let _ = client.cancel().await;
+
+        // Convert result to JSON string
+        let content_texts: Vec<String> = result.content.iter().filter_map(|c| {
+            // Extract text content from MCP Content blocks
+            serde_json::to_value(c).ok().and_then(|v| {
+                v.get("text").and_then(|t| t.as_str().map(String::from))
+            })
+        }).collect();
+
+        let response = json!({
+            "server": params.server_id,
+            "tool": params.tool_name,
+            "content": content_texts,
+            "is_error": result.is_error.unwrap_or(false),
+        });
+
+        serde_json::to_string(&response).map_err(|e| format!("serialize: {e}"))
+    }
 }
 
 // ─── ServerHandler Implementation ────────────────────────────────────────────────
@@ -1290,7 +1390,25 @@ fn main() {
 async fn tokio_main() -> Result<(), Box<dyn std::error::Error>> {
     // Load config from dotenv files (same as before)
     let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
+    let expand_user_path = |raw: &str| {
+        if raw == "~" {
+            home.clone()
+        } else if let Some(rest) = raw.strip_prefix("~/") {
+            home.join(rest)
+        } else {
+            PathBuf::from(raw)
+        }
+    };
+
+    let app_home = std::env::var("TACHI_HOME")
+        .or_else(|_| std::env::var("SIGIL_HOME"))
+        .map(|v| expand_user_path(&v))
+        .unwrap_or_else(|_| home.join(".tachi"));
+
     let _ = dotenvy::from_path(home.join(".secrets/master.env"));
+    let _ = dotenvy::from_path_override(app_home.join("config.env"));
+    let _ = dotenvy::from_path_override(PathBuf::from(".tachi/config.env"));
+    // Backward compatibility with old Sigil paths
     let _ = dotenvy::from_path_override(home.join(".sigil/config.env"));
     let _ = dotenvy::from_path_override(PathBuf::from(".sigil/config.env"));
 
@@ -1298,27 +1416,55 @@ async fn tokio_main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Resolve global DB path
     let global_db_path = if let Ok(p) = std::env::var("MEMORY_DB_PATH") {
-        PathBuf::from(p)
+        expand_user_path(&p)
     } else {
-        let default_global = home.join(".sigil/global/memory.db");
-        // Migration: move legacy ~/.sigil/memory.db → ~/.sigil/global/memory.db
-        let legacy = home.join(".sigil/memory.db");
-        if legacy.exists() && !default_global.exists() {
-            if let Some(parent) = default_global.parent() {
-                tokio::fs::create_dir_all(parent).await?;
+        let default_global = app_home.join("global/memory.db");
+        // Migration: move legacy DBs into ${TACHI_HOME}/global/memory.db
+        let legacy_candidates = vec![
+            app_home.join("memory.db"),
+            home.join(".sigil/global/memory.db"),
+            home.join(".sigil/memory.db"),
+        ];
+        if !default_global.exists() {
+            for legacy in legacy_candidates {
+                if legacy.exists() {
+                    if let Some(parent) = default_global.parent() {
+                        tokio::fs::create_dir_all(parent).await?;
+                    }
+                    tokio::fs::copy(&legacy, &default_global).await?;
+                    eprintln!(
+                        "Migrated legacy DB: {} → {}",
+                        legacy.display(),
+                        default_global.display()
+                    );
+                    break;
+                }
             }
-            tokio::fs::rename(&legacy, &default_global).await?;
-            eprintln!(
-                "Migrated legacy DB: {} → {}",
-                legacy.display(),
-                default_global.display()
-            );
         }
         default_global
     };
 
     // Resolve project DB path
-    let project_db_path = git_root.as_ref().map(|root| root.join(".sigil/memory.db"));
+    let project_db_path = if let Some(root) = git_root.as_ref() {
+        let project_default = root.join(".tachi/memory.db");
+        let project_legacy = root.join(".sigil/memory.db");
+
+        if project_legacy.exists() && !project_default.exists() {
+            if let Some(parent) = project_default.parent() {
+                tokio::fs::create_dir_all(parent).await?;
+            }
+            tokio::fs::copy(&project_legacy, &project_default).await?;
+            eprintln!(
+                "Migrated legacy project DB: {} → {}",
+                project_legacy.display(),
+                project_default.display()
+            );
+        }
+
+        Some(project_default)
+    } else {
+        None
+    };
 
     // Ensure parent dirs exist
     if let Some(parent) = global_db_path.parent() {
