@@ -352,4 +352,29 @@ impl MemoryStore {
     ) -> Result<(), MemoryError> {
         db::update_agent_known_state(&self.conn, agent_id, entries)
     }
+
+    // ─── Semantic Sandboxing ─────────────────────────────────────────────────
+
+    /// Set a sandbox access rule for an agent role + path pattern.
+    pub fn set_sandbox_rule(
+        &self,
+        agent_role: &str,
+        path_pattern: &str,
+        access_level: &str,
+    ) -> Result<(), MemoryError> {
+        db::set_sandbox_rule(&self.conn, agent_role, path_pattern, access_level)
+    }
+
+    /// Check if an agent role can access a path for a given operation.
+    /// Returns (allowed, matching_rule_description).
+    /// Advisory mode — not enforced in search_memory yet.
+    // TODO: Integrate enforcement into search_memory by filtering results based on agent role
+    pub fn check_sandbox_access(
+        &self,
+        agent_role: &str,
+        path: &str,
+        operation: &str,
+    ) -> Result<(bool, Option<String>), MemoryError> {
+        db::check_sandbox_access(&self.conn, agent_role, path, operation)
+    }
 }
