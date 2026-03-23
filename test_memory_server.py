@@ -220,14 +220,14 @@ def test_memory_server():
         check("hub_register project", data.get("db") == "project", f"got: {data}")
 
         # ── Test 12: hub_discover ──
-        print("\n[Test 12] hub_discover (list all)")
-        resp = call_tool(proc, "hub_discover", {"enabled_only": True})
+        print("\n[Test 12] hub_discover (list all, include disabled)")
+        resp = call_tool(proc, "hub_discover", {"enabled_only": False})
         data = extract_text(resp)
         check("hub_discover returns list", isinstance(data, list), f"type: {type(data)}")
         if isinstance(data, list):
             ids = [c.get("id") for c in data]
             check("discover has skill", "skill:code-review" in ids, f"ids: {ids}")
-            check("discover has mcp", "mcp:github" in ids, f"ids: {ids}")
+            check("discover has mcp (disabled)", "mcp:github" in ids, f"ids: {ids}")
             dbs = set(c.get("db") for c in data)
             check("discover has both dbs", len(dbs) >= 2, f"dbs: {dbs}")
 
@@ -328,6 +328,42 @@ def test_memory_server():
         resp = call_tool(proc, "test-echo__echo", {"text": "transparent proxy works"})
         data = extract_text(resp)
         check("proxy echo works", "transparent proxy works" in str(data), f"got: {data}")
+
+        print("\n[Test 20] skill dynamic tool mapping")
+        resp = call_tool(proc, "hub_register", {
+            "id": "skill:smart-review",
+            "cap_type": "skill",
+            "name": "Smart Review",
+            "description": "Run code review skill through Tachi dynamic tool",
+            "definition": json.dumps({
+                "prompt": "Review this code:\n{{input}}\n",
+                "mock_response": "looks good",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {"input": {"type": "string"}},
+                    "required": ["input"]
+                }
+            }),
+            "scope": "global",
+        })
+        data = extract_text(resp)
+        check("register skill dynamic tool", data.get("id") == "skill:smart-review", f"got: {data}")
+        check("register returns tool_name", data.get("tool_name") == "tachi_skill_smart_review", f"got: {data}")
+
+        resp = send_request(proc, {
+            "jsonrpc": "2.0", "id": next_id(), "method": "tools/list",
+            "params": {},
+        })
+        skill_names = []
+        try:
+            skill_names = [t["name"] for t in resp["result"]["tools"]]
+        except (KeyError, TypeError):
+            pass
+        check("tools/list has skill tool", "tachi_skill_smart_review" in skill_names, f"tools: {[n for n in skill_names if n.startswith('tachi_skill_')]}")
+
+        resp = call_tool(proc, "tachi_skill_smart_review", {"input": "fn test() {}"})
+        data = extract_text(resp)
+        check("skill tool executes", data.get("output") == "looks good", f"got: {data}")
 
         print(f"\n{'='*40}")
         print(f"Results: {passed} passed, {failed} failed")

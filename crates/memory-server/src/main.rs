@@ -15,7 +15,7 @@ use rmcp::{
 };
 use schemars::JsonSchema;
 use serde::Deserialize;
-use serde_json::json;
+use serde_json::{json, Value};
 use std::collections::hash_map::DefaultHasher;
 use std::collections::{HashMap, HashSet};
 use std::future::Future;
@@ -23,6 +23,7 @@ use std::hash::{Hash, Hasher};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
+use std::time::{Duration, Instant};
 use tokio::io::{stdin, stdout};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -117,6 +118,46 @@ struct MemoryServer {
     pipeline_enabled: bool,
     /// Cached proxy tools from registered MCP servers: server_id → Vec<Tool>
     proxy_tools: Arc<StdMutex<HashMap<String, Vec<rmcp::model::Tool>>>>,
+    skill_tools: Arc<StdMutex<HashMap<String, String>>>,
+    skill_tool_defs: Arc<StdMutex<HashMap<String, rmcp::model::Tool>>>,
+    pool: Arc<McpClientPool>,
+}
+
+// ─── MCP Client Connection Pool ──────────────────────────────────────────────
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum CircuitState {
+    Closed,
+    Open { until: Instant },
+    HalfOpen,
+}
+
+struct ChildConnection {
+    /// The running MCP client service — we call peer() on this
+    client: rmcp::service::RunningService<rmcp::service::RoleClient, ()>,
+    last_used: Instant,
+}
+
+struct McpClientPool {
+    /// Active connections: server_name → connection
+    connections: std::sync::Mutex<HashMap<String, ChildConnection>>,
+    /// Circuit breaker state per server
+    circuits: std::sync::Mutex<HashMap<String, (CircuitState, u32)>>,
+    /// Per-child concurrency semaphores
+    semaphores: std::sync::Mutex<HashMap<String, Arc<tokio::sync::Semaphore>>>,
+    /// Idle TTL before auto-disconnect
+    idle_ttl: Duration,
+}
+
+impl McpClientPool {
+    fn new() -> Self {
+        Self {
+            connections: std::sync::Mutex::new(HashMap::new()),
+            circuits: std::sync::Mutex::new(HashMap::new()),
+            semaphores: std::sync::Mutex::new(HashMap::new()),
+            idle_ttl: Duration::from_secs(300),
+        }
+    }
 }
 
 impl MemoryServer {
@@ -151,6 +192,9 @@ impl MemoryServer {
             llm,
             pipeline_enabled,
             proxy_tools: Arc::new(StdMutex::new(HashMap::new())),
+            skill_tools: Arc::new(StdMutex::new(HashMap::new())),
+            skill_tool_defs: Arc::new(StdMutex::new(HashMap::new())),
+            pool: Arc::new(McpClientPool::new()),
         })
     }
 
@@ -201,6 +245,115 @@ impl MemoryServer {
             )
         }
     }
+
+    fn get_capability(&self, cap_id: &str) -> Result<HubCapability, rmcp::Error> {
+        let mut found = None;
+        if self.project_db_path.is_some() {
+            found = self
+                .with_project_store(|store| {
+                    store
+                        .hub_get(cap_id)
+                        .map_err(|e| format!("hub get project: {e}"))
+                })
+                .map_err(|e| rmcp::Error::internal_error(e, None))?;
+        }
+        if found.is_none() {
+            found = self
+                .with_global_store(|store| {
+                    store
+                        .hub_get(cap_id)
+                        .map_err(|e| format!("hub get global: {e}"))
+                })
+                .map_err(|e| rmcp::Error::internal_error(e, None))?;
+        }
+        found.ok_or_else(|| rmcp::Error::invalid_params(format!("Capability '{cap_id}' not found"), None))
+    }
+
+    fn register_skill_tool(&self, cap: &HubCapability) -> Result<String, String> {
+        let (tool_name, tool) = build_skill_tool_from_cap(cap)?;
+        self.skill_tools
+            .lock()
+            .map_err(|e| e.to_string())?
+            .insert(tool_name.clone(), cap.id.clone());
+        self.skill_tool_defs
+            .lock()
+            .map_err(|e| e.to_string())?
+            .insert(tool_name.clone(), tool);
+        Ok(tool_name)
+    }
+
+    async fn call_skill_tool(
+        &self,
+        tool_name: &str,
+        arguments: Option<serde_json::Map<String, serde_json::Value>>,
+    ) -> Result<rmcp::model::CallToolResult, rmcp::Error> {
+        let skill_id = self
+            .skill_tools
+            .lock()
+            .map_err(|e| rmcp::Error::internal_error(e.to_string(), None))?
+            .get(tool_name)
+            .cloned()
+            .ok_or_else(|| {
+                rmcp::Error::invalid_params(format!("Skill tool '{}' not found", tool_name), None)
+            })?;
+
+        let cap = self.get_capability(&skill_id)?;
+        let def: Value = serde_json::from_str(&cap.definition)
+            .map_err(|e| rmcp::Error::invalid_params(format!("Invalid skill definition JSON: {e}"), None))?;
+
+        let args = arguments.unwrap_or_default();
+        let args_value = Value::Object(args.clone());
+        let args_json = serde_json::to_string_pretty(&args_value)
+            .map_err(|e| rmcp::Error::internal_error(format!("serialize args: {e}"), None))?;
+
+        let mut prompt = def
+            .get("prompt")
+            .and_then(|v| v.as_str())
+            .or_else(|| def.get("template").and_then(|v| v.as_str()))
+            .unwrap_or("{{args_json}}")
+            .to_string();
+        prompt = prompt.replace("{{args_json}}", &args_json);
+        prompt = prompt.replace("{{args}}", &args_json);
+        for (k, v) in &args {
+            let key = format!("{{{{{k}}}}}");
+            prompt = prompt.replace(&key, &value_to_template_text(v));
+        }
+        if prompt.contains("{{input}}") {
+            let input = args
+                .get("input")
+                .map(value_to_template_text)
+                .unwrap_or_else(|| args_json.clone());
+            prompt = prompt.replace("{{input}}", &input);
+        }
+
+        let output = if let Some(mock_response) = def.get("mock_response").and_then(|v| v.as_str()) {
+            mock_response.to_string()
+        } else {
+            let system = def
+                .get("system")
+                .and_then(|v| v.as_str())
+                .unwrap_or("You are executing a reusable skill. Follow the instruction and produce the result.");
+            let model = def.get("model").and_then(|v| v.as_str());
+            let temperature = def
+                .get("temperature")
+                .and_then(|v| v.as_f64())
+                .unwrap_or(0.2) as f32;
+            let max_tokens = def
+                .get("max_tokens")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(1200) as u32;
+            self.llm
+                .call_llm(system, &prompt, model, temperature, max_tokens)
+                .await
+                .map_err(|e| rmcp::Error::internal_error(format!("skill execution failed: {e}"), None))?
+        };
+
+        make_text_tool_result(&json!({
+            "skill_id": skill_id,
+            "tool_name": tool_name,
+            "output": output
+        }))
+    }
 }
 
 fn is_active_global_rule(entry: &MemoryEntry) -> bool {
@@ -222,6 +375,91 @@ fn find_git_root() -> Option<PathBuf> {
             return None;
         }
     }
+}
+
+fn resolve_env_map(def: &serde_json::Value) -> Result<HashMap<String, String>, String> {
+    let mut result = HashMap::new();
+    if let Some(obj) = def["env"].as_object() {
+        for (k, v) in obj {
+            if let Some(val) = v.as_str() {
+                let resolved = if val.starts_with("${") && val.ends_with('}') {
+                    let var_name = &val[2..val.len() - 1];
+                    std::env::var(var_name).map_err(|_| {
+                        format!("Environment variable '{}' not set (required by MCP server)", var_name)
+                    })?
+                } else {
+                    val.to_string()
+                };
+                result.insert(k.clone(), resolved);
+            }
+        }
+    }
+    Ok(result)
+}
+
+fn sanitize_skill_tool_name(skill_id: &str) -> Option<String> {
+    let raw = skill_id.strip_prefix("skill:")?;
+    let mut output = String::from("tachi_skill_");
+    for c in raw.chars() {
+        if c.is_ascii_alphanumeric() {
+            output.push(c.to_ascii_lowercase());
+        } else {
+            output.push('_');
+        }
+    }
+    while output.contains("__") {
+        output = output.replace("__", "_");
+    }
+    Some(output.trim_end_matches('_').to_string())
+}
+
+fn value_to_template_text(v: &Value) -> String {
+    if let Some(s) = v.as_str() {
+        s.to_string()
+    } else {
+        v.to_string()
+    }
+}
+
+fn make_text_tool_result(payload: &Value) -> Result<rmcp::model::CallToolResult, rmcp::Error> {
+    let text = serde_json::to_string(payload)
+        .map_err(|e| rmcp::Error::internal_error(format!("serialize response: {e}"), None))?;
+    serde_json::from_value(json!({
+        "content": [{"type": "text", "text": text}],
+        "isError": false
+    }))
+    .map_err(|e| rmcp::Error::internal_error(format!("build MCP response: {e}"), None))
+}
+
+fn build_skill_tool_from_cap(cap: &HubCapability) -> Result<(String, rmcp::model::Tool), String> {
+    let tool_name = sanitize_skill_tool_name(&cap.id)
+        .ok_or_else(|| format!("Invalid skill id '{}'", cap.id))?;
+    let def: Value = serde_json::from_str(&cap.definition)
+        .map_err(|e| format!("Invalid skill definition JSON: {e}"))?;
+    let input_schema = def
+        .get("inputSchema")
+        .cloned()
+        .or_else(|| def.get("input_schema").cloned())
+        .unwrap_or(json!({
+            "type": "object",
+            "properties": {
+                "input": {"type": "string", "description": "Primary input for this skill"},
+                "context": {"type": "string", "description": "Optional context"}
+            },
+            "additionalProperties": true
+        }));
+    let description = if cap.description.is_empty() {
+        format!("Run skill {}", cap.name)
+    } else {
+        cap.description.clone()
+    };
+    let tool = serde_json::from_value::<rmcp::model::Tool>(json!({
+        "name": tool_name,
+        "description": description,
+        "inputSchema": input_schema
+    }))
+    .map_err(|e| format!("Build skill tool failed: {e}"))?;
+    Ok((tool_name, tool))
 }
 
 // ─── Tool Parameter Types ───────────────────────────────────────────────────────
@@ -278,6 +516,17 @@ struct SaveMemoryParams {
     /// Optional entry ID (for updates)
     #[serde(default)]
     id: Option<String>,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+struct RunSkillParams {
+    /// ID of the skill capability to execute (e.g. "skill:code-review")
+    skill_id: String,
+
+    /// Arguments to inject into the skill's prompt template
+    #[serde(default)]
+    args: serde_json::Value,
 }
 
 #[allow(dead_code)]
@@ -569,6 +818,22 @@ struct HubCallParams {
     /// JSON arguments to pass to the tool
     #[serde(default)]
     arguments: serde_json::Value,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+struct AuditLogParams {
+    /// Maximum entries to return (default: 50)
+    #[serde(default = "default_audit_limit")]
+    limit: usize,
+    /// Optional server_id filter
+    #[serde(default)]
+    server_filter: Option<String>,
+}
+
+#[allow(dead_code)]
+fn default_audit_limit() -> usize {
+    50
 }
 
 // ─── Tool Implementations ────────────────────────────────────────────────────────
@@ -1063,6 +1328,8 @@ impl MemoryServer {
     #[tool(description = "Register a capability (skill, plugin, or MCP server) in the Hub.")]
     async fn hub_register(&self, #[tool(aggr)] params: HubRegisterParams) -> Result<String, String> {
         let (target_db, warning) = self.resolve_write_scope(&params.scope);
+        // Project-scope MCP capabilities default to disabled for security
+        let auto_enabled = !(params.cap_type == "mcp" && target_db == DbScope::Project);
         let cap = HubCapability {
             id: params.id.clone(),
             cap_type: params.cap_type.clone(),
@@ -1070,7 +1337,7 @@ impl MemoryServer {
             version: params.version,
             description: params.description.clone(),
             definition: params.definition.clone(),
-            enabled: true,
+            enabled: auto_enabled,
             uses: 0,
             successes: 0,
             failures: 0,
@@ -1092,73 +1359,69 @@ impl MemoryServer {
         if let Some(w) = warning {
             resp.insert("warning".into(), json!(w));
         }
+        if !auto_enabled {
+            resp.insert("warning".into(), json!("Project MCP capabilities are disabled by default. Use hub_set_enabled to activate."));
+        }
 
-        if params.cap_type == "mcp" {
+        if params.cap_type == "skill" {
+            match self.register_skill_tool(&cap) {
+                Ok(tool_name) => {
+                    resp.insert("tool_name".into(), json!(tool_name));
+                }
+                Err(e) => {
+                    resp.insert("skill_error".into(), json!(e));
+                }
+            }
+        } else if params.cap_type == "mcp" {
             // Auto-discover tools from child MCP server
             let def: serde_json::Value = serde_json::from_str(&cap.definition).unwrap_or_default();
             let transport_type = def["transport"].as_str().unwrap_or("stdio");
+            let server_name = params.id.strip_prefix("mcp:").unwrap_or(&params.id);
 
-            if transport_type == "stdio" {
-                if let (Some(command), args) = (
-                    def["command"].as_str(),
-                    def["args"]
-                        .as_array()
-                        .map(|a| {
-                            a.iter()
-                                .filter_map(|v| v.as_str().map(String::from))
-                                .collect::<Vec<_>>()
-                        })
-                        .unwrap_or_default(),
-                ) {
-                    // Resolve env vars
-                    let env_map: HashMap<String, String> = def["env"]
-                        .as_object()
-                        .map(|obj| {
-                            obj.iter()
-                                .filter_map(|(k, v)| {
-                                    v.as_str().map(|val| {
-                                        let resolved = if val.starts_with("${") && val.ends_with('}') {
-                                            std::env::var(&val[2..val.len() - 1]).unwrap_or_default()
-                                        } else {
-                                            val.to_string()
-                                        };
-                                        (k.clone(), resolved)
-                                    })
-                                })
-                                .collect()
-                        })
-                        .unwrap_or_default();
+            match transport_type {
+                "stdio" => {
+                    if let (Some(command), args) = (
+                        def["command"].as_str(),
+                        def["args"]
+                            .as_array()
+                            .map(|a| {
+                                a.iter()
+                                    .filter_map(|v| v.as_str().map(String::from))
+                                    .collect::<Vec<_>>()
+                            })
+                            .unwrap_or_default(),
+                    ) {
+                        let env_map = match resolve_env_map(&def) {
+                            Ok(m) => m,
+                            Err(e) => {
+                                resp.insert("discovery_error".into(), json!(e));
+                                HashMap::new()
+                            }
+                        };
 
-                    // Spawn child, discover tools
-                    let mut cmd = tokio::process::Command::new(command);
-                    cmd.args(&args).env_clear();
-                    if let Ok(path) = std::env::var("PATH") {
-                        cmd.env("PATH", &path);
-                    }
-                    if let Ok(home) = std::env::var("HOME") {
-                        cmd.env("HOME", &home);
-                    }
-                    for (k, v) in &env_map {
-                        cmd.env(k, v);
-                    }
+                        let mut cmd = tokio::process::Command::new(command);
+                        cmd.args(&args).env_clear();
+                        if let Ok(path) = std::env::var("PATH") {
+                            cmd.env("PATH", &path);
+                        }
+                        if let Ok(home) = std::env::var("HOME") {
+                            cmd.env("HOME", &home);
+                        }
+                        for (k, v) in &env_map {
+                            cmd.env(k, v);
+                        }
 
-                    match rmcp::transport::TokioChildProcess::new(&mut cmd) {
-                        Ok(transport) => match rmcp::ServiceExt::serve((), transport).await {
-                            Ok(client) => {
-                                match client.peer().list_all_tools().await {
+                        match rmcp::transport::TokioChildProcess::new(&mut cmd) {
+                            Ok(transport) => match rmcp::ServiceExt::serve((), transport).await {
+                                Ok(client) => match client.peer().list_all_tools().await {
                                     Ok(tools) => {
                                         let tools_count = tools.len();
 
-                                        // Update definition with discovered tools
-                                        let server_name = params.id.strip_prefix("mcp:").unwrap_or(&params.id);
-
-                                        // Cache in memory
                                         self.proxy_tools
                                             .lock()
                                             .unwrap()
                                             .insert(server_name.to_string(), tools.clone());
 
-                                        // Persist to Hub DB
                                         let mut updated_def = def.clone();
                                         updated_def["discovered_tools"] =
                                             serde_json::to_value(&tools).unwrap_or_default();
@@ -1176,7 +1439,9 @@ impl MemoryServer {
                                                 .map_err(|e| format!("update: {e}"))
                                         });
 
-                                        // Add tools info to response
+                                        // Disconnect after discovery — lazy-connect on first real use
+                                        let _ = client.cancel().await;
+
                                         resp.insert("tools_discovered".into(), json!(tools_count));
                                     }
                                     Err(e) => {
@@ -1185,23 +1450,86 @@ impl MemoryServer {
                                             json!(format!("list_tools failed: {e}")),
                                         );
                                     }
+                                },
+                                Err(e) => {
+                                    resp.insert(
+                                        "discovery_error".into(),
+                                        json!(format!("MCP handshake failed: {e}")),
+                                    );
                                 }
-                                let _ = client.cancel().await;
-                            }
+                            },
                             Err(e) => {
                                 resp.insert(
                                     "discovery_error".into(),
-                                    json!(format!("MCP handshake failed: {e}")),
+                                    json!(format!("spawn failed: {e}")),
                                 );
                             }
-                        },
-                        Err(e) => {
-                            resp.insert(
-                                "discovery_error".into(),
-                                json!(format!("spawn failed: {e}")),
-                            );
                         }
                     }
+                }
+                "sse" => {
+                    if let Some(url) = def["url"].as_str() {
+                        match rmcp::transport::SseTransport::start(url).await {
+                            Ok(transport) => match rmcp::ServiceExt::serve((), transport).await {
+                                Ok(client) => match client.peer().list_all_tools().await {
+                                    Ok(tools) => {
+                                        let tools_count = tools.len();
+
+                                        self.proxy_tools
+                                            .lock()
+                                            .unwrap()
+                                            .insert(server_name.to_string(), tools.clone());
+
+                                        let mut updated_def = def.clone();
+                                        updated_def["discovered_tools"] =
+                                            serde_json::to_value(&tools).unwrap_or_default();
+                                        updated_def["discovered_at"] = json!(Utc::now().to_rfc3339());
+                                        updated_def["tools_count"] = json!(tools_count);
+
+                                        let updated_cap = HubCapability {
+                                            definition: serde_json::to_string(&updated_def)
+                                                .unwrap_or(cap.definition.clone()),
+                                            ..cap.clone()
+                                        };
+                                        let _ = self.with_store_for_scope(target_db, |store| {
+                                            store
+                                                .hub_register(&updated_cap)
+                                                .map_err(|e| format!("update: {e}"))
+                                        });
+
+                                        // Disconnect after discovery — lazy-connect on first real use
+                                        let _ = client.cancel().await;
+
+                                        resp.insert("tools_discovered".into(), json!(tools_count));
+                                    }
+                                    Err(e) => {
+                                        resp.insert(
+                                            "discovery_error".into(),
+                                            json!(format!("list_tools failed: {e}")),
+                                        );
+                                    }
+                                },
+                                Err(e) => {
+                                    resp.insert(
+                                        "discovery_error".into(),
+                                        json!(format!("SSE handshake failed: {e}")),
+                                    );
+                                }
+                            },
+                            Err(e) => {
+                                resp.insert(
+                                    "discovery_error".into(),
+                                    json!(format!("SSE connect failed: {e}")),
+                                );
+                            }
+                        }
+                    }
+                }
+                other => {
+                    resp.insert(
+                        "discovery_error".into(),
+                        json!(format!("unsupported transport: {other}")),
+                    );
                 }
             }
         }
@@ -1360,209 +1688,353 @@ impl MemoryServer {
         .map_err(|e| format!("serialize: {e}"))
     }
 
-    #[tool(description = "Call a tool on a registered MCP server through the Hub. Spawns the child server, connects, executes the tool, and returns the result.")]
-    async fn hub_call(
-        &self,
-        #[tool(aggr)] params: HubCallParams,
-    ) -> Result<String, String> {
-        // Look up the MCP server definition from Hub (project first, then global)
+    #[tool(description = "Execute a registered Skill from the Hub using the internal LLM pipeline.")]
+    async fn run_skill(&self, #[tool(aggr)] params: RunSkillParams) -> Result<String, String> {
         let cap = {
             let mut found = None;
             if self.project_db_path.is_some() {
                 found = self.with_project_store(|store| {
-                    store.hub_get(&params.server_id).map_err(|e| format!("hub get: {e}"))
+                    store.hub_get(&params.skill_id).map_err(|e| format!("hub get project: {e}"))
                 })?;
             }
             if found.is_none() {
                 found = self.with_global_store(|store| {
-                    store.hub_get(&params.server_id).map_err(|e| format!("hub get: {e}"))
+                    store.hub_get(&params.skill_id).map_err(|e| format!("hub get global: {e}"))
                 })?;
             }
-            found.ok_or_else(|| format!("MCP server '{}' not found in Hub", params.server_id))?
+            found.ok_or_else(|| format!("Skill '{}' not found in Hub", params.skill_id))?
         };
 
-        if cap.cap_type != "mcp" {
-            return Err(format!("'{}' is type '{}', not 'mcp'", params.server_id, cap.cap_type));
+        if cap.cap_type != "skill" {
+            return Err(format!("'{}' is type '{}', not 'skill'", params.skill_id, cap.cap_type));
         }
 
-        // Parse the server definition
         let def: serde_json::Value = serde_json::from_str(&cap.definition)
-            .map_err(|e| format!("invalid definition JSON: {e}"))?;
+            .map_err(|e| format!("invalid skill definition JSON: {e}"))?;
 
-        let transport_type = def["transport"].as_str().unwrap_or("stdio");
-        if transport_type != "stdio" {
-            return Err("Only stdio transport is supported in this version".to_string());
-        }
+        let prompt_template = def["prompt"].as_str()
+            .ok_or_else(|| "skill definition missing 'prompt' field".to_string())?;
 
-        let command = def["command"].as_str()
-            .ok_or_else(|| "definition missing 'command' field".to_string())?;
-        let args: Vec<String> = def["args"].as_array()
-            .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
-            .unwrap_or_default();
-
-        // Resolve ${VAR} references in env
-        let env_map: std::collections::HashMap<String, String> = if let Some(env_obj) = def["env"].as_object() {
-            let mut resolved = std::collections::HashMap::new();
-            for (k, v) in env_obj {
-                if let Some(val) = v.as_str() {
-                    let resolved_val = if val.starts_with("${") && val.ends_with('}') {
-                        let var_name = &val[2..val.len()-1];
-                        std::env::var(var_name).unwrap_or_default()
-                    } else {
-                        val.to_string()
-                    };
-                    resolved.insert(k.clone(), resolved_val);
-                }
+        let mut resolved_prompt = prompt_template.to_string();
+        if let Some(args_obj) = params.args.as_object() {
+            for (k, v) in args_obj {
+                let placeholder = format!("{{{{{}}}}}", k);
+                let val_str = if let Some(s) = v.as_str() {
+                    s.to_string()
+                } else {
+                    v.to_string()
+                };
+                resolved_prompt = resolved_prompt.replace(&placeholder, &val_str);
             }
-            resolved
-        } else {
-            std::collections::HashMap::new()
-        };
-
-        // Spawn child MCP server and connect as client
-        let mut cmd = tokio::process::Command::new(command);
-        cmd.args(&args);
-        // Only pass explicit env, not full parent env
-        cmd.env_clear();
-        // But inherit PATH so command can be found
-        if let Ok(path) = std::env::var("PATH") {
-            cmd.env("PATH", &path);
-        }
-        if let Ok(home) = std::env::var("HOME") {
-            cmd.env("HOME", &home);
-        }
-        for (k, v) in &env_map {
-            cmd.env(k, v);
         }
 
-        let transport = rmcp::transport::TokioChildProcess::new(&mut cmd)
-            .map_err(|e| format!("failed to spawn '{}': {e}", command))?;
+        self.llm.call_llm(
+            "You are an AI assistant executing a specialized skill.",
+            &resolved_prompt,
+            None,
+            0.3,
+            4000
+        )
+        .await
+        .map_err(|e| format!("skill execution failed: {}", e))
+    }
 
-        let client = rmcp::ServiceExt::serve((), transport).await
-            .map_err(|e| format!("MCP handshake failed with '{}': {e}", command))?;
+    #[tool(description = "View audit log of proxy tool calls through the Hub.")]
+    async fn tachi_audit_log(
+        &self,
+        #[tool(aggr)] params: AuditLogParams,
+    ) -> Result<String, String> {
+        self.with_global_store(|store| {
+            let entries = store
+                .audit_log_list(params.limit, params.server_filter.as_deref())
+                .map_err(|e| format!("audit log: {e}"))?;
+            serde_json::to_string(&entries).map_err(|e| format!("serialize: {e}"))
+        })
+    }
 
-        // Call the tool
-        let call_params = rmcp::model::CallToolRequestParam {
-            name: std::borrow::Cow::Owned(params.tool_name.clone()),
-            arguments: params.arguments.as_object().cloned(),
-        };
+    #[tool(description = "Call a tool on a registered MCP server through the Hub using the shared connection pool.")]
+    async fn hub_call(
+        &self,
+        #[tool(aggr)] params: HubCallParams,
+    ) -> Result<String, String> {
+        let server_name = params
+            .server_id
+            .strip_prefix("mcp:")
+            .unwrap_or(&params.server_id);
+        let result = self
+            .proxy_call_internal(
+                server_name,
+                &params.tool_name,
+                params.arguments.as_object().cloned(),
+            )
+            .await
+            .map_err(|e| format!("{e}"))?;
 
-        let result = client.peer().call_tool(call_params).await
-            .map_err(|e| format!("tool call '{}' failed: {e}", params.tool_name))?;
-
-        // Shut down the child
-        let _ = client.cancel().await;
-
-        // Convert result to JSON string
-        let content_texts: Vec<String> = result.content.iter().filter_map(|c| {
-            // Extract text content from MCP Content blocks
-            serde_json::to_value(c).ok().and_then(|v| {
-                v.get("text").and_then(|t| t.as_str().map(String::from))
+        let content_texts: Vec<String> = result
+            .content
+            .iter()
+            .filter_map(|c| {
+                serde_json::to_value(c).ok().and_then(|v| {
+                    v.get("text").and_then(|t| t.as_str().map(String::from))
+                })
             })
-        }).collect();
-
-        let response = json!({
+            .collect();
+        serde_json::to_string(&json!({
             "server": params.server_id,
             "tool": params.tool_name,
             "content": content_texts,
             "is_error": result.is_error.unwrap_or(false),
-        });
-
-        serde_json::to_string(&response).map_err(|e| format!("serialize: {e}"))
+        }))
+        .map_err(|e| format!("serialize: {e}"))
     }
 }
 
 impl MemoryServer {
+    async fn connect_child(&self, server_name: &str) -> Result<(), rmcp::Error> {
+        let server_id = format!("mcp:{}", server_name);
+
+        let cap = {
+            let mut found = None;
+            if self.project_db_path.is_some() {
+                found = self
+                    .with_project_store(|store| store.hub_get(&server_id).map_err(|e| format!("{e}")))
+                    .unwrap_or(None);
+            }
+            if found.is_none() {
+                found = self
+                    .with_global_store(|store| store.hub_get(&server_id).map_err(|e| format!("{e}")))
+                    .unwrap_or(None);
+            }
+            found.ok_or_else(|| {
+                rmcp::Error::invalid_params(format!("MCP server '{}' not found", server_id), None)
+            })?
+        };
+
+        let def: serde_json::Value = serde_json::from_str(&cap.definition)
+            .map_err(|e| rmcp::Error::internal_error(format!("bad definition: {e}"), None))?;
+
+        let transport_type = def["transport"].as_str().unwrap_or("stdio");
+
+        let client = match transport_type {
+            "stdio" => {
+                let command = def["command"]
+                    .as_str()
+                    .ok_or_else(|| rmcp::Error::internal_error("missing command", None))?;
+                let args: Vec<String> = def["args"]
+                    .as_array()
+                    .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+                    .unwrap_or_default();
+                let env_map = resolve_env_map(&def)
+                    .map_err(|e| rmcp::Error::internal_error(e, None))?;
+
+                let mut cmd = tokio::process::Command::new(command);
+                cmd.args(&args).env_clear();
+                if let Ok(path) = std::env::var("PATH") {
+                    cmd.env("PATH", &path);
+                }
+                if let Ok(home) = std::env::var("HOME") {
+                    cmd.env("HOME", &home);
+                }
+                for (k, v) in &env_map {
+                    cmd.env(k, v);
+                }
+
+                let transport = rmcp::transport::TokioChildProcess::new(&mut cmd)
+                    .map_err(|e| rmcp::Error::internal_error(format!("spawn: {e}"), None))?;
+                rmcp::ServiceExt::serve((), transport)
+                    .await
+                    .map_err(|e| rmcp::Error::internal_error(format!("handshake: {e}"), None))?
+            }
+            "sse" => {
+                let url = def["url"]
+                    .as_str()
+                    .ok_or_else(|| rmcp::Error::internal_error("missing url for SSE", None))?;
+                let transport = rmcp::transport::SseTransport::start(url)
+                    .await
+                    .map_err(|e| rmcp::Error::internal_error(format!("SSE connect: {e}"), None))?;
+                rmcp::ServiceExt::serve((), transport)
+                    .await
+                    .map_err(|e| rmcp::Error::internal_error(format!("SSE handshake: {e}"), None))?
+            }
+            other => {
+                return Err(rmcp::Error::internal_error(
+                    format!("unsupported transport: {other}"),
+                    None,
+                ));
+            }
+        };
+
+        self.pool.connections.lock().unwrap().insert(
+            server_name.to_string(),
+            ChildConnection {
+                client,
+                last_used: Instant::now(),
+            },
+        );
+        Ok(())
+    }
+
     async fn proxy_call_internal(
         &self,
         server_name: &str,
         tool_name: &str,
         arguments: Option<serde_json::Map<String, serde_json::Value>>,
     ) -> Result<rmcp::model::CallToolResult, rmcp::Error> {
-        // Look up MCP server definition from Hub
+        // 0. Look up capability for deny-list and timeout config
         let server_id = format!("mcp:{}", server_name);
-        let cap = {
+        let cap_def = {
             let mut found = None;
             if self.project_db_path.is_some() {
-                found = self
-                    .with_project_store(|store| {
-                        store.hub_get(&server_id).map_err(|e| format!("hub get: {e}"))
-                    })
-                    .unwrap_or(None);
+                found = self.with_project_store(|store| {
+                    store.hub_get(&server_id).map_err(|e| format!("{e}"))
+                }).unwrap_or(None);
             }
             if found.is_none() {
-                found = self
-                    .with_global_store(|store| {
-                        store.hub_get(&server_id).map_err(|e| format!("hub get: {e}"))
-                    })
-                    .unwrap_or(None);
+                found = self.with_global_store(|store| {
+                    store.hub_get(&server_id).map_err(|e| format!("{e}"))
+                }).unwrap_or(None);
             }
-            found.ok_or_else(|| {
-                rmcp::Error::invalid_params(format!("MCP server '{}' not found in Hub", server_id), None)
-            })?
+            found.map(|c| serde_json::from_str::<serde_json::Value>(&c.definition).unwrap_or_default())
+                .unwrap_or_default()
         };
 
-        let def: serde_json::Value = serde_json::from_str(&cap.definition)
-            .map_err(|e| rmcp::Error::internal_error(format!("invalid definition: {e}"), None))?;
-
-        let command = def["command"]
-            .as_str()
-            .ok_or_else(|| rmcp::Error::internal_error("missing command", None))?;
-        let args: Vec<String> = def["args"]
-            .as_array()
-            .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
-            .unwrap_or_default();
-
-        // Resolve env
-        let env_map: HashMap<String, String> = def["env"]
-            .as_object()
-            .map(|obj| {
-                obj.iter()
-                    .filter_map(|(k, v)| {
-                        v.as_str().map(|val| {
-                            let resolved = if val.starts_with("${") && val.ends_with('}') {
-                                std::env::var(&val[2..val.len() - 1]).unwrap_or_default()
-                            } else {
-                                val.to_string()
-                            };
-                            (k.clone(), resolved)
-                        })
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
-
-        let mut cmd = tokio::process::Command::new(command);
-        cmd.args(&args).env_clear();
-        if let Ok(path) = std::env::var("PATH") {
-            cmd.env("PATH", &path);
-        }
-        if let Ok(home) = std::env::var("HOME") {
-            cmd.env("HOME", &home);
-        }
-        for (k, v) in &env_map {
-            cmd.env(k, v);
+        // 1. Check deny-list permissions
+        if let Some(deny_list) = cap_def["permissions"]["deny"].as_array() {
+            let denied: Vec<&str> = deny_list.iter().filter_map(|v| v.as_str()).collect();
+            if denied.contains(&tool_name) {
+                return Err(rmcp::Error::invalid_params(
+                    format!("Tool '{}' is denied by permissions policy on '{}'", tool_name, server_name),
+                    None,
+                ));
+            }
         }
 
-        let transport = rmcp::transport::TokioChildProcess::new(&mut cmd)
-            .map_err(|e| rmcp::Error::internal_error(format!("spawn failed: {e}"), None))?;
-        let client = rmcp::ServiceExt::serve((), transport)
-            .await
-            .map_err(|e| rmcp::Error::internal_error(format!("handshake failed: {e}"), None))?;
+        // 2. Check circuit breaker
+        {
+            let mut circuits = self.pool.circuits.lock().unwrap();
+            if let Some((state, count)) = circuits.get_mut(server_name) {
+                match state {
+                    CircuitState::Open { until } => {
+                        if Instant::now() < *until {
+                            return Err(rmcp::Error::internal_error(
+                                format!("Circuit open for '{}', retry after cooldown", server_name),
+                                None,
+                            ));
+                        }
+                        *state = CircuitState::HalfOpen;
+                        *count = 0;
+                    }
+                    CircuitState::HalfOpen | CircuitState::Closed => {}
+                }
+            }
+        }
 
+        // 3. Acquire per-child concurrency permit
+        let semaphore = {
+            let mut sems = self.pool.semaphores.lock().unwrap();
+            let max_conc = cap_def["max_concurrency"].as_u64().unwrap_or(1) as usize;
+            sems.entry(server_name.to_string())
+                .or_insert_with(|| Arc::new(tokio::sync::Semaphore::new(max_conc)))
+                .clone()
+        };
+        let _permit = semaphore.acquire().await
+            .map_err(|_| rmcp::Error::internal_error("semaphore closed", None))?;
+
+        // 4. Ensure connection exists
+        let needs_new = {
+            let conns = self.pool.connections.lock().unwrap();
+            !conns.contains_key(server_name)
+        };
+        if needs_new {
+            self.connect_child(server_name).await?;
+        }
+
+        // 5. Get peer and call tool with timeout
         let call_params = rmcp::model::CallToolRequestParam {
             name: std::borrow::Cow::Owned(tool_name.to_string()),
-            arguments,
+            arguments: arguments.clone(),
         };
 
-        let result = client
-            .peer()
-            .call_tool(call_params)
-            .await
-            .map_err(|e| rmcp::Error::internal_error(format!("call failed: {e}"), None))?;
+        let peer = {
+            let mut conns = self.pool.connections.lock().unwrap();
+            if let Some(conn) = conns.get_mut(server_name) {
+                conn.last_used = Instant::now();
+                conn.client.peer().clone()
+            } else {
+                return Err(rmcp::Error::internal_error("connection lost", None));
+            }
+        };
 
-        let _ = client.cancel().await;
-        Ok(result)
+        let timeout_ms = cap_def["tool_timeout_ms"].as_u64().unwrap_or(30000);
+        let start = Instant::now();
+
+        let result = tokio::time::timeout(
+            Duration::from_millis(timeout_ms),
+            peer.call_tool(call_params),
+        ).await;
+
+        let duration_ms = start.elapsed().as_millis() as u64;
+
+        // 6. Process result, update circuit breaker, log audit
+        let final_result = match result {
+            Ok(Ok(r)) => {
+                // Tool returned successfully (even if r.is_error — that's a tool-level error, not transport)
+                let mut circuits = self.pool.circuits.lock().unwrap();
+                circuits.insert(server_name.to_string(), (CircuitState::Closed, 0));
+                Ok(r)
+            }
+            Ok(Err(e)) => {
+                // Transport/protocol error — increment circuit breaker
+                self.record_circuit_failure(server_name);
+                Err(rmcp::Error::internal_error(format!("proxy call failed: {e}"), None))
+            }
+            Err(_timeout) => {
+                // Timeout — increment circuit breaker
+                self.record_circuit_failure(server_name);
+                Err(rmcp::Error::internal_error(
+                    format!("Tool call '{}' on '{}' timed out after {}ms", tool_name, server_name, timeout_ms),
+                    None,
+                ))
+            }
+        };
+
+        // 7. Audit log (fire and forget)
+        let success = final_result.is_ok();
+        let error_kind = final_result.as_ref().err().map(|e| format!("{e}"));
+        let timestamp = Utc::now().to_rfc3339();
+        let args_hash = format!("{:x}", {
+            let mut h = DefaultHasher::new();
+            format!("{:?}", arguments).hash(&mut h);
+            h.finish()
+        });
+        let _ = self.with_global_store(|store| {
+            store.audit_log_insert(
+                &timestamp, server_name, tool_name, &args_hash,
+                success, duration_ms, error_kind.as_deref(),
+            ).map_err(|e| format!("{e}"))
+        });
+
+        final_result
+    }
+
+    fn record_circuit_failure(&self, server_name: &str) {
+        let mut should_remove = false;
+        {
+            let mut circuits = self.pool.circuits.lock().unwrap();
+            let entry = circuits
+                .entry(server_name.to_string())
+                .or_insert((CircuitState::Closed, 0));
+            entry.1 += 1;
+            if entry.1 >= 3 || matches!(entry.0, CircuitState::HalfOpen) {
+                entry.0 = CircuitState::Open {
+                    until: Instant::now() + Duration::from_secs(30),
+                };
+                should_remove = true;
+            }
+        }
+        if should_remove {
+            self.pool.connections.lock().unwrap().remove(server_name);
+        }
     }
 }
 
@@ -1590,10 +2062,7 @@ impl ServerHandler for MemoryServer {
         _: rmcp::service::RequestContext<rmcp::service::RoleServer>,
     ) -> impl Future<Output = Result<rmcp::model::ListToolsResult, rmcp::Error>> + Send + '_ {
         async move {
-            // Native tools from macro-generated tool_box
             let mut tools = Self::tool_box().list();
-
-            // Add proxy tools from registered MCP servers
             if let Ok(proxy) = self.proxy_tools.lock() {
                 for (server_name, server_tools) in proxy.iter() {
                     for tool in server_tools {
@@ -1603,6 +2072,9 @@ impl ServerHandler for MemoryServer {
                         tools.push(proxied);
                     }
                 }
+            }
+            if let Ok(skill_defs) = self.skill_tool_defs.lock() {
+                tools.extend(skill_defs.values().cloned());
             }
 
             Ok(rmcp::model::ListToolsResult {
@@ -1620,18 +2092,31 @@ impl ServerHandler for MemoryServer {
         async move {
             let name = params.name.as_ref();
 
-            // Check if it's a proxy tool (contains "__")
+            // 1. Native tools first (highest priority)
+            if Self::tool_box().map.contains_key(name) {
+                let context =
+                    rmcp::handler::server::tool::ToolCallContext::new(self, params, context);
+                return Self::tool_box().call(context).await;
+            }
+
+            // 2. Skill tools (tachi_skill_*)
+            if self
+                .skill_tools
+                .lock()
+                .map(|map| map.contains_key(name))
+                .unwrap_or(false)
+            {
+                return self.call_skill_tool(name, params.arguments).await;
+            }
+
+            // 3. Proxy tools (server__tool pattern)
             if let Some((server_name, tool_name)) = name.split_once("__") {
-                // Proxy call: spawn child, forward, return
                 return self
                     .proxy_call_internal(server_name, tool_name, params.arguments)
                     .await;
             }
 
-            // Native tool: delegate to macro-generated tool_box
-            let context =
-                rmcp::handler::server::tool::ToolCallContext::new(self, params, context);
-            Self::tool_box().call(context).await
+            Err(rmcp::Error::invalid_params("tool not found", None))
         }
     }
 }
@@ -1742,6 +2227,31 @@ async fn tokio_main() -> Result<(), Box<dyn std::error::Error>> {
 
     let server = MemoryServer::new(global_db_path.clone(), project_db_path.clone())?;
 
+    // Spawn idle connection cleanup task
+    {
+        let pool = server.pool.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(Duration::from_secs(60));
+            loop {
+                interval.tick().await;
+                let mut conns = pool.connections.lock().unwrap();
+                let now = Instant::now();
+                let idle_ttl = pool.idle_ttl;
+                let stale: Vec<String> = conns
+                    .iter()
+                    .filter(|(_, c)| now.duration_since(c.last_used) > idle_ttl)
+                    .map(|(k, _)| k.clone())
+                    .collect();
+                for key in stale {
+                    if let Some(conn) = conns.remove(&key) {
+                        eprintln!("Idle cleanup: disconnecting '{}'", key);
+                        drop(conn);
+                    }
+                }
+            }
+        });
+    }
+
     // Integrity check on global DB
     server
         .with_global_store(|store| {
@@ -1798,6 +2308,21 @@ async fn tokio_main() -> Result<(), Box<dyn std::error::Error>> {
             let _ = server.with_project_store(load_proxy_tools);
         }
     }
+    {
+        let load_skill_tools = |store: &mut MemoryStore| -> Result<(), String> {
+            let skill_caps = store
+                .hub_list(Some("skill"), true)
+                .map_err(|e| format!("hub list: {e}"))?;
+            for cap in skill_caps {
+                let _ = server.register_skill_tool(&cap);
+            }
+            Ok(())
+        };
+        let _ = server.with_global_store(load_skill_tools);
+        if server.project_db_path.is_some() {
+            let _ = server.with_project_store(load_skill_tools);
+        }
+    }
 
     if server.pipeline_enabled {
         eprintln!("Pipeline workers: ENABLED (external)");
@@ -1818,7 +2343,7 @@ async fn tokio_main() -> Result<(), Box<dyn std::error::Error>> {
         "Vector search: global={}, project={}",
         server.global_vec_available, server.project_vec_available
     );
-    eprintln!("Tools: save_memory, search_memory, get_memory, list_memories, memory_stats, set_state, get_state, extract_facts, ingest_event, get_pipeline_status, hub_register, hub_discover, hub_get, hub_feedback, hub_stats");
+    eprintln!("Tools: save_memory, search_memory, get_memory, list_memories, memory_stats, set_state, get_state, extract_facts, ingest_event, get_pipeline_status, hub_register, hub_discover, hub_get, hub_feedback, hub_stats, hub_call, run_skill");
 
     let running = rmcp::service::serve_server(server, transport).await?;
     let quit_reason = running.waiting().await?;
