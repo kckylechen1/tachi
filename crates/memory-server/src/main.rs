@@ -110,6 +110,8 @@ fn slim_l0_rule(rule: &MemoryEntry, db: DbScope) -> serde_json::Value {
 #[derive(Clone)]
 #[allow(dead_code)]
 struct MemoryServer {
+    global_store: Arc<StdMutex<MemoryStore>>,
+    project_store: Option<Arc<StdMutex<MemoryStore>>>,
     global_db_path: Arc<PathBuf>,
     project_db_path: Option<Arc<PathBuf>>,
     global_vec_available: bool,
@@ -145,6 +147,8 @@ struct McpClientPool {
     circuits: std::sync::Mutex<HashMap<String, (CircuitState, u32)>>,
     /// Per-child concurrency semaphores: (semaphore, configured max_concurrency)
     semaphores: std::sync::Mutex<HashMap<String, (Arc<tokio::sync::Semaphore>, usize)>>,
+    /// Per-child connecting locks to prevent TOCTOU race
+    connecting_locks: std::sync::Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
     /// Idle TTL before auto-disconnect
     idle_ttl: Duration,
 }
@@ -155,6 +159,7 @@ impl McpClientPool {
             connections: std::sync::Mutex::new(HashMap::new()),
             circuits: std::sync::Mutex::new(HashMap::new()),
             semaphores: std::sync::Mutex::new(HashMap::new()),
+            connecting_locks: std::sync::Mutex::new(HashMap::new()),
             idle_ttl: Duration::from_secs(300),
         }
     }
@@ -165,26 +170,30 @@ impl MemoryServer {
         global_db_path: PathBuf,
         project_db_path: Option<PathBuf>,
     ) -> Result<Self, Box<dyn std::error::Error>> {
-        // Probe vec_available on global DB
-        let tmp = MemoryStore::open(global_db_path.to_str().unwrap())?;
-        let global_vec_available = tmp.vec_available;
-        drop(tmp);
+        // Open stores once at startup (init_schema runs here, not per-request)
+        let global_store = MemoryStore::open(global_db_path.to_str().unwrap())?;
+        let global_vec_available = global_store.vec_available;
 
-        // Probe vec_available on project DB if present
-        let (project_db_path, project_vec_available) = if let Some(ref p) = project_db_path {
-            let tmp = MemoryStore::open(p.to_str().unwrap())?;
-            let v = tmp.vec_available;
-            drop(tmp);
-            (Some(Arc::new(p.clone())), v)
-        } else {
-            (None, false)
-        };
+        let (project_store, project_db_path, project_vec_available) =
+            if let Some(ref p) = project_db_path {
+                let store = MemoryStore::open(p.to_str().unwrap())?;
+                let v = store.vec_available;
+                (
+                    Some(Arc::new(StdMutex::new(store))),
+                    Some(Arc::new(p.clone())),
+                    v,
+                )
+            } else {
+                (None, None, false)
+            };
 
         let llm = Arc::new(llm::LlmClient::new()?);
         let pipeline_enabled = std::env::var("ENABLE_PIPELINE")
             .map(|v| v == "true" || v == "1")
             .unwrap_or(false);
         Ok(Self {
+            global_store: Arc::new(StdMutex::new(global_store)),
+            project_store,
             global_db_path: Arc::new(global_db_path),
             project_db_path,
             global_vec_available,
@@ -202,8 +211,7 @@ impl MemoryServer {
         &self,
         f: impl FnOnce(&mut MemoryStore) -> Result<T, String>,
     ) -> Result<T, String> {
-        let mut store = MemoryStore::open(self.global_db_path.to_str().unwrap())
-            .map_err(|e| format!("open global store: {e}"))?;
+        let mut store = self.global_store.lock().unwrap_or_else(|e| e.into_inner());
         f(&mut store)
     }
 
@@ -211,12 +219,11 @@ impl MemoryServer {
         &self,
         f: impl FnOnce(&mut MemoryStore) -> Result<T, String>,
     ) -> Result<T, String> {
-        let path = self
-            .project_db_path
+        let store_arc = self
+            .project_store
             .as_ref()
             .ok_or_else(|| "No project database available (not in a git repository)".to_string())?;
-        let mut store = MemoryStore::open(path.to_str().unwrap())
-            .map_err(|e| format!("open project store: {e}"))?;
+        let mut store = store_arc.lock().unwrap_or_else(|e| e.into_inner());
         f(&mut store)
     }
 
@@ -1908,6 +1915,34 @@ impl MemoryServer {
 }
 
 impl MemoryServer {
+    /// Atomically check if connection exists and create if not.
+    /// Prevents TOCTOU race where two concurrent calls both spawn a child.
+    async fn ensure_child_connected(&self, server_name: &str) -> Result<(), rmcp::Error> {
+        // Check under lock
+        {
+            let conns = self.pool.connections.lock().unwrap();
+            if conns.contains_key(server_name) {
+                return Ok(());
+            }
+        }
+        // Not connected — acquire connecting lock to serialize connection attempts
+        let connecting_lock = {
+            let mut locks = self.pool.connecting_locks.lock().unwrap();
+            locks.entry(server_name.to_string())
+                .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+                .clone()
+        };
+        let _guard = connecting_lock.lock().await;
+        // Double-check after acquiring lock
+        {
+            let conns = self.pool.connections.lock().unwrap();
+            if conns.contains_key(server_name) {
+                return Ok(());
+            }
+        }
+        self.connect_child(server_name).await
+    }
+
     async fn connect_child(&self, server_name: &str) -> Result<(), rmcp::Error> {
         let server_id = format!("mcp:{}", server_name);
 
@@ -2065,14 +2100,8 @@ impl MemoryServer {
         let _permit = semaphore.acquire().await
             .map_err(|_| rmcp::Error::internal_error("semaphore closed", None))?;
 
-        // 4. Ensure connection exists
-        let needs_new = {
-            let conns = self.pool.connections.lock().unwrap();
-            !conns.contains_key(server_name)
-        };
-        if needs_new {
-            self.connect_child(server_name).await?;
-        }
+        // 4. Ensure connection exists (atomic check-and-connect to avoid TOCTOU race)
+        self.ensure_child_connected(server_name).await?;
 
         // 5. Get peer and call tool with timeout
         let call_params = rmcp::model::CallToolRequestParam {
