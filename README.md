@@ -80,8 +80,7 @@
          "command": "<绝对路径>/sigil/target/release/memory-server",
          "env": {
            "VOYAGE_API_KEY": "...",
-           "SILICONFLOW_API_KEY": "...",
-           "MEMORY_DB_PATH": "~/.sigil/memory.db"
+           "SILICONFLOW_API_KEY": "..."
          }
        }
      }
@@ -125,7 +124,7 @@ Sigil 亦化身为 OpenClaw 气海之元婴法宝。
 - **🔒 千金一诺（金石铁律）**：辟 `hard_state` 幽地以藏刚性卷宗，如兵甲仓储，点滴不漏，绝无虚妄（幻觉）之忧。
 - **🧠 三花聚顶（自适应上下文）**：录入之时即炼为三转：`L0`（浮光掠影）, `L1`（骨肉梗概）, 及 `L2`（大千界体）。由主将择轻重以借之，免费真元。
 - **🔄 两阶演化（记忆去重）**：首创 `HARD_SKIP` 与 `EVOLVE` 双阶去尘，以算数（数学相似度）为矩，免去过妄之弊。
-- **🔌 一气化三清（零牵绊）**：万般神通皆纳于须弥一核（`memory.db` 及本地推演），外物数据库概所不需。
+- **🔌 两界分治（双库阵法）**：天外之识存于全局藏经阁 (`~/.sigil/global/memory.db`)，门内之学纳于各宗项目密库 (`.sigil/memory.db`)。以 git 根脉自动辨识，且可将旧阁无痕迁徙。外物数据库概所不需。
 
 ---
 
@@ -261,8 +260,8 @@ VOYAGE_API_KEY="your_voyage_key_here"
 # 大模型抽取层与清洗归置
 SILICONFLOW_API_KEY="your_siliconflow_key_here"
 
-# 本地 SQLite 文件路径 (可选配置)
-MEMORY_DB_PATH="~/.sigil/memory.db"
+# 本地 SQLite 文件路径 (可选·默认自动解析为 ~/.sigil/global/memory.db + 项目 .sigil/memory.db)
+MEMORY_DB_PATH="~/.sigil/global/memory.db"
 ```
 
 ---

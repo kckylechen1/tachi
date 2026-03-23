@@ -80,8 +80,7 @@ Please configure the Sigil local memory MCP server:
          "command": "<absolute-path>/sigil/target/release/memory-server",
          "env": {
            "VOYAGE_API_KEY": "...",
-           "SILICONFLOW_API_KEY": "...",
-           "MEMORY_DB_PATH": "~/.sigil/memory.db"
+           "SILICONFLOW_API_KEY": "..."
          }
        }
      }
@@ -131,7 +130,7 @@ Please install the Sigil memory extension for OpenClaw:
 - **🔒 Hard State Engine**: Introduced a deterministic Key-Value store independent of vector memory. Useful for tracking trading watchlists or rigid state.
 - **🧠 3-Tier Context Extraction**: Automatically parses ingestion into three tiers: `L0` (Abstract Summary), `L1` (Overview), and `L2` (Full Text). Agents dynamically retrieve the appropriate depth based on context constraints.
 - **🔄 Evolution deduplication**: Utilizing math-based similarities for `HARD_SKIP` and `EVOLVE` updates.
-- **🔌 Embedded Architecture**: All data is efficiently stored within a single SQLite file (`memory.db`), with AI logic fully operated locally. No external databases required.
+- **🔌 Dual-DB Architecture**: Global memories (`~/.sigil/global/memory.db`) shared across all projects, plus per-project memories (`.sigil/memory.db` at git root) for project-scoped context. Automatic git root detection and legacy migration. No external databases required.
 
 ---
 
@@ -265,8 +264,8 @@ VOYAGE_API_KEY="your_voyage_key_here"
 # LLM Extractor & Distiller
 SILICONFLOW_API_KEY="your_siliconflow_key_here"
 
-# Database path (Optional)
-MEMORY_DB_PATH="~/.sigil/memory.db"
+# Database path (Optional — auto-resolves to ~/.sigil/global/memory.db + .sigil/memory.db per project)
+MEMORY_DB_PATH="~/.sigil/global/memory.db"
 ```
 
 ---

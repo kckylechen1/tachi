@@ -9,26 +9,42 @@ mod prompts;
 use chrono::Utc;
 use memory_core::{MemoryEntry, MemoryStore, SearchOptions};
 use rmcp::{
-    model::{ServerInfo, ServerCapabilities, ToolsCapability},
-    ServerHandler,
+    model::{ServerCapabilities, ServerInfo, ToolsCapability},
     tool,
+    ServerHandler,
 };
 use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::json;
-use std::collections::HashSet;
 use std::collections::hash_map::DefaultHasher;
+use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::io::{stdin, stdout};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DbScope {
+    Global,
+    Project,
+}
+
+impl DbScope {
+    fn as_str(&self) -> &'static str {
+        match self {
+            DbScope::Global => "global",
+            DbScope::Project => "project",
+        }
+    }
+}
+
 /// Build a slim JSON representation of a MemoryEntry for MCP output.
 /// Strips internal fields (access_count, last_access, revision, source, vector)
 /// and omits empty strings/arrays to minimize token usage.
-fn slim_entry(e: &MemoryEntry) -> serde_json::Value {
+fn slim_entry(e: &MemoryEntry, db: DbScope) -> serde_json::Value {
     let mut obj = serde_json::Map::new();
     obj.insert("id".into(), json!(e.id));
+    obj.insert("db".into(), json!(db.as_str()));
     obj.insert("text".into(), json!(e.text));
     if !e.summary.is_empty() {
         obj.insert("summary".into(), json!(e.summary));
@@ -63,19 +79,22 @@ fn slim_entry(e: &MemoryEntry) -> serde_json::Value {
 }
 
 /// Build a slim search result: entry fields + single relevance score.
-fn slim_search_result(result: &memory_core::SearchResult) -> serde_json::Value {
-    let mut obj = match slim_entry(&result.entry) {
+fn slim_search_result(result: &memory_core::SearchResult, db: DbScope) -> serde_json::Value {
+    let mut obj = match slim_entry(&result.entry, db) {
         serde_json::Value::Object(m) => m,
         _ => serde_json::Map::new(),
     };
     // Round to 3 decimal places
-    obj.insert("relevance".into(), json!((result.score.final_score * 1000.0).round() / 1000.0));
+    obj.insert(
+        "relevance".into(),
+        json!((result.score.final_score * 1000.0).round() / 1000.0),
+    );
     serde_json::Value::Object(obj)
 }
 
 /// Build a slim L0 rule entry.
-fn slim_l0_rule(rule: &MemoryEntry) -> serde_json::Value {
-    let mut obj = match slim_entry(rule) {
+fn slim_l0_rule(rule: &MemoryEntry, db: DbScope) -> serde_json::Value {
+    let mut obj = match slim_entry(rule, db) {
         serde_json::Value::Object(m) => m,
         _ => serde_json::Map::new(),
     };
@@ -88,35 +107,94 @@ fn slim_l0_rule(rule: &MemoryEntry) -> serde_json::Value {
 #[derive(Clone)]
 #[allow(dead_code)]
 struct MemoryServer {
-    db_path: Arc<PathBuf>,
-    vec_available: bool,
+    global_db_path: Arc<PathBuf>,
+    project_db_path: Option<Arc<PathBuf>>,
+    global_vec_available: bool,
+    project_vec_available: bool,
     llm: Arc<llm::LlmClient>,
     pipeline_enabled: bool,
 }
 
 impl MemoryServer {
-    fn new(db_path: PathBuf) -> Result<Self, Box<dyn std::error::Error>> {
-        // Detect vec_available once at startup with a temporary connection
-        let tmp_store = MemoryStore::open(db_path.to_str().unwrap())?;
-        let vec_available = tmp_store.vec_available;
-        drop(tmp_store);
+    fn new(
+        global_db_path: PathBuf,
+        project_db_path: Option<PathBuf>,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        // Probe vec_available on global DB
+        let tmp = MemoryStore::open(global_db_path.to_str().unwrap())?;
+        let global_vec_available = tmp.vec_available;
+        drop(tmp);
+
+        // Probe vec_available on project DB if present
+        let (project_db_path, project_vec_available) = if let Some(ref p) = project_db_path {
+            let tmp = MemoryStore::open(p.to_str().unwrap())?;
+            let v = tmp.vec_available;
+            drop(tmp);
+            (Some(Arc::new(p.clone())), v)
+        } else {
+            (None, false)
+        };
 
         let llm = Arc::new(llm::LlmClient::new()?);
         let pipeline_enabled = std::env::var("ENABLE_PIPELINE")
             .map(|v| v == "true" || v == "1")
             .unwrap_or(false);
         Ok(Self {
-            db_path: Arc::new(db_path),
-            vec_available,
+            global_db_path: Arc::new(global_db_path),
+            project_db_path,
+            global_vec_available,
+            project_vec_available,
             llm,
             pipeline_enabled,
         })
     }
 
-    fn with_store<T>(&self, f: impl FnOnce(&mut MemoryStore) -> Result<T, String>) -> Result<T, String> {
-        let mut store = MemoryStore::open(self.db_path.to_str().unwrap())
-            .map_err(|e| format!("open store: {e}"))?;
+    fn with_global_store<T>(
+        &self,
+        f: impl FnOnce(&mut MemoryStore) -> Result<T, String>,
+    ) -> Result<T, String> {
+        let mut store = MemoryStore::open(self.global_db_path.to_str().unwrap())
+            .map_err(|e| format!("open global store: {e}"))?;
         f(&mut store)
+    }
+
+    fn with_project_store<T>(
+        &self,
+        f: impl FnOnce(&mut MemoryStore) -> Result<T, String>,
+    ) -> Result<T, String> {
+        let path = self
+            .project_db_path
+            .as_ref()
+            .ok_or_else(|| "No project database available (not in a git repository)".to_string())?;
+        let mut store = MemoryStore::open(path.to_str().unwrap())
+            .map_err(|e| format!("open project store: {e}"))?;
+        f(&mut store)
+    }
+
+    fn with_store_for_scope<T>(
+        &self,
+        scope: DbScope,
+        f: impl FnOnce(&mut MemoryStore) -> Result<T, String>,
+    ) -> Result<T, String> {
+        match scope {
+            DbScope::Global => self.with_global_store(f),
+            DbScope::Project => self.with_project_store(f),
+        }
+    }
+
+    /// Resolve which DB to write to based on the requested scope string.
+    /// "global" → Global. Anything else → Project if available, else Global with warning.
+    fn resolve_write_scope(&self, requested: &str) -> (DbScope, Option<String>) {
+        if requested == "global" {
+            (DbScope::Global, None)
+        } else if self.project_db_path.is_some() {
+            (DbScope::Project, None)
+        } else {
+            (
+                DbScope::Global,
+                Some("No project DB available; saved to global".to_string()),
+            )
+        }
     }
 }
 
@@ -127,6 +205,18 @@ fn is_active_global_rule(entry: &MemoryEntry) -> bool {
         .and_then(serde_json::Value::as_str)
         .unwrap_or("DRAFT")
         == "ACTIVE"
+}
+
+fn find_git_root() -> Option<PathBuf> {
+    let mut dir = std::env::current_dir().ok()?;
+    loop {
+        if dir.join(".git").exists() {
+            return Some(dir);
+        }
+        if !dir.pop() {
+            return None;
+        }
+    }
 }
 
 // ─── Tool Parameter Types ───────────────────────────────────────────────────────
@@ -202,7 +292,7 @@ fn default_category() -> String {
 
 #[allow(dead_code)]
 fn default_scope() -> String {
-    "general".to_string()
+    "project".to_string()
 }
 
 #[allow(dead_code)]
@@ -354,6 +444,8 @@ impl MemoryServer {
     ) -> Result<String, String> {
         let id = params.id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
         let timestamp = Utc::now().to_rfc3339();
+        let requested_scope = params.scope.clone();
+        let (target_db, warning) = self.resolve_write_scope(&requested_scope);
 
         // Generate L0 summary if not provided (async LLM work before DB open)
         let summary = if params.summary.is_empty() {
@@ -379,7 +471,7 @@ impl MemoryServer {
             entities: params.entities,
             location: params.location,
             source: "mcp".to_string(),
-            scope: params.scope,
+            scope: requested_scope,
             archived: false,
             access_count: 0,
             last_access: None,
@@ -388,16 +480,22 @@ impl MemoryServer {
             vector,
         };
 
-        self.with_store(|store| {
+        self.with_store_for_scope(target_db, |store| {
             store
                 .upsert(&entry)
                 .map_err(|e| format!("Failed to save memory: {}", e))
         })?;
 
-        serde_json::to_string(&json!({
-            "id": id,
-            "timestamp": entry.timestamp
-        })).map_err(|e| format!("Failed to serialize response: {}", e))
+        let mut response = serde_json::Map::new();
+        response.insert("id".into(), json!(id));
+        response.insert("timestamp".into(), json!(entry.timestamp));
+        response.insert("db".into(), json!(target_db.as_str()));
+        if let Some(warning) = warning {
+            response.insert("warning".into(), json!(warning));
+        }
+
+        serde_json::to_string(&serde_json::Value::Object(response))
+            .map_err(|e| format!("Failed to serialize response: {}", e))
     }
 
     #[tool(description = "Search memory entries using hybrid search (vector + FTS + symbolic). Returns ranked results with scores.")]
@@ -405,50 +503,113 @@ impl MemoryServer {
         &self,
         #[tool(aggr)] params: SearchMemoryParams,
     ) -> Result<String, String> {
-        let mut opts = SearchOptions {
+        let pipeline_enabled = self.pipeline_enabled;
+
+        let mut combined_results: Vec<(memory_core::SearchResult, DbScope)> = Vec::new();
+
+        let mut global_opts = SearchOptions {
             top_k: params.top_k,
-            path_prefix: params.path_prefix,
+            path_prefix: params.path_prefix.clone(),
             include_archived: params.include_archived,
             candidates_per_channel: params.candidates_per_channel,
             mmr_threshold: params.mmr_threshold,
             graph_expand_hops: params.graph_expand_hops,
-            graph_relation_filter: params.graph_relation_filter,
+            graph_relation_filter: params.graph_relation_filter.clone(),
             ..Default::default()
         };
-        opts.vec_available = self.vec_available;
+        global_opts.vec_available = self.global_vec_available;
 
-        let pipeline_enabled = self.pipeline_enabled;
+        let global_results = self.with_global_store(|store| {
+            store
+                .search(&params.query, Some(global_opts))
+                .map_err(|e| format!("Search failed in global DB: {}", e))
+        })?;
+        combined_results.extend(global_results.into_iter().map(|r| (r, DbScope::Global)));
 
-        self.with_store(|store| {
-            let results = store
-                .search(&params.query, Some(opts))
-                .map_err(|e| format!("Search failed: {}", e))?;
-            let mut output: Vec<serde_json::Value> = results
+        if self.project_db_path.is_some() {
+            let mut project_opts = SearchOptions {
+                top_k: params.top_k,
+                path_prefix: params.path_prefix.clone(),
+                include_archived: params.include_archived,
+                candidates_per_channel: params.candidates_per_channel,
+                mmr_threshold: params.mmr_threshold,
+                graph_expand_hops: params.graph_expand_hops,
+                graph_relation_filter: params.graph_relation_filter.clone(),
+                ..Default::default()
+            };
+            project_opts.vec_available = self.project_vec_available;
+
+            let project_results = self.with_project_store(|store| {
+                store
+                    .search(&params.query, Some(project_opts))
+                    .map_err(|e| format!("Search failed in project DB: {}", e))
+            })?;
+            combined_results.extend(project_results.into_iter().map(|r| (r, DbScope::Project)));
+        }
+
+        combined_results.sort_by(|a, b| {
+            b.0.score
+                .final_score
+                .partial_cmp(&a.0.score.final_score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+
+        let mut seen_ids = HashSet::new();
+        let mut deduped_results: Vec<(memory_core::SearchResult, DbScope)> = Vec::new();
+        for (result, db_scope) in combined_results {
+            if seen_ids.insert(result.entry.id.clone()) {
+                deduped_results.push((result, db_scope));
+            }
+            if deduped_results.len() >= params.top_k {
+                break;
+            }
+        }
+
+        let mut output: Vec<serde_json::Value> = deduped_results
+            .iter()
+            .map(|(r, db_scope)| slim_search_result(r, *db_scope))
+            .collect();
+
+        if pipeline_enabled {
+            let mut existing_ids: HashSet<String> = deduped_results
                 .iter()
-                .map(|r| slim_search_result(r))
+                .map(|(r, _)| r.entry.id.clone())
                 .collect();
 
-            if pipeline_enabled {
-                let mut existing_ids: HashSet<String> = results
-                    .iter()
-                    .map(|r| r.entry.id.clone())
-                    .collect();
-                let rules = store
-                    .list_by_path("/behavior/global_rules", 50, false)
-                    .unwrap_or_default();
-                for rule in rules {
+            if self.project_db_path.is_some() {
+                let project_rules = self.with_project_store(|store| {
+                    Ok(store
+                        .list_by_path("/behavior/global_rules", 50, false)
+                        .unwrap_or_default())
+                })?;
+                for rule in project_rules {
                     if !is_active_global_rule(&rule) {
                         continue;
                     }
                     if !existing_ids.insert(rule.id.clone()) {
                         continue;
                     }
-                    output.push(slim_l0_rule(&rule));
+                    output.push(slim_l0_rule(&rule, DbScope::Project));
                 }
             }
 
-            serde_json::to_string(&output).map_err(|e| format!("Failed to serialize response: {}", e))
-        })
+            let global_rules = self.with_global_store(|store| {
+                Ok(store
+                    .list_by_path("/behavior/global_rules", 50, false)
+                    .unwrap_or_default())
+            })?;
+            for rule in global_rules {
+                if !is_active_global_rule(&rule) {
+                    continue;
+                }
+                if !existing_ids.insert(rule.id.clone()) {
+                    continue;
+                }
+                output.push(slim_l0_rule(&rule, DbScope::Global));
+            }
+        }
+
+        serde_json::to_string(&output).map_err(|e| format!("Failed to serialize response: {}", e))
     }
 
     #[tool(description = "Get a single memory entry by ID.")]
@@ -456,21 +617,33 @@ impl MemoryServer {
         &self,
         #[tool(aggr)] params: GetMemoryParams,
     ) -> Result<String, String> {
-        self.with_store(|store| {
-            let entry = store
-                .get_with_options(&params.id, params.include_archived)
-                .map_err(|e| format!("Failed to get memory: {}", e))?;
+        if self.project_db_path.is_some() {
+            let project_entry = self.with_project_store(|store| {
+                store
+                    .get_with_options(&params.id, params.include_archived)
+                    .map_err(|e| format!("Failed to get memory from project DB: {}", e))
+            })?;
 
-            match entry {
-                Some(e) => serde_json::to_string(&slim_entry(&e))
-                    .map_err(|e| format!("Failed to serialize: {}", e)),
-                None => {
-                    serde_json::to_string(&json!({
-                        "error": "Memory not found"
-                    })).map_err(|e| format!("Failed to serialize: {}", e))
-                }
+            if let Some(entry) = project_entry {
+                return serde_json::to_string(&slim_entry(&entry, DbScope::Project))
+                    .map_err(|e| format!("Failed to serialize: {}", e));
             }
-        })
+        }
+
+        let global_entry = self.with_global_store(|store| {
+            store
+                .get_with_options(&params.id, params.include_archived)
+                .map_err(|e| format!("Failed to get memory from global DB: {}", e))
+        })?;
+
+        match global_entry {
+            Some(entry) => serde_json::to_string(&slim_entry(&entry, DbScope::Global))
+                .map_err(|e| format!("Failed to serialize: {}", e)),
+            None => serde_json::to_string(&json!({
+                "error": "Memory not found"
+            }))
+            .map_err(|e| format!("Failed to serialize: {}", e)),
+        }
     }
 
     #[tool(description = "List memory entries under a path prefix.")]
@@ -478,27 +651,97 @@ impl MemoryServer {
         &self,
         #[tool(aggr)] params: ListMemoriesParams,
     ) -> Result<String, String> {
-        self.with_store(|store| {
-            let entries = store
-                .list_by_path(&params.path_prefix, params.limit, params.include_archived)
-                .map_err(|e| format!("Failed to list memories: {}", e))?;
+        let mut combined_entries: Vec<(MemoryEntry, DbScope)> = Vec::new();
 
-            let slim: Vec<serde_json::Value> = entries.iter().map(|e| slim_entry(e)).collect();
-            serde_json::to_string(&slim)
-                .map_err(|e| format!("Failed to serialize: {}", e))
-        })
+        let global_entries = self.with_global_store(|store| {
+            store
+                .list_by_path(&params.path_prefix, params.limit, params.include_archived)
+                .map_err(|e| format!("Failed to list memories from global DB: {}", e))
+        })?;
+        combined_entries.extend(global_entries.into_iter().map(|e| (e, DbScope::Global)));
+
+        if self.project_db_path.is_some() {
+            let project_entries = self.with_project_store(|store| {
+                store
+                    .list_by_path(&params.path_prefix, params.limit, params.include_archived)
+                    .map_err(|e| format!("Failed to list memories from project DB: {}", e))
+            })?;
+            combined_entries.extend(project_entries.into_iter().map(|e| (e, DbScope::Project)));
+        }
+
+        combined_entries.sort_by(|a, b| b.0.timestamp.cmp(&a.0.timestamp));
+        combined_entries.truncate(params.limit);
+
+        let slim: Vec<serde_json::Value> = combined_entries
+            .iter()
+            .map(|(e, db_scope)| slim_entry(e, *db_scope))
+            .collect();
+        serde_json::to_string(&slim).map_err(|e| format!("Failed to serialize: {}", e))
     }
 
     #[tool(description = "Get aggregate statistics about the memory store.")]
     async fn memory_stats(&self) -> Result<String, String> {
-        self.with_store(|store| {
-            let stats = store
+        let global_stats = self.with_global_store(|store| {
+            store
                 .stats(false)
-                .map_err(|e| format!("Failed to get stats: {}", e))?;
+                .map_err(|e| format!("Failed to get global stats: {}", e))
+        })?;
 
-            serde_json::to_string(&stats)
-                .map_err(|e| format!("Failed to serialize: {}", e))
-        })
+        let project_stats = if self.project_db_path.is_some() {
+            Some(self.with_project_store(|store| {
+                store
+                    .stats(false)
+                    .map_err(|e| format!("Failed to get project stats: {}", e))
+            })?)
+        } else {
+            None
+        };
+
+        let mut total = global_stats.total;
+        let mut by_scope: HashMap<String, u64> = global_stats.by_scope.clone();
+        let mut by_category: HashMap<String, u64> = global_stats.by_category.clone();
+        let mut by_root_path: HashMap<String, u64> = global_stats.by_root_path.clone();
+
+        if let Some(ref project_stats) = project_stats {
+            total += project_stats.total;
+
+            for (k, v) in &project_stats.by_scope {
+                *by_scope.entry(k.clone()).or_insert(0) += v;
+            }
+            for (k, v) in &project_stats.by_category {
+                *by_category.entry(k.clone()).or_insert(0) += v;
+            }
+            for (k, v) in &project_stats.by_root_path {
+                *by_root_path.entry(k.clone()).or_insert(0) += v;
+            }
+        }
+
+        let mut databases = serde_json::Map::new();
+        databases.insert("global".into(), json!({
+            "path": self.global_db_path.display().to_string(),
+            "vec_available": self.global_vec_available,
+            "total": global_stats.total,
+            "by_scope": global_stats.by_scope,
+            "by_category": global_stats.by_category,
+        }));
+        if let Some(ref ps) = project_stats {
+            databases.insert("project".into(), json!({
+                "path": self.project_db_path.as_ref().map(|p| p.display().to_string()),
+                "vec_available": self.project_vec_available,
+                "total": ps.total,
+                "by_scope": ps.by_scope,
+                "by_category": ps.by_category,
+            }));
+        }
+
+        serde_json::to_string(&json!({
+            "total": total,
+            "by_scope": by_scope,
+            "by_category": by_category,
+            "by_root_path": by_root_path,
+            "databases": databases,
+        }))
+        .map_err(|e| format!("Failed to serialize: {}", e))
     }
 
     #[tool(description = "Set a key-value pair in server state (stored in hard_state table).")]
@@ -509,15 +752,17 @@ impl MemoryServer {
         let value_json = serde_json::to_string(&params.value)
             .map_err(|e| format!("Failed to serialize value: {}", e))?;
 
-        self.with_store(|store| {
-            let version = store.set_state("mcp", &params.key, &value_json)
+        self.with_global_store(|store| {
+            let version = store
+                .set_state("mcp", &params.key, &value_json)
                 .map_err(|e| format!("Failed to set state: {}", e))?;
 
             serde_json::to_string(&json!({
                 "key": params.key,
                 "value": params.value,
                 "version": version
-            })).map_err(|e| format!("Failed to serialize response: {}", e))
+            }))
+            .map_err(|e| format!("Failed to serialize response: {}", e))
         })
     }
 
@@ -526,26 +771,24 @@ impl MemoryServer {
         &self,
         #[tool(aggr)] params: GetStateParams,
     ) -> Result<String, String> {
-        self.with_store(|store| {
-            match store.get_state_kv("mcp", &params.key) {
-                Ok(Some((value, version))) => {
-                    let parsed_value: serde_json::Value = serde_json::from_str(&value)
-                        .unwrap_or_else(|_| serde_json::json!(value));
+        self.with_global_store(|store| match store.get_state_kv("mcp", &params.key) {
+            Ok(Some((value, version))) => {
+                let parsed_value: serde_json::Value =
+                    serde_json::from_str(&value).unwrap_or_else(|_| serde_json::json!(value));
 
-                    serde_json::to_string(&json!({
-                        "key": params.key,
-                        "value": parsed_value,
-                        "version": version
-                    })).map_err(|e| format!("Failed to serialize: {}", e))
-                }
-                Ok(None) => {
-                    serde_json::to_string(&json!({
-                        "key": params.key,
-                        "error": "not found"
-                    })).map_err(|e| format!("Failed to serialize: {}", e))
-                }
-                Err(e) => Err(format!("Failed to get state: {}", e)),
+                serde_json::to_string(&json!({
+                    "key": params.key,
+                    "value": parsed_value,
+                    "version": version
+                }))
+                .map_err(|e| format!("Failed to serialize: {}", e))
             }
+            Ok(None) => serde_json::to_string(&json!({
+                "key": params.key,
+                "error": "not found"
+            }))
+            .map_err(|e| format!("Failed to serialize: {}", e)),
+            Err(e) => Err(format!("Failed to get state: {}", e)),
         })
     }
 
@@ -557,7 +800,9 @@ impl MemoryServer {
             return Ok("No facts extracted.".to_string());
         }
 
-        self.with_store(|store| {
+        let (target_db, _warning) = self.resolve_write_scope("project");
+
+        self.with_store_for_scope(target_db, |store| {
             let mut saved = 0;
 
             for fact in &facts {
@@ -613,6 +858,7 @@ impl MemoryServer {
         params.conversation_id.hash(&mut hasher);
         params.turn_id.hash(&mut hasher);
         let event_hash = format!("{:x}", hasher.finish());
+        let (target_db, _warning) = self.resolve_write_scope("project");
 
         // Concatenate message contents for fact extraction
         let combined_text: String = params
@@ -627,7 +873,7 @@ impl MemoryServer {
         }
 
         // Check dedup with per-request DB open
-        let already_processed = self.with_store(|store| {
+        let already_processed = self.with_store_for_scope(target_db, |store| {
             store
                 .is_event_processed(&event_hash, "ingest")
                 .map_err(|e| format!("Failed to check event dedup: {e}"))
@@ -640,7 +886,7 @@ impl MemoryServer {
         let facts = self.llm.extract_facts(&combined_text).await?;
         let mut saved = 0;
 
-        self.with_store(|store| {
+        self.with_store_for_scope(target_db, |store| {
             if !facts.is_empty() {
                 for fact in &facts {
                     let text = fact["text"].as_str().unwrap_or("").to_string();
@@ -709,20 +955,49 @@ impl MemoryServer {
 
     #[tool(description = "Get pipeline status and statistics.")]
     async fn get_pipeline_status(&self) -> Result<String, String> {
-        self.with_store(|store| {
-            let stats = store.stats(false).map_err(|e| format!("Failed to get stats: {}", e))?;
+        let global_stats = self.with_global_store(|store| {
+            store
+                .stats(false)
+                .map_err(|e| format!("Failed to get global stats: {}", e))
+        })?;
 
-            serde_json::to_string(&json!({
-                "status": "running",
-                "workers": if self.pipeline_enabled { "rust_async" } else { "disabled" },
-                "total_entries": stats.total,
-                "by_scope": stats.by_scope,
-                "by_category": stats.by_category,
-                "vec_available": self.vec_available,
-                "pipeline_enabled": self.pipeline_enabled,
-            }))
-            .map_err(|e| format!("Failed to serialize response: {}", e))
-        })
+        let project_stats = if self.project_db_path.is_some() {
+            Some(self.with_project_store(|store| {
+                store
+                    .stats(false)
+                    .map_err(|e| format!("Failed to get project stats: {}", e))
+            })?)
+        } else {
+            None
+        };
+
+        let mut total_entries = global_stats.total;
+        let mut by_scope = global_stats.by_scope;
+        let mut by_category = global_stats.by_category;
+
+        if let Some(project_stats) = project_stats {
+            total_entries += project_stats.total;
+            for (k, v) in project_stats.by_scope {
+                *by_scope.entry(k).or_insert(0) += v;
+            }
+            for (k, v) in project_stats.by_category {
+                *by_category.entry(k).or_insert(0) += v;
+            }
+        }
+
+        serde_json::to_string(&json!({
+            "status": "running",
+            "workers": if self.pipeline_enabled { "rust_async" } else { "disabled" },
+            "total_entries": total_entries,
+            "by_scope": by_scope,
+            "by_category": by_category,
+            "vec_available": {
+                "global": self.global_vec_available,
+                "project": self.project_vec_available,
+            },
+            "pipeline_enabled": self.pipeline_enabled,
+        }))
+        .map_err(|e| format!("Failed to serialize response: {}", e))
     }
 }
 
@@ -750,43 +1025,77 @@ impl ServerHandler for MemoryServer {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Load config from dotenv files (low→high priority, later wins):
-    //   1. ~/.secrets/master.env      (shared API keys)
-    //   2. ~/.sigil/config.env        (user-level defaults)
-    //   3. .sigil/config.env          (project-level overrides, e.g. MEMORY_DB_PATH)
-    //   4. Process env vars           (MCP harness overrides, highest priority)
-    // dotenvy::from_path_override means later files override earlier ones,
-    // but process env vars set before launch always win.
+    // Load config from dotenv files (same as before)
     let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
     let _ = dotenvy::from_path(home.join(".secrets/master.env"));
     let _ = dotenvy::from_path_override(home.join(".sigil/config.env"));
     let _ = dotenvy::from_path_override(PathBuf::from(".sigil/config.env"));
 
-    let db_path = std::env::var("MEMORY_DB_PATH")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| {
-            let mut default = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
-            default.push(".sigil");
-            default.push("memory.db");
-            default
-        });
+    let git_root = find_git_root();
 
-    // Ensure parent directory exists
-    if let Some(parent) = db_path.parent() {
+    // Resolve global DB path
+    let global_db_path = if let Ok(p) = std::env::var("MEMORY_DB_PATH") {
+        PathBuf::from(p)
+    } else {
+        let default_global = home.join(".sigil/global/memory.db");
+        // Migration: move legacy ~/.sigil/memory.db → ~/.sigil/global/memory.db
+        let legacy = home.join(".sigil/memory.db");
+        if legacy.exists() && !default_global.exists() {
+            if let Some(parent) = default_global.parent() {
+                tokio::fs::create_dir_all(parent).await?;
+            }
+            tokio::fs::rename(&legacy, &default_global).await?;
+            eprintln!(
+                "Migrated legacy DB: {} → {}",
+                legacy.display(),
+                default_global.display()
+            );
+        }
+        default_global
+    };
+
+    // Resolve project DB path
+    let project_db_path = git_root.as_ref().map(|root| root.join(".sigil/memory.db"));
+
+    // Ensure parent dirs exist
+    if let Some(parent) = global_db_path.parent() {
         tokio::fs::create_dir_all(parent).await?;
     }
-
-    let server = MemoryServer::new(db_path.clone())?;
-
-    // ── Startup integrity check (per-request open) ─────────────────────────
-    server.with_store(|store| {
-        match store.quick_check() {
-            Ok(true) => eprintln!("Database integrity: OK"),
-            Ok(false) => eprintln!("WARNING: Database may be corrupted! Run PRAGMA integrity_check for details."),
-            Err(e) => eprintln!("WARNING: Could not check database integrity: {e}"),
+    if let Some(ref p) = project_db_path {
+        if let Some(parent) = p.parent() {
+            tokio::fs::create_dir_all(parent).await?;
         }
-        Ok(())
-    }).map_err(|e| format!("startup check: {e}"))?;
+    }
+
+    let server = MemoryServer::new(global_db_path.clone(), project_db_path.clone())?;
+
+    // Integrity check on global DB
+    server
+        .with_global_store(|store| {
+            match store.quick_check() {
+                Ok(true) => eprintln!("Global database integrity: OK"),
+                Ok(false) => eprintln!("WARNING: Global database may be corrupted!"),
+                Err(e) => eprintln!("WARNING: Could not check global database integrity: {e}"),
+            }
+            Ok(())
+        })
+        .map_err(|e| format!("startup check: {e}"))?;
+
+    // Integrity check on project DB
+    if project_db_path.is_some() {
+        server
+            .with_project_store(|store| {
+                match store.quick_check() {
+                    Ok(true) => eprintln!("Project database integrity: OK"),
+                    Ok(false) => eprintln!("WARNING: Project database may be corrupted!"),
+                    Err(e) => {
+                        eprintln!("WARNING: Could not check project database integrity: {e}")
+                    }
+                }
+                Ok(())
+            })
+            .map_err(|e| format!("startup check: {e}"))?;
+    }
 
     if server.pipeline_enabled {
         eprintln!("Pipeline workers: ENABLED (external)");
@@ -797,8 +1106,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let transport = (stdin(), stdout());
 
     eprintln!("Starting Memory MCP Server v{}", env!("CARGO_PKG_VERSION"));
-    eprintln!("Database path: {}", db_path.display());
-    eprintln!("Vector search: {}", server.vec_available);
+    eprintln!("Global DB: {}", global_db_path.display());
+    if let Some(ref p) = project_db_path {
+        eprintln!("Project DB: {}", p.display());
+    } else {
+        eprintln!("Project DB: none (not in a git repository)");
+    }
+    eprintln!(
+        "Vector search: global={}, project={}",
+        server.global_vec_available, server.project_vec_available
+    );
     eprintln!("Tools: save_memory, search_memory, get_memory, list_memories, memory_stats, set_state, get_state, extract_facts, ingest_event, get_pipeline_status");
 
     let running = rmcp::service::serve_server(server, transport).await?;

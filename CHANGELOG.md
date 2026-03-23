@@ -5,6 +5,29 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.0] - 2026-03-23
+
+### Added
+- **Dual-DB Architecture (Global + Project)**: Memory server now maintains two separate SQLite databases — a global DB (`~/.sigil/global/memory.db`) for cross-project knowledge (user preferences, universal facts) and a per-project DB (`.sigil/memory.db` at git root) for project-scoped memories (architecture decisions, codebase patterns). This is the foundation for multi-agent shared memory.
+- **`DbScope` enum**: All MCP tool responses now include a `"db"` field (`"global"` or `"project"`) indicating which database sourced or stored the result.
+- **Automatic Git root detection**: Server detects the nearest `.git` directory to resolve the project DB path. Falls back to global-only when not inside a git repository.
+- **Legacy DB migration**: On first run, automatically migrates `~/.sigil/memory.db` to `~/.sigil/global/memory.db` for seamless upgrade from v0.4.
+- **Dual-DB search merge**: `search_memory` queries both databases in parallel, merges results by `final_score` descending, deduplicates by entry ID, and truncates to `top_k`.
+- **Write scope routing**: `save_memory`, `extract_facts`, and `ingest_event` route writes via `resolve_write_scope()` — `"global"` scope writes to global DB, everything else defaults to project DB (with automatic fallback + warning when no project DB is available).
+- **Per-DB integrity checks**: Startup runs `PRAGMA quick_check` on both databases independently.
+- **Aggregated `memory_stats`**: Returns merged totals across both DBs plus a `"databases"` breakdown showing per-DB stats and vector availability.
+
+### Changed
+- **`MemoryServer` struct**: Split from single `db_path`/`vec_available` into `global_db_path`/`project_db_path` and `global_vec_available`/`project_vec_available`.
+- **`set_state`/`get_state`**: Now hardcoded to use global DB (server state is cross-project by nature).
+- **`default_scope()`**: Changed from `"general"` to `"project"` to match new dual-DB routing semantics.
+- **`get_memory`**: Tries project DB first, falls back to global DB.
+- **`list_memories`**: Queries both DBs, tags entries with source, sorts by timestamp descending.
+
+### Removed
+- **Single-DB `with_store` helper**: Replaced by `with_global_store`, `with_project_store`, and `with_store_for_scope`.
+- **Pipeline module**: Removed in prior commit (server is now pure MCP handler).
+
 ## [0.4.0] - 2026-03-18
 
 ### Added

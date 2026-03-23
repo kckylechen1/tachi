@@ -80,8 +80,7 @@
          "command": "<绝对路径>/sigil/target/release/memory-server",
          "env": {
            "VOYAGE_API_KEY": "...",
-           "SILICONFLOW_API_KEY": "...",
-           "MEMORY_DB_PATH": "~/.sigil/memory.db"
+           "SILICONFLOW_API_KEY": "..."
          }
        }
      }
@@ -125,7 +124,7 @@ Sigil 支持以外部扩展插件的形式桥接运行于 OpenClaw 内核。
 - **🔒 强状态隔离**：引入了确定性并独立于向量的强状态 `hard_state` KV 引擎，适合存放监视清单、明确仓位等避免幻觉影响的事务。
 - **🧠 三级自适应上下文分层**：数据接入时将自动被提纯为三个深度：`L0`（摘要提要）, `L1`（段落概览）, 与 `L2`（完整内容）。
 - **🔄 两阶演化（记忆去重）**：首创基于数学相似度阈值的 `HARD_SKIP` 与 `EVOLVE` 两阶段查重去重算法。
-- **🔌 零外部依赖部署**：所有引擎与数据层级合并于微小的 `memory.db` (SQLite) 架构之上，不需要外部建立如 Neo4j 或者向量库等独立服务。
+- **🔌 双库架构**：全局记忆 (`~/.sigil/global/memory.db`) 跨项目共享（用户偏好、通用知识），每个项目独立数据库 (`.sigil/memory.db` 位于 git 仓库根目录) 存储项目级上下文。自动检测 git 根目录，自动迁移旧版数据库。无需任何外部独立数据库依赖。
 
 ---
 
@@ -259,8 +258,8 @@ VOYAGE_API_KEY="your_voyage_key_here"
 # 大模型抽取层与清洗归置
 SILICONFLOW_API_KEY="your_siliconflow_key_here"
 
-# 本地 SQLite 文件相对绝对部署区 (可选配置)
-MEMORY_DB_PATH="~/.sigil/memory.db"
+# 本地 SQLite 文件（可选 — 默认自动解析为 ~/.sigil/global/memory.db + 每个项目 .sigil/memory.db）
+MEMORY_DB_PATH="~/.sigil/global/memory.db"
 ```
 
 ---
