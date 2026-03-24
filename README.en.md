@@ -106,7 +106,7 @@ Please configure the Tachi local memory MCP server:
      }
    }
 
-The server loads API keys automatically from the `.env` file in the project root.
+The server loads API keys from the `.env` file in the project root (see `.env.example`).
 Required providers:
 - Voyage API (Embedding + Rerank): https://dash.voyageai.com/
 - SiliconFlow (Extraction): https://cloud.siliconflow.cn/
@@ -129,19 +129,26 @@ Tachi can be integrated as a native OpenClaw extension plugin.
 ```text
 Please install the Tachi memory extension for OpenClaw:
 
-1. Execute the installation script:
+1. Install the Tachi MCP server (recommended):
+   brew tap kckylechen1/tachi && brew install tachi
+
+2. Deploy the OpenClaw extension:
    bash -c "$(curl -fsSL https://raw.githubusercontent.com/kckylechen1/tachi/main/scripts/install_openclaw_ext.sh)"
+   The script automates cloning, compiling the extension, and symlinking to the OpenClaw plugin directory.
+   If Cargo is installed, it will additionally build the optional NAPI native module for acceleration; otherwise it runs in MCP-only mode.
 
-2. The script automates cloning, building the Rust NAPI module, compiling the extension, and symlinking to the OpenClaw plugin directory.
+3. Enable `memory-hybrid-bridge` in `plugins.allow` and assign `plugins.slots.memory` to `memory-hybrid-bridge`.
 
-3. Enable `memory-hybrid-bridge` in `plugins.allow`, assign `plugins.slots.memory` to `memory-hybrid-bridge`, and configure API keys in `.env`.
+4. Configure API keys in the project root `.env` file (see `.env.example`):
+   - VOYAGE_API_KEY (Embedding + Rerank)
+   - SILICONFLOW_API_KEY (Extraction)
 ```
 
 ---
 
 ## ✨ Key Features
 
-- **⚡ High-Performance Rust Core (`memory-core`)**: The foundational scoring, storage, entity extraction, and retrieval engines are written in Rust, featuring dynamic bindings for Node.js (`NAPI-RS`) and Python (`PyO3`). **34 MCP tools** exposed as of v0.8.
+- **⚡ High-Performance Rust Core (`memory-core`)**: The foundational scoring, storage, entity extraction, and retrieval engines are written in Rust, featuring dynamic bindings for Node.js (`NAPI-RS`, optional) and Python (`PyO3`). The OpenClaw plugin communicates via MCP stdio by default, with NAPI as an optional fallback. **34 MCP tools** exposed as of v0.8.
 - **🗂️ Filesystem Paradigm**: Context is managed hierarchically via a `path` parameter (e.g., `/user/preferences`, `/project/architecture`), allowing precise isolation and contextual scoping.
 - **🔍 3-Channel Hybrid Search Engine**:
   - **Semantic**: Built-in vector embedding search via `sqlite-vec` (KNN).
@@ -218,7 +225,8 @@ graph TD
     RMCP -->|"reqwest"| VOYAGE
     RMCP -->|"async-openai"| SILICON
     MCP --> PYO3
-    OC --> NAPI
+    OC -->|"MCP stdio preferred"| RMCP
+    OC -.->|"NAPI fallback"| NAPI
     MCP -.->|"Async Queue"| Operations
     Operations -.->|"Write"| PYO3
 

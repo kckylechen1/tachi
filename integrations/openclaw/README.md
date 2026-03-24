@@ -42,15 +42,13 @@ curl -fsSL https://raw.githubusercontent.com/kckylechen1/tachi/main/scripts/inst
 | `mcp-client.ts` | MCP stdio client — 多候选启动、连接恢复、JSON 解析 |
 | `extractor.ts` | LLM 结构化提取 + 输入清洗 + category-aware merge |
 | `config.ts` | 类型定义 + 默认配置（从环境变量读取） |
-| `constants.ts` | 环境加载：`~/.secrets/master.env` → `~/.tachi/config.env` |
+| `constants.ts` | 环境加载：`.env` + 运行时环境变量 |
 | `reranker.ts` | Voyage rerank-2.5 重排序 |
 
 ## 环境变量
 
-秘钥通过以下链加载（`constants.ts`）：
-1. `~/.secrets/master.env` — 基础秘钥（backfill，不覆盖已有）
-2. `~/.tachi/config.env` — 覆盖（override=true）
-3. `process.env`（direnv/.envrc）优先级最高
+将 `.env.example` 拷贝为 `.env`（项目根目录或插件目录均可），填入 API 密钥。
+插件运行时会自动从 `.env` 加载环境变量。
 
 | 变量 | 必填 | 说明 |
 |------|------|------|
