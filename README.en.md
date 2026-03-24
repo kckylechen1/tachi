@@ -61,6 +61,9 @@ In a multi-agent future, having every agent spawn and manage its own fragile MCP
 4. **"Pristine" Memory Lifecycle**
 Long-running autonomous operations require extreme hygiene to prevent hallucination drift. Tachi introduces rigorous lifecycle management: pre-save AI noise filtering (`is_noise_text`), automated background garbage collection (GC), and CASCADE hard deletions (`delete_memory`). This ensures the memory store stays pristine and contextually relevant after months of continuous operations.
 
+5. **Skill Slots: On-Demand "Neural Extensions"**
+Tachi isn't just about routing tools; it's about standardizing complex workflows. Through "Skill Slots" (`Skill-as-a-Tool`), developers can encapsulate prompt chains, SOPs, and domain-specific knowledge into simple markdown files. Tachi automatically compiles these into Native MCP tools. Agents are no longer weighed down by massive system prompts—they simply "plug into" Tachi to instantly acquire on-demand professional skills.
+
 ---
 
 ## 🤖 Quick Start: Coding Agents (MCP)
