@@ -727,7 +727,13 @@ struct SaveMemoryParams {
     /// Bypass noise filter and force-save text
     #[serde(default)]
     force: bool,
+
+    /// Auto-link: create graph edges to memories sharing the same entities (default: true)
+    #[serde(default = "default_auto_link")]
+    auto_link: bool,
 }
+
+fn default_auto_link() -> bool { true }
 
 #[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
@@ -786,8 +792,8 @@ struct SearchMemoryParams {
     #[serde(default = "default_mmr_threshold")]
     mmr_threshold: Option<f64>,
 
-    /// Graph expand hops (0 = disabled)
-    #[serde(default)]
+    /// Graph expand hops (0 = disabled, default = 1)
+    #[serde(default = "default_graph_hops")]
     graph_expand_hops: u32,
 
     /// Optional relation filter for graph expansion
@@ -868,6 +874,8 @@ fn default_candidates() -> usize {
 fn default_mmr_threshold() -> Option<f64> {
     Some(0.85)
 }
+
+fn default_graph_hops() -> u32 { 1 }
 
 #[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
@@ -1402,6 +1410,49 @@ impl MemoryServer {
         response.insert("status".into(), json!("saved (enrichment pending)"));
         if let Some(warning) = warning {
             response.insert("warning".into(), json!(warning));
+        }
+
+        // 6d: Auto-link — create edges to memories sharing the same entities
+        if params.auto_link && !entry.entities.is_empty() {
+            let auto_link_server = self.clone();
+            let auto_link_id = id.clone();
+            let auto_link_entities = entry.entities.clone();
+            tokio::spawn(async move {
+                for entity in &auto_link_entities {
+                    // Search for existing memories mentioning this entity
+                    let query = entity.clone();
+                    if let Ok(results) = auto_link_server.with_global_store(|store| {
+                        store.search(&query, Some(memory_core::SearchOptions {
+                            top_k: 5,
+                            ..Default::default()
+                        })).map_err(|e| format!("{}", e))
+                    }) {
+                        for result in results {
+                            if result.entry.id == auto_link_id { continue; }
+                            // Only link if at least one entity overlaps
+                            let shared: Vec<&String> = result.entry.entities.iter()
+                                .filter(|e| auto_link_entities.contains(e))
+                                .collect();
+                            if !shared.is_empty() {
+                                let edge = memory_core::MemoryEdge {
+                                    source_id: auto_link_id.clone(),
+                                    target_id: result.entry.id.clone(),
+                                    relation: "related_to".to_string(),
+                                    weight: 0.5,
+                                    metadata: json!({ "auto_link": true, "shared_entities": shared }),
+                                    created_at: chrono::Utc::now().to_rfc3339(),
+                                    valid_from: String::new(),
+                                    valid_to: None,
+                                };
+                                let _ = auto_link_server.with_global_store(|store| {
+                                    store.add_edge(&edge).map_err(|e| format!("{}", e))
+                                });
+                            }
+                        }
+                    }
+                }
+            });
+            response.insert("auto_link".into(), json!("pending"));
         }
 
         serde_json::to_string(&serde_json::Value::Object(response))
@@ -2383,6 +2434,8 @@ impl MemoryServer {
                 }
                 "sse" | "http" | "streamable-http" => {
                     if let Some(url) = def["url"].as_str() {
+                        // TODO(5a): inject auth headers when rmcp supports custom reqwest::Client
+                        //           Hub definition supports headers={"Authorization":"Bearer xxx"}
                         let transport = StreamableHttpClientTransport::from_uri(url);
                         match rmcp::ServiceExt::serve((), transport).await {
                                 Ok(client) => match client.peer().list_all_tools().await {
@@ -3226,6 +3279,7 @@ impl MemoryServer {
                 let url = def["url"]
                     .as_str()
                     .ok_or_else(|| rmcp::ErrorData::internal_error("missing url for SSE", None))?;
+                // TODO(5a): inject auth headers when rmcp supports custom reqwest::Client
                 let transport = StreamableHttpClientTransport::from_uri(url);
                 rmcp::ServiceExt::serve((), transport)
                     .await

@@ -1384,10 +1384,14 @@ pub fn graph_expand(
         }
     }
 
-    // BFS
+    // BFS with max_nodes throttle (protect context window)
+    const MAX_NODES: usize = 50;
     while let Some((current_id, depth)) = queue.pop_front() {
         if depth >= max_hops {
             continue;
+        }
+        if visited.len() >= MAX_NODES {
+            break;
         }
 
         let edges = get_edges(conn, &current_id, "both", relation_filter)?;
