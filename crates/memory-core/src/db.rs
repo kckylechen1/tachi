@@ -155,7 +155,7 @@ pub fn init_schema(conn: &Connection) -> Result<(), MemoryError> {
             success     INTEGER NOT NULL DEFAULT 1,
             duration_ms INTEGER NOT NULL DEFAULT 0,
             error_kind  TEXT,
-            created_at  TEXT NOT NULL DEFAULT ''
+            created_at  TEXT NOT NULL DEFAULT (STRFTIME('%Y-%m-%dT%H:%M:%fZ', 'now'))
         );
         CREATE INDEX IF NOT EXISTS idx_audit_timestamp ON audit_log(timestamp DESC);
         CREATE INDEX IF NOT EXISTS idx_audit_server ON audit_log(server_id);
@@ -642,20 +642,35 @@ pub fn update_enrichment_fields(
     new_vec: Option<&[u8]>,
     expected_revision: i64,
 ) -> Result<bool, MemoryError> {
+    if new_summary.is_none() && new_vec.is_none() {
+        return Ok(true); // nothing to do
+    }
+
     let now = now_utc_iso();
     let tx = conn.transaction()?;
 
-    // Build a targeted UPDATE that only touches enrichment columns
-    if let Some(summary) = new_summary {
+    // Always check revision first, regardless of which fields are being updated.
+    // This prevents stale enrichment from overwriting concurrent edits.
+    let rows_affected = if let Some(summary) = new_summary {
         tx.execute(
             "UPDATE memories SET summary = ?1, updated_at = ?2 WHERE id = ?3 AND revision = ?4",
             params![summary, &now, id, expected_revision],
-        )?;
-        if tx.changes() == 0 {
-            tx.commit()?;
-            return Ok(false); // revision mismatch — entry was updated, discard enrichment
-        }
-        // Also refresh FTS for the updated summary
+        )?
+    } else {
+        // No summary to update — still verify revision by touching updated_at
+        tx.execute(
+            "UPDATE memories SET updated_at = ?1 WHERE id = ?2 AND revision = ?3",
+            params![&now, id, expected_revision],
+        )?
+    };
+
+    if rows_affected == 0 {
+        tx.commit()?;
+        return Ok(false); // revision mismatch — entry was updated concurrently, discard enrichment
+    }
+
+    // Refresh FTS if summary was updated
+    if new_summary.is_some() {
         tx.execute("DELETE FROM memories_fts WHERE id = ?1", params![id])?;
         tx.execute(
             r#"INSERT INTO memories_fts(id, path, summary, text, keywords, entities)

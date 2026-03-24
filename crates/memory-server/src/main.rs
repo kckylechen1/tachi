@@ -432,6 +432,34 @@ impl MemoryServer {
             "output": output
         }))
     }
+
+    /// Shared retry dispatch for DLQ entries.
+    /// Handles skill tools and proxy tools. Native tools are excluded from retry
+    /// since they are synchronous and should be retried by the caller directly.
+    async fn retry_dispatch(
+        &self,
+        tool_name: &str,
+        arguments: Option<serde_json::Map<String, serde_json::Value>>,
+    ) -> Result<rmcp::model::CallToolResult, rmcp::ErrorData> {
+        let args_obj = arguments.map(|m| m.into_iter().collect::<rmcp::model::JsonObject>());
+
+        // 1. Skill tool?
+        if self.skill_tools.lock().map(|s| s.contains_key(tool_name)).unwrap_or(false) {
+            return self.call_skill_tool(tool_name, args_obj).await;
+        }
+
+        // 2. Proxy tool? (format: "server__tool")
+        if let Some((server_name, remote_tool)) = tool_name.split_once("__") {
+            return self.proxy_call_internal(server_name, remote_tool, args_obj).await;
+        }
+
+        // 3. Native tool — cannot retry via DLQ (needs RequestContext).
+        //    These are marked abandoned; the client should retry the MCP call directly.
+        Err(rmcp::ErrorData::invalid_params(
+            format!("Native tool '{}' cannot be retried via DLQ — retry the MCP call directly", tool_name),
+            None,
+        ))
+    }
 }
 
 fn is_active_global_rule(entry: &MemoryEntry) -> bool {
@@ -954,6 +982,12 @@ struct HubCallParams {
     arguments: serde_json::Value,
 }
 
+#[derive(Debug, Deserialize, JsonSchema)]
+struct HubDisconnectParams {
+    /// MCP server capability ID (e.g. "mcp:longbridge") or server name
+    server_id: String,
+}
+
 #[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 struct AuditLogParams {
@@ -991,6 +1025,7 @@ struct SyncMemoriesParams {
 // ─── Ghost Whispers (Inter-Agent Pub/Sub) ─────────────────────────────────────
 
 const PUBSUB_RING_MAX: usize = 100;
+const PUBSUB_MAX_CURSORS: usize = 1000;
 
 #[derive(Clone)]
 struct PubSubMessage {
@@ -1008,6 +1043,10 @@ struct PubSubState {
     next_index: HashMap<String, usize>,
     /// agent_id → (topic → last_seen_global_index)
     cursors: HashMap<String, HashMap<String, usize>>,
+    /// agent_id → monotonic recency sequence (used for LRU cursor eviction)
+    cursor_recency: HashMap<String, u64>,
+    /// Monotonic sequence counter for cursor recency tracking
+    cursor_seq: u64,
 }
 
 impl PubSubState {
@@ -1016,6 +1055,8 @@ impl PubSubState {
             messages: HashMap::new(),
             next_index: HashMap::new(),
             cursors: HashMap::new(),
+            cursor_recency: HashMap::new(),
+            cursor_seq: 0,
         }
     }
 }
@@ -1812,11 +1853,12 @@ impl MemoryServer {
 
         // Update agent known state in global DB
         if !sync_updates.is_empty() {
-            let _ = self.with_global_store(|store| {
+            self.with_global_store(|store| {
                 store
                     .update_agent_known_state(&params.agent_id, &sync_updates)
                     .map_err(|e| format!("Failed to update agent state: {}", e))
-            });
+            })
+            .map_err(|e| format!("sync_memories failed to persist agent state for '{}': {}", params.agent_id, e))?;
         }
 
         serde_json::to_string(&json!({
@@ -1943,6 +1985,10 @@ impl MemoryServer {
                 resp.insert("analysis".into(), json!("pending (async)"));
             }
         } else if params.cap_type == "mcp" {
+            // Skip discovery for disabled MCP capabilities (security: don't spawn untrusted commands)
+            if !auto_enabled {
+                resp.insert("discovery".into(), json!("skipped (capability disabled)"));
+            } else {
             // Auto-discover tools from child MCP server
             let def: serde_json::Value = serde_json::from_str(&cap.definition).unwrap_or_default();
             let transport_type = def["transport"].as_str().unwrap_or("stdio");
@@ -2095,7 +2141,8 @@ impl MemoryServer {
                     );
                 }
             }
-        }
+            } // else: auto_enabled — skip discovery for disabled
+        } // end: else if params.cap_type == "mcp"
 
         serde_json::to_string(&serde_json::Value::Object(resp))
             .map_err(|e| format!("serialize: {e}"))
@@ -2361,6 +2408,40 @@ impl MemoryServer {
         .map_err(|e| format!("serialize: {e}"))
     }
 
+    #[tool(description = "Disconnect a cached MCP server connection from the pool. Forces a fresh reconnect (with updated env/config) on next hub_call.")]
+    async fn hub_disconnect(
+        &self,
+        Parameters(params): Parameters<HubDisconnectParams>,
+    ) -> Result<String, String> {
+        let server_name = params
+            .server_id
+            .strip_prefix("mcp:")
+            .unwrap_or(&params.server_id);
+
+        // Remove from connection pool
+        let had_connection = {
+            let mut conns = self.pool.connections.lock().unwrap_or_else(|e| e.into_inner());
+            conns.remove(server_name).is_some()
+        };
+
+        // Also clear discovered tools cache
+        {
+            let mut tools = self.proxy_tools.lock().unwrap_or_else(|e| e.into_inner());
+            tools.remove(server_name);
+        }
+
+        serde_json::to_string(&json!({
+            "server": server_name,
+            "disconnected": had_connection,
+            "message": if had_connection {
+                "Connection dropped. Next hub_call will reconnect with latest config."
+            } else {
+                "No active connection found (will connect fresh on next hub_call)."
+            },
+        }))
+        .map_err(|e| format!("serialize: {e}"))
+    }
+
     // ─── Ghost Whispers (Inter-Agent Pub/Sub) ────────────────────────────────
 
     #[tool(description = "Publish a message to a Ghost Whispers topic. Other agents can poll for new messages via ghost_subscribe.")]
@@ -2404,6 +2485,21 @@ impl MemoryServer {
         Parameters(params): Parameters<GhostSubscribeParams>,
     ) -> Result<String, String> {
         let mut state = self.pubsub.lock().unwrap_or_else(|e| e.into_inner());
+
+        // Evict least-recently-active cursors if we exceed the limit
+        if state.cursors.len() >= PUBSUB_MAX_CURSORS && !state.cursors.contains_key(&params.agent_id) {
+            let evict_agent = state
+                .cursor_recency
+                .iter()
+                .min_by_key(|(_, seq)| *seq)
+                .map(|(agent_id, _)| agent_id.clone())
+                .or_else(|| state.cursors.keys().next().cloned());
+
+            if let Some(agent_id) = evict_agent {
+                state.cursors.remove(&agent_id);
+                state.cursor_recency.remove(&agent_id);
+            }
+        }
 
         // Read current cursors for this agent (clone to release borrow)
         let prev_cursors: HashMap<String, usize> = state
@@ -2453,6 +2549,9 @@ impl MemoryServer {
 
         // Write back updated cursors
         state.cursors.insert(params.agent_id.clone(), new_cursors);
+        state.cursor_seq = state.cursor_seq.saturating_add(1);
+        let recency_seq = state.cursor_seq;
+        state.cursor_recency.insert(params.agent_id.clone(), recency_seq);
 
         serde_json::to_string(&json!({
             "agent_id": params.agent_id,
@@ -2637,31 +2736,11 @@ impl MemoryServer {
             }
         };
 
-        // Re-dispatch the tool call via tool_router
-        if !self.tool_router.has_route(&dead_letter.tool_name) {
-            // Update status to abandoned
-            let mut dlq = self.dead_letters.lock().unwrap_or_else(|e| e.into_inner());
-            if let Some(dl) = dlq.iter_mut().find(|dl| dl.id == params.dead_letter_id) {
-                dl.status = "abandoned".to_string();
-            }
-            return Err(format!(
-                "Tool '{}' not found in router, entry abandoned",
-                dead_letter.tool_name
-            ));
-        }
-
-        // Simple retry: call the tool directly using the existing internal dispatch
-        let retry_result = if self.skill_tools.lock().map(|s| s.contains_key(&dead_letter.tool_name)).unwrap_or(false) {
-            self.call_skill_tool(&dead_letter.tool_name, dead_letter.arguments.clone().map(|m| {
-                m.into_iter().collect::<rmcp::model::JsonObject>()
-            })).await
-        } else if let Some((server_name, tool_name)) = dead_letter.tool_name.split_once("__") {
-            self.proxy_call_internal(server_name, tool_name, dead_letter.arguments.clone().map(|m| {
-                m.into_iter().collect::<rmcp::model::JsonObject>()
-            })).await
-        } else {
-            Err(rmcp::ErrorData::invalid_params("Cannot retry native tools via DLQ", None))
-        };
+        // Re-dispatch the tool call via shared retry dispatch
+        let retry_result = self.retry_dispatch(
+            &dead_letter.tool_name,
+            dead_letter.arguments.clone(),
+        ).await;
 
         match retry_result {
             Ok(res) => {
@@ -2807,22 +2886,16 @@ impl MemoryServer {
     async fn connect_child(&self, server_name: &str) -> Result<(), rmcp::ErrorData> {
         let server_id = format!("mcp:{}", server_name);
 
-        let cap = {
-            let mut found = None;
-            if self.project_db_path.is_some() {
-                found = self
-                    .with_project_store(|store| store.hub_get(&server_id).map_err(|e| format!("{e}")))
-                    .unwrap_or(None);
-            }
-            if found.is_none() {
-                found = self
-                    .with_global_store(|store| store.hub_get(&server_id).map_err(|e| format!("{e}")))
-                    .unwrap_or(None);
-            }
-            found.ok_or_else(|| {
-                rmcp::ErrorData::invalid_params(format!("MCP server '{}' not found", server_id), None)
-            })?
-        };
+        let cap = self.get_capability(&server_id)?;
+        if !cap.enabled {
+            return Err(rmcp::ErrorData::invalid_params(
+                format!(
+                    "MCP server '{}' is disabled. Use hub_set_enabled to activate after review.",
+                    server_id
+                ),
+                None,
+            ));
+        }
 
         let def: serde_json::Value = serde_json::from_str(&cap.definition)
             .map_err(|e| rmcp::ErrorData::internal_error(format!("bad definition: {e}"), None))?;
@@ -2894,21 +2967,18 @@ impl MemoryServer {
     ) -> Result<rmcp::model::CallToolResult, rmcp::ErrorData> {
         // 0. Look up capability for deny-list and timeout config
         let server_id = format!("mcp:{}", server_name);
-        let cap_def = {
-            let mut found = None;
-            if self.project_db_path.is_some() {
-                found = self.with_project_store(|store| {
-                    store.hub_get(&server_id).map_err(|e| format!("{e}"))
-                }).unwrap_or(None);
-            }
-            if found.is_none() {
-                found = self.with_global_store(|store| {
-                    store.hub_get(&server_id).map_err(|e| format!("{e}"))
-                }).unwrap_or(None);
-            }
-            found.map(|c| serde_json::from_str::<serde_json::Value>(&c.definition).unwrap_or_default())
-                .unwrap_or_default()
-        };
+        let cap = self.get_capability(&server_id)?;
+        if !cap.enabled {
+            return Err(rmcp::ErrorData::invalid_params(
+                format!(
+                    "MCP server '{}' is disabled. Use hub_set_enabled to activate after review.",
+                    server_id
+                ),
+                None,
+            ));
+        }
+        let cap_def: serde_json::Value = serde_json::from_str(&cap.definition)
+            .map_err(|e| rmcp::ErrorData::internal_error(format!("bad definition: {e}"), None))?;
 
         // 1. Check deny-list permissions
         if let Some(deny_list) = cap_def["permissions"]["deny"].as_array() {
@@ -3199,16 +3269,11 @@ impl ServerHandler for MemoryServer {
                         // Brief delay before retry
                         tokio::time::sleep(Duration::from_millis(100)).await;
 
-                        // Simple retry via internal dispatch (avoid non-exhaustive struct construction)
-                        let retry_result: Result<rmcp::model::CallToolResult, rmcp::ErrorData> = if self.skill_tools.lock().map(|s| s.contains_key(&tool_name_owned)).unwrap_or(false) {
-                            let args_obj = tool_args_for_dlq.map(|m| m.into_iter().collect::<rmcp::model::JsonObject>());
-                            self.call_skill_tool(&tool_name_owned, args_obj).await
-                        } else if let Some((sn, tn)) = tool_name_owned.split_once("__") {
-                            let args_obj = tool_args_for_dlq.map(|m| m.into_iter().collect::<rmcp::model::JsonObject>());
-                            self.proxy_call_internal(sn, tn, args_obj).await
-                        } else {
-                            Err(rmcp::ErrorData { code: rmcp::model::ErrorCode(0), message: "no retry path".into(), data: None })
-                        };
+                        // Retry via shared dispatch helper
+                        let retry_result = self.retry_dispatch(
+                            &tool_name_owned,
+                            tool_args_for_dlq,
+                        ).await;
 
                         {
                             let mut dlq = self
@@ -3563,4 +3628,175 @@ fn stable_hash(input: &str) -> String {
         hash = hash.wrapping_mul(FNV_PRIME);
     }
     format!("{:016x}", hash)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn ensure_test_env() {
+        static INIT: std::sync::Once = std::sync::Once::new();
+        INIT.call_once(|| {
+            std::env::set_var("VOYAGE_API_KEY", "test-voyage-key");
+            std::env::set_var("SILICONFLOW_API_KEY", "test-siliconflow-key");
+            std::env::set_var("SILICONFLOW_MODEL", "test-model");
+            std::env::set_var("SUMMARY_MODEL", "test-summary-model");
+        });
+    }
+
+    fn make_server() -> MemoryServer {
+        ensure_test_env();
+        let db_path = std::env::temp_dir().join(format!(
+            "memory-server-test-{}.sqlite",
+            uuid::Uuid::new_v4()
+        ));
+        MemoryServer::new(db_path, None).expect("failed to create test server")
+    }
+
+    fn make_entry(id: &str) -> MemoryEntry {
+        MemoryEntry {
+            id: id.to_string(),
+            path: "/".to_string(),
+            summary: "".to_string(),
+            text: "test memory".to_string(),
+            importance: 0.7,
+            timestamp: Utc::now().to_rfc3339(),
+            category: "fact".to_string(),
+            topic: "".to_string(),
+            keywords: Vec::new(),
+            persons: Vec::new(),
+            entities: Vec::new(),
+            location: "".to_string(),
+            source: "test".to_string(),
+            scope: "general".to_string(),
+            archived: false,
+            access_count: 0,
+            last_access: None,
+            revision: 1,
+            metadata: json!({}),
+            vector: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn proxy_call_blocks_disabled_capability_even_directly() {
+        let server = make_server();
+
+        let cap = HubCapability {
+            id: "mcp:blocked".to_string(),
+            cap_type: "mcp".to_string(),
+            name: "blocked".to_string(),
+            version: 1,
+            description: "test disabled server".to_string(),
+            definition: r#"{"transport":"stdio","command":"npx","args":[]}"#.to_string(),
+            enabled: false,
+            uses: 0,
+            successes: 0,
+            failures: 0,
+            avg_rating: 0.0,
+            last_used: None,
+            created_at: String::new(),
+            updated_at: String::new(),
+        };
+
+        server
+            .with_global_store(|store| {
+                store
+                    .hub_register(&cap)
+                    .map_err(|e| format!("register failed: {e}"))
+            })
+            .expect("failed to register capability");
+
+        let err = server
+            .proxy_call_internal("blocked", "some_tool", None)
+            .await
+            .expect_err("disabled MCP capability should be blocked");
+
+        assert!(
+            err.to_string().contains("disabled"),
+            "expected disabled error, got: {}",
+            err
+        );
+    }
+
+    #[tokio::test]
+    async fn ghost_subscribe_evicts_least_recent_cursor_when_full() {
+        let server = make_server();
+
+        {
+            let mut state = server.pubsub.lock().unwrap_or_else(|e| e.into_inner());
+            for i in 0..PUBSUB_MAX_CURSORS {
+                let agent_id = format!("agent-{i}");
+                state.cursors.insert(agent_id.clone(), HashMap::new());
+                state.cursor_recency.insert(agent_id, (i as u64) + 1);
+            }
+            state.cursor_seq = PUBSUB_MAX_CURSORS as u64;
+        }
+
+        let params = GhostSubscribeParams {
+            agent_id: "agent-new".to_string(),
+            topics: vec![],
+        };
+
+        let _ = server
+            .ghost_subscribe(Parameters(params))
+            .await
+            .expect("ghost_subscribe should succeed");
+
+        let state = server.pubsub.lock().unwrap_or_else(|e| e.into_inner());
+        assert_eq!(state.cursors.len(), PUBSUB_MAX_CURSORS);
+        assert!(
+            !state.cursors.contains_key("agent-0"),
+            "expected least-recent agent to be evicted"
+        );
+        assert!(state.cursors.contains_key("agent-new"));
+        assert!(state.cursor_recency.contains_key("agent-new"));
+    }
+
+    #[tokio::test]
+    async fn sync_memories_errors_if_agent_state_persist_fails() {
+        let server = make_server();
+
+        server
+            .with_global_store(|store| {
+                store
+                    .upsert(&make_entry("sync-1"))
+                    .map_err(|e| format!("upsert failed: {e}"))
+            })
+            .expect("failed to seed memory");
+
+        server
+            .with_global_store(|store| {
+                store
+                    .connection()
+                    .execute_batch(
+                        r#"
+                        DROP TRIGGER IF EXISTS block_agent_known_state_insert;
+                        CREATE TRIGGER block_agent_known_state_insert
+                        BEFORE INSERT ON agent_known_state
+                        BEGIN
+                            SELECT RAISE(FAIL, 'blocked by test');
+                        END;
+                        "#,
+                    )
+                    .map_err(|e| format!("trigger setup failed: {e}"))
+            })
+            .expect("failed to install blocking trigger");
+
+        let params = SyncMemoriesParams {
+            agent_id: "agent-sync-test".to_string(),
+            path_prefix: Some("/".to_string()),
+            limit: 10,
+        };
+
+        let err = server
+            .sync_memories(Parameters(params))
+            .await
+            .expect_err("sync_memories should fail when state persistence fails");
+
+        assert!(
+            err.contains("failed to persist agent state"),
+            "unexpected error: {err}"
+        );
+    }
 }
