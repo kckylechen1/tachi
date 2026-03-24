@@ -8,15 +8,15 @@ mod prompts;
 
 use chrono::Utc;
 use clap::Parser;
-use memory_core::{HubCapability, MemoryEntry, MemoryStore, SearchOptions};
+use memory_core::{HubCapability, HybridWeights, MemoryEntry, MemoryStore, SearchOptions};
 use rmcp::{
-    model::{ServerCapabilities, ServerInfo},
-    tool, tool_router,
     handler::server::{tool::ToolRouter, wrapper::Parameters},
-    transport::StreamableHttpClientTransport,
-    ServerHandler,
+    model::{ServerCapabilities, ServerInfo},
     schemars,
     schemars::JsonSchema,
+    tool, tool_router,
+    transport::StreamableHttpClientTransport,
+    ServerHandler,
 };
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -40,6 +40,18 @@ struct Cli {
     /// Port for HTTP daemon (default: 6919)
     #[arg(long, default_value_t = 6919)]
     port: u16,
+
+    /// Override global memory DB path (equivalent to MEMORY_DB_PATH)
+    #[arg(long, value_name = "PATH")]
+    global_db: Option<PathBuf>,
+
+    /// Override project memory DB path
+    #[arg(long, value_name = "PATH")]
+    project_db: Option<PathBuf>,
+
+    /// Disable project DB entirely (force single-DB mode)
+    #[arg(long)]
+    no_project_db: bool,
 
     /// Enable/disable background database GC (overrides MEMORY_GC_ENABLED)
     #[arg(long)]
@@ -120,6 +132,16 @@ fn slim_search_result(result: &memory_core::SearchResult, db: DbScope) -> serde_
         "relevance".into(),
         json!((result.score.final_score * 1000.0).round() / 1000.0),
     );
+    obj.insert(
+        "score".into(),
+        json!({
+            "vector": (result.score.vector * 1000.0).round() / 1000.0,
+            "fts": (result.score.fts * 1000.0).round() / 1000.0,
+            "symbolic": (result.score.symbolic * 1000.0).round() / 1000.0,
+            "decay": (result.score.decay * 1000.0).round() / 1000.0,
+            "final": (result.score.final_score * 1000.0).round() / 1000.0,
+        }),
+    );
     serde_json::Value::Object(obj)
 }
 
@@ -141,6 +163,7 @@ const TOOL_CACHE_TTL: Duration = Duration::from_secs(30);
 /// Tools whose results can be cached (read-only, no side effects)
 const CACHEABLE_TOOLS: &[&str] = &[
     "search_memory",
+    "find_similar_memory",
     "get_memory",
     "list_memories",
     "memory_stats",
@@ -356,7 +379,9 @@ impl MemoryServer {
                 })
                 .map_err(|e| rmcp::ErrorData::internal_error(e, None))?;
         }
-        found.ok_or_else(|| rmcp::ErrorData::invalid_params(format!("Capability '{cap_id}' not found"), None))
+        found.ok_or_else(|| {
+            rmcp::ErrorData::invalid_params(format!("Capability '{cap_id}' not found"), None)
+        })
     }
 
     fn register_skill_tool(&self, cap: &HubCapability) -> Result<String, String> {
@@ -384,12 +409,16 @@ impl MemoryServer {
             .get(tool_name)
             .cloned()
             .ok_or_else(|| {
-                rmcp::ErrorData::invalid_params(format!("Skill tool '{}' not found", tool_name), None)
+                rmcp::ErrorData::invalid_params(
+                    format!("Skill tool '{}' not found", tool_name),
+                    None,
+                )
             })?;
 
         let cap = self.get_capability(&skill_id)?;
-        let def: Value = serde_json::from_str(&cap.definition)
-            .map_err(|e| rmcp::ErrorData::invalid_params(format!("Invalid skill definition JSON: {e}"), None))?;
+        let def: Value = serde_json::from_str(&cap.definition).map_err(|e| {
+            rmcp::ErrorData::invalid_params(format!("Invalid skill definition JSON: {e}"), None)
+        })?;
 
         let args = arguments.unwrap_or_default();
         let args_value = Value::Object(args.clone());
@@ -416,7 +445,8 @@ impl MemoryServer {
             prompt = prompt.replace("{{input}}", &input);
         }
 
-        let output = if let Some(mock_response) = def.get("mock_response").and_then(|v| v.as_str()) {
+        let output = if let Some(mock_response) = def.get("mock_response").and_then(|v| v.as_str())
+        {
             mock_response.to_string()
         } else {
             let system = def
@@ -435,7 +465,9 @@ impl MemoryServer {
             self.llm
                 .call_llm(system, &prompt, model, temperature, max_tokens)
                 .await
-                .map_err(|e| rmcp::ErrorData::internal_error(format!("skill execution failed: {e}"), None))?
+                .map_err(|e| {
+                    rmcp::ErrorData::internal_error(format!("skill execution failed: {e}"), None)
+                })?
         };
 
         make_text_tool_result(&json!({
@@ -456,19 +488,29 @@ impl MemoryServer {
         let args_obj = arguments.map(|m| m.into_iter().collect::<rmcp::model::JsonObject>());
 
         // 1. Skill tool?
-        if self.skill_tools.lock().map(|s| s.contains_key(tool_name)).unwrap_or(false) {
+        if self
+            .skill_tools
+            .lock()
+            .map(|s| s.contains_key(tool_name))
+            .unwrap_or(false)
+        {
             return self.call_skill_tool(tool_name, args_obj).await;
         }
 
         // 2. Proxy tool? (format: "server__tool")
         if let Some((server_name, remote_tool)) = tool_name.split_once("__") {
-            return self.proxy_call_internal(server_name, remote_tool, args_obj).await;
+            return self
+                .proxy_call_internal(server_name, remote_tool, args_obj)
+                .await;
         }
 
         // 3. Native tool — cannot retry via DLQ (needs RequestContext).
         //    These are marked abandoned; the client should retry the MCP call directly.
         Err(rmcp::ErrorData::invalid_params(
-            format!("Native tool '{}' cannot be retried via DLQ — retry the MCP call directly", tool_name),
+            format!(
+                "Native tool '{}' cannot be retried via DLQ — retry the MCP call directly",
+                tool_name
+            ),
             None,
         ))
     }
@@ -504,11 +546,8 @@ fn is_trusted_command(cmd: &str) -> bool {
         .unwrap_or(cmd);
 
     const TRUSTED_BASENAMES: &[&str] = &[
-        "npx", "node", "bun", "deno",
-        "python3", "python", "uv",
-        "cargo", "rustup",
-        "docker", "podman",
-        "tachi",
+        "npx", "node", "bun", "deno", "python3", "python", "uv", "cargo", "rustup", "docker",
+        "podman", "tachi",
     ];
 
     if TRUSTED_BASENAMES.contains(&basename) {
@@ -516,12 +555,7 @@ fn is_trusted_command(cmd: &str) -> bool {
     }
 
     // Allow absolute paths under Homebrew, nvm, cargo, common bin dirs
-    const TRUSTED_PREFIXES: &[&str] = &[
-        "/opt/homebrew/",
-        "/usr/local/bin/",
-        "/usr/bin/",
-        "/bin/",
-    ];
+    const TRUSTED_PREFIXES: &[&str] = &["/opt/homebrew/", "/usr/local/bin/", "/usr/bin/", "/bin/"];
 
     for prefix in TRUSTED_PREFIXES {
         if cmd.starts_with(prefix) {
@@ -592,7 +626,10 @@ fn resolve_env_map(def: &serde_json::Value) -> Result<HashMap<String, String>, S
                 let resolved = if val.starts_with("${") && val.ends_with('}') {
                     let var_name = &val[2..val.len() - 1];
                     std::env::var(var_name).map_err(|_| {
-                        format!("Environment variable '{}' not set (required by MCP server)", var_name)
+                        format!(
+                            "Environment variable '{}' not set (required by MCP server)",
+                            var_name
+                        )
                     })?
                 } else {
                     val.to_string()
@@ -720,6 +757,10 @@ struct SaveMemoryParams {
     #[serde(default = "default_scope")]
     scope: String,
 
+    /// Optional embedding vector (if provided, skip embedding generation)
+    #[serde(default)]
+    vector: Option<Vec<f32>>,
+
     /// Optional entry ID (for updates)
     #[serde(default)]
     id: Option<String>,
@@ -733,7 +774,9 @@ struct SaveMemoryParams {
     auto_link: bool,
 }
 
-fn default_auto_link() -> bool { true }
+fn default_auto_link() -> bool {
+    true
+}
 
 #[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
@@ -768,9 +811,35 @@ fn default_scope() -> String {
 
 #[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
+struct HybridWeightsParam {
+    /// Semantic (vector) weight (default: 0.4)
+    #[serde(default = "default_weight_semantic")]
+    semantic: f64,
+    /// Full-text search weight (default: 0.3)
+    #[serde(default = "default_weight_fts")]
+    fts: f64,
+    /// Symbolic weight (default: 0.2)
+    #[serde(default = "default_weight_symbolic")]
+    symbolic: f64,
+    /// Decay weight (default: 0.1)
+    #[serde(default = "default_weight_decay")]
+    decay: f64,
+}
+
+fn default_weight_semantic() -> f64 { 0.40 }
+fn default_weight_fts() -> f64 { 0.30 }
+fn default_weight_symbolic() -> f64 { 0.20 }
+fn default_weight_decay() -> f64 { 0.10 }
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
 struct SearchMemoryParams {
     /// Search query text
     query: String,
+
+    /// Optional query embedding vector; when provided, enables vector channel
+    #[serde(default)]
+    query_vec: Option<Vec<f32>>,
 
     /// Number of results to return (default: 6)
     #[serde(default = "default_top_k")]
@@ -799,27 +868,73 @@ struct SearchMemoryParams {
     /// Optional relation filter for graph expansion
     #[serde(default)]
     graph_relation_filter: Option<String>,
+
+    /// Optional scoring weights override {semantic, fts, symbolic, decay}
+    #[serde(default)]
+    weights: Option<HybridWeightsParam>,
 }
 
 impl SearchMemoryParams {
     /// Build SearchOptions from params, only differing by vec_available per DB.
     fn to_search_options(&self, vec_available: bool) -> SearchOptions {
+        let weights = match &self.weights {
+            Some(w) => HybridWeights {
+                semantic: w.semantic,
+                fts: w.fts,
+                symbolic: w.symbolic,
+                decay: w.decay,
+            },
+            None => HybridWeights::default(),
+        };
         SearchOptions {
             top_k: self.top_k,
             path_prefix: self.path_prefix.clone(),
+            query_vec: self.query_vec.clone(),
             include_archived: self.include_archived,
             candidates_per_channel: self.candidates_per_channel,
             mmr_threshold: self.mmr_threshold,
             graph_expand_hops: self.graph_expand_hops,
             graph_relation_filter: self.graph_relation_filter.clone(),
             vec_available,
+            weights,
             ..Default::default()
         }
     }
 }
 
+#[allow(dead_code)]
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+struct FindSimilarMemoryParams {
+    /// Query embedding vector (same dimension as stored embeddings)
+    query_vec: Vec<f32>,
+
+    /// Number of results to return (default: 5)
+    #[serde(default = "default_find_similar_top_k")]
+    top_k: usize,
+
+    /// Optional path prefix filter
+    #[serde(default)]
+    path_prefix: Option<String>,
+
+    /// Whether to include archived entries
+    #[serde(default)]
+    include_archived: bool,
+
+    /// Number of candidates pulled from vector channel (default: 20)
+    #[serde(default = "default_candidates")]
+    candidates_per_channel: usize,
+}
+
+fn default_find_similar_top_k() -> usize {
+    5
+}
+
 /// Build a MemoryEntry from a JSON fact value (shared by extract_facts and ingest_event).
-fn fact_to_entry(fact: &serde_json::Value, source: &str, metadata: serde_json::Value) -> Option<MemoryEntry> {
+fn fact_to_entry(
+    fact: &serde_json::Value,
+    source: &str,
+    metadata: serde_json::Value,
+) -> Option<MemoryEntry> {
     let text = fact["text"].as_str().unwrap_or("").to_string();
     if text.is_empty() {
         return None;
@@ -828,7 +943,11 @@ fn fact_to_entry(fact: &serde_json::Value, source: &str, metadata: serde_json::V
     let importance = fact["importance"].as_f64().unwrap_or(0.7).clamp(0.0, 1.0);
     let keywords: Vec<String> = fact["keywords"]
         .as_array()
-        .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+        .map(|a| {
+            a.iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect()
+        })
         .unwrap_or_default();
     let scope_raw = fact["scope"].as_str().unwrap_or("general");
     let scope = match scope_raw {
@@ -875,7 +994,9 @@ fn default_mmr_threshold() -> Option<f64> {
     Some(0.85)
 }
 
-fn default_graph_hops() -> u32 { 1 }
+fn default_graph_hops() -> u32 {
+    1
+}
 
 #[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
@@ -1089,7 +1210,9 @@ struct AddEdgeParams {
     scope: String,
 }
 
-fn default_edge_weight() -> f64 { 1.0 }
+fn default_edge_weight() -> f64 {
+    1.0
+}
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 struct GetEdgesParams {
@@ -1107,7 +1230,9 @@ struct GetEdgesParams {
     scope: String,
 }
 
-fn default_edge_direction() -> String { "both".to_string() }
+fn default_edge_direction() -> String {
+    "both".to_string()
+}
 
 #[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
@@ -1306,7 +1431,9 @@ struct ChainSkillsParams {
 
 #[tool_router]
 impl MemoryServer {
-    #[tool(description = "Save a memory entry to the store. Creates a new entry or updates an existing one if id is provided.")]
+    #[tool(
+        description = "Save a memory entry to the store. Creates a new entry or updates an existing one if id is provided."
+    )]
     async fn save_memory(
         &self,
         Parameters(params): Parameters<SaveMemoryParams>,
@@ -1318,10 +1445,13 @@ impl MemoryServer {
                 "noise": true,
                 "reason": "Text detected as noise (greeting, denial, or meta-question). Not saved.",
                 "hint": "Retry with force=true if this is intentional content.",
-            })).map_err(|e| format!("Failed to serialize: {}", e));
+            }))
+            .map_err(|e| format!("Failed to serialize: {}", e));
         }
 
-        let id = params.id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+        let id = params
+            .id
+            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
         let timestamp = Utc::now().to_rfc3339();
         let requested_scope = params.scope.clone();
         let (target_db, warning) = self.resolve_write_scope(&requested_scope);
@@ -1329,6 +1459,7 @@ impl MemoryServer {
         // Use caller-provided summary or leave empty for background enrichment
         let summary = params.summary;
         let needs_summary = summary.is_empty();
+        let needs_embedding = params.vector.is_none();
 
         let entry = MemoryEntry {
             id: id.clone(),
@@ -1350,7 +1481,7 @@ impl MemoryServer {
             last_access: None,
             revision: 1,
             metadata: serde_json::json!({}),
-            vector: None,
+            vector: params.vector,
         };
 
         // Write immediately with empty summary/vector
@@ -1371,9 +1502,11 @@ impl MemoryServer {
             let mut new_summary: Option<String> = None;
 
             // Generate embedding
-            match server.llm.embed_voyage(&enrich_text, "document").await {
-                Ok(vec) => new_vec = Some(vec),
-                Err(e) => eprintln!("[enrichment] embedding failed for {enrich_id}: {e}"),
+            if needs_embedding {
+                match server.llm.embed_voyage(&enrich_text, "document").await {
+                    Ok(vec) => new_vec = Some(vec),
+                    Err(e) => eprintln!("[enrichment] embedding failed for {enrich_id}: {e}"),
+                }
             }
 
             // Generate summary if not provided
@@ -1397,7 +1530,9 @@ impl MemoryServer {
                         .map_err(|e| format!("Failed to update enriched entry: {e}"))
                 }) {
                     Ok(true) => eprintln!("[enrichment] completed for {enrich_id}"),
-                    Ok(false) => eprintln!("[enrichment] discarded for {enrich_id} (revision changed)"),
+                    Ok(false) => {
+                        eprintln!("[enrichment] discarded for {enrich_id} (revision changed)")
+                    }
                     Err(e) => eprintln!("[enrichment] DB update failed for {enrich_id}: {e}"),
                 }
             }
@@ -1422,15 +1557,25 @@ impl MemoryServer {
                     // Search for existing memories mentioning this entity
                     let query = entity.clone();
                     if let Ok(results) = auto_link_server.with_global_store(|store| {
-                        store.search(&query, Some(memory_core::SearchOptions {
-                            top_k: 5,
-                            ..Default::default()
-                        })).map_err(|e| format!("{}", e))
+                        store
+                            .search(
+                                &query,
+                                Some(memory_core::SearchOptions {
+                                    top_k: 5,
+                                    ..Default::default()
+                                }),
+                            )
+                            .map_err(|e| format!("{}", e))
                     }) {
                         for result in results {
-                            if result.entry.id == auto_link_id { continue; }
+                            if result.entry.id == auto_link_id {
+                                continue;
+                            }
                             // Only link if at least one entity overlaps
-                            let shared: Vec<&String> = result.entry.entities.iter()
+                            let shared: Vec<&String> = result
+                                .entry
+                                .entities
+                                .iter()
                                 .filter(|e| auto_link_entities.contains(e))
                                 .collect();
                             if !shared.is_empty() {
@@ -1459,7 +1604,9 @@ impl MemoryServer {
             .map_err(|e| format!("Failed to serialize response: {}", e))
     }
 
-    #[tool(description = "Search memory entries using hybrid search (vector + FTS + symbolic). Returns ranked results with scores.")]
+    #[tool(
+        description = "Search memory entries using hybrid search (vector + FTS + symbolic). Returns ranked results with scores."
+    )]
     async fn search_memory(
         &self,
         Parameters(params): Parameters<SearchMemoryParams>,
@@ -1553,6 +1700,104 @@ impl MemoryServer {
                     continue;
                 }
                 output.push(slim_l0_rule(&rule, DbScope::Global));
+            }
+        }
+
+        serde_json::to_string(&output).map_err(|e| format!("Failed to serialize response: {}", e))
+    }
+
+    #[tool(
+        description = "Find memory entries similar to a provided vector. Uses vector similarity only (no FTS/symbolic/decay weighting)."
+    )]
+    async fn find_similar_memory(
+        &self,
+        Parameters(params): Parameters<FindSimilarMemoryParams>,
+    ) -> Result<String, String> {
+        if params.query_vec.is_empty() {
+            return serde_json::to_string(&json!([]))
+                .map_err(|e| format!("Failed to serialize response: {}", e));
+        }
+
+        if params.query_vec.iter().any(|v| !v.is_finite()) {
+            return Err("query_vec contains non-finite values".to_string());
+        }
+
+        let mut combined_results: Vec<(memory_core::SearchResult, DbScope)> = Vec::new();
+        let common_weights = memory_core::HybridWeights {
+            semantic: 1.0,
+            fts: 0.0,
+            symbolic: 0.0,
+            decay: 0.0,
+        };
+
+        let global_opts = SearchOptions {
+            candidates_per_channel: params.candidates_per_channel.max(params.top_k),
+            top_k: params.top_k,
+            weights: common_weights.clone(),
+            path_prefix: params.path_prefix.clone(),
+            query_vec: Some(params.query_vec.clone()),
+            vec_available: self.global_vec_available,
+            record_access: false,
+            include_archived: params.include_archived,
+            mmr_threshold: None,
+            graph_expand_hops: 0,
+            graph_relation_filter: None,
+        };
+
+        let global_results = self.with_global_store(|store| {
+            store
+                .search("", Some(global_opts))
+                .map_err(|e| format!("Vector search failed in global DB: {}", e))
+        })?;
+        combined_results.extend(global_results.into_iter().map(|r| (r, DbScope::Global)));
+
+        if self.project_db_path.is_some() {
+            let project_opts = SearchOptions {
+                candidates_per_channel: params.candidates_per_channel.max(params.top_k),
+                top_k: params.top_k,
+                weights: common_weights,
+                path_prefix: params.path_prefix.clone(),
+                query_vec: Some(params.query_vec.clone()),
+                vec_available: self.project_vec_available,
+                record_access: false,
+                include_archived: params.include_archived,
+                mmr_threshold: None,
+                graph_expand_hops: 0,
+                graph_relation_filter: None,
+            };
+
+            let project_results = self.with_project_store(|store| {
+                store
+                    .search("", Some(project_opts))
+                    .map_err(|e| format!("Vector search failed in project DB: {}", e))
+            })?;
+            combined_results.extend(project_results.into_iter().map(|r| (r, DbScope::Project)));
+        }
+
+        combined_results.sort_by(|a, b| {
+            b.0.score
+                .vector
+                .partial_cmp(&a.0.score.vector)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+
+        let mut seen_ids = HashSet::new();
+        let mut output: Vec<serde_json::Value> = Vec::new();
+        for (result, db_scope) in combined_results {
+            if !seen_ids.insert(result.entry.id.clone()) {
+                continue;
+            }
+            let mut obj = match slim_entry(&result.entry, db_scope) {
+                serde_json::Value::Object(m) => m,
+                _ => serde_json::Map::new(),
+            };
+            obj.insert(
+                "similarity".into(),
+                json!((result.score.vector * 1000.0).round() / 1000.0),
+            );
+            output.push(serde_json::Value::Object(obj));
+            if output.len() >= params.top_k {
+                break;
             }
         }
 
@@ -1664,21 +1909,27 @@ impl MemoryServer {
         }
 
         let mut databases = serde_json::Map::new();
-        databases.insert("global".into(), json!({
-            "path": self.global_db_path.display().to_string(),
-            "vec_available": self.global_vec_available,
-            "total": global_stats.total,
-            "by_scope": global_stats.by_scope,
-            "by_category": global_stats.by_category,
-        }));
+        databases.insert(
+            "global".into(),
+            json!({
+                "path": self.global_db_path.display().to_string(),
+                "vec_available": self.global_vec_available,
+                "total": global_stats.total,
+                "by_scope": global_stats.by_scope,
+                "by_category": global_stats.by_category,
+            }),
+        );
         if let Some(ref ps) = project_stats {
-            databases.insert("project".into(), json!({
-                "path": self.project_db_path.as_ref().map(|p| p.display().to_string()),
-                "vec_available": self.project_vec_available,
-                "total": ps.total,
-                "by_scope": ps.by_scope,
-                "by_category": ps.by_category,
-            }));
+            databases.insert(
+                "project".into(),
+                json!({
+                    "path": self.project_db_path.as_ref().map(|p| p.display().to_string()),
+                    "vec_available": self.project_vec_available,
+                    "total": ps.total,
+                    "by_scope": ps.by_scope,
+                    "by_category": ps.by_category,
+                }),
+            );
         }
 
         serde_json::to_string(&json!({
@@ -1691,7 +1942,9 @@ impl MemoryServer {
         .map_err(|e| format!("Failed to serialize: {}", e))
     }
 
-    #[tool(description = "Delete a memory entry permanently. Removes from main table, FTS, vectors, graph edges, and access history.")]
+    #[tool(
+        description = "Delete a memory entry permanently. Removes from main table, FTS, vectors, graph edges, and access history."
+    )]
     async fn delete_memory(
         &self,
         Parameters(params): Parameters<DeleteMemoryParams>,
@@ -1699,16 +1952,22 @@ impl MemoryServer {
         // Try project DB first, then global
         if self.project_db_path.is_some() {
             let deleted = self.with_project_store(|store| {
-                store.delete(&params.id).map_err(|e| format!("Delete failed: {}", e))
+                store
+                    .delete(&params.id)
+                    .map_err(|e| format!("Delete failed: {}", e))
             })?;
             if deleted {
-                return serde_json::to_string(&json!({ "deleted": true, "db": "project", "id": params.id }))
-                    .map_err(|e| format!("Failed to serialize: {}", e));
+                return serde_json::to_string(
+                    &json!({ "deleted": true, "db": "project", "id": params.id }),
+                )
+                .map_err(|e| format!("Failed to serialize: {}", e));
             }
         }
 
         let deleted = self.with_global_store(|store| {
-            store.delete(&params.id).map_err(|e| format!("Delete failed: {}", e))
+            store
+                .delete(&params.id)
+                .map_err(|e| format!("Delete failed: {}", e))
         })?;
 
         serde_json::to_string(&json!({
@@ -1719,7 +1978,9 @@ impl MemoryServer {
         .map_err(|e| format!("Failed to serialize: {}", e))
     }
 
-    #[tool(description = "Archive a memory entry (soft-delete, set archived=1). Entry is hidden from default searches but can be retrieved with include_archived=true.")]
+    #[tool(
+        description = "Archive a memory entry (soft-delete, set archived=1). Entry is hidden from default searches but can be retrieved with include_archived=true."
+    )]
     async fn archive_memory(
         &self,
         Parameters(params): Parameters<ArchiveMemoryParams>,
@@ -1727,16 +1988,22 @@ impl MemoryServer {
         // Try project DB first, then global
         if self.project_db_path.is_some() {
             let archived = self.with_project_store(|store| {
-                store.archive_memory(&params.id).map_err(|e| format!("Archive failed: {}", e))
+                store
+                    .archive_memory(&params.id)
+                    .map_err(|e| format!("Archive failed: {}", e))
             })?;
             if archived {
-                return serde_json::to_string(&json!({ "archived": true, "db": "project", "id": params.id }))
-                    .map_err(|e| format!("Failed to serialize: {}", e));
+                return serde_json::to_string(
+                    &json!({ "archived": true, "db": "project", "id": params.id }),
+                )
+                .map_err(|e| format!("Failed to serialize: {}", e));
             }
         }
 
         let archived = self.with_global_store(|store| {
-            store.archive_memory(&params.id).map_err(|e| format!("Archive failed: {}", e))
+            store
+                .archive_memory(&params.id)
+                .map_err(|e| format!("Archive failed: {}", e))
         })?;
 
         serde_json::to_string(&json!({
@@ -1747,18 +2014,24 @@ impl MemoryServer {
         .map_err(|e| format!("Failed to serialize: {}", e))
     }
 
-    #[tool(description = "Run garbage collection on growing tables. Prunes old access_history (keep latest 256 per memory), processed_events (30d), audit_log (30d + 100k cap), and agent_known_state (90d).")]
+    #[tool(
+        description = "Run garbage collection on growing tables. Prunes old access_history (keep latest 256 per memory), processed_events (30d), audit_log (30d + 100k cap), and agent_known_state (90d)."
+    )]
     async fn memory_gc(&self) -> Result<String, String> {
         let mut results = serde_json::Map::new();
 
         let global_gc = self.with_global_store(|store| {
-            store.gc_tables().map_err(|e| format!("GC failed on global DB: {}", e))
+            store
+                .gc_tables()
+                .map_err(|e| format!("GC failed on global DB: {}", e))
         })?;
         results.insert("global".into(), global_gc);
 
         if self.project_db_path.is_some() {
             let project_gc = self.with_project_store(|store| {
-                store.gc_tables().map_err(|e| format!("GC failed on project DB: {}", e))
+                store
+                    .gc_tables()
+                    .map_err(|e| format!("GC failed on project DB: {}", e))
             })?;
             results.insert("project".into(), project_gc);
         }
@@ -1777,7 +2050,8 @@ impl MemoryServer {
 
         if self.project_db_path.is_some() {
             let result = self.with_project_store(|store| {
-                store.hub_set_enabled(&params.id, params.enabled)
+                store
+                    .hub_set_enabled(&params.id, params.enabled)
                     .map_err(|e| format!("Failed: {}", e))
             })?;
             if result {
@@ -1788,7 +2062,8 @@ impl MemoryServer {
 
         if !updated {
             let result = self.with_global_store(|store| {
-                store.hub_set_enabled(&params.id, params.enabled)
+                store
+                    .hub_set_enabled(&params.id, params.enabled)
                     .map_err(|e| format!("Failed: {}", e))
             })?;
             if result {
@@ -1806,7 +2081,9 @@ impl MemoryServer {
         .map_err(|e| format!("Failed to serialize: {}", e))
     }
 
-    #[tool(description = "Add or update an edge in the memory graph. Edges represent causal, temporal, or entity relationships between memories.")]
+    #[tool(
+        description = "Add or update an edge in the memory graph. Edges represent causal, temporal, or entity relationships between memories."
+    )]
     async fn add_edge(
         &self,
         Parameters(params): Parameters<AddEdgeParams>,
@@ -1826,7 +2103,9 @@ impl MemoryServer {
         };
 
         self.with_store_for_scope(target_db, |store| {
-            store.add_edge(&edge).map_err(|e| format!("Failed to add edge: {}", e))
+            store
+                .add_edge(&edge)
+                .map_err(|e| format!("Failed to add edge: {}", e))
         })?;
 
         let mut resp = serde_json::Map::new();
@@ -1839,11 +2118,12 @@ impl MemoryServer {
             resp.insert("warning".into(), json!(w));
         }
 
-        serde_json::to_string(&resp)
-            .map_err(|e| format!("Failed to serialize: {}", e))
+        serde_json::to_string(&resp).map_err(|e| format!("Failed to serialize: {}", e))
     }
 
-    #[tool(description = "Get edges connected to a memory entry. Returns causal, temporal, and entity relationship edges.")]
+    #[tool(
+        description = "Get edges connected to a memory entry. Returns causal, temporal, and entity relationship edges."
+    )]
     async fn get_edges(
         &self,
         Parameters(params): Parameters<GetEdgesParams>,
@@ -1851,19 +2131,29 @@ impl MemoryServer {
         let (target_db, _warning) = self.resolve_write_scope(&params.scope);
 
         let edges = self.with_store_for_scope(target_db, |store| {
-            store.get_edges(&params.memory_id, &params.direction, params.relation_filter.as_deref())
+            store
+                .get_edges(
+                    &params.memory_id,
+                    &params.direction,
+                    params.relation_filter.as_deref(),
+                )
                 .map_err(|e| format!("Failed to get edges: {}", e))
         })?;
 
-        let output: Vec<serde_json::Value> = edges.iter().map(|e| json!({
-            "db": target_db.as_str(),
-            "source_id": e.source_id,
-            "target_id": e.target_id,
-            "relation": e.relation,
-            "weight": e.weight,
-            "metadata": e.metadata,
-            "created_at": e.created_at,
-        })).collect();
+        let output: Vec<serde_json::Value> = edges
+            .iter()
+            .map(|e| {
+                json!({
+                    "db": target_db.as_str(),
+                    "source_id": e.source_id,
+                    "target_id": e.target_id,
+                    "relation": e.relation,
+                    "weight": e.weight,
+                    "metadata": e.metadata,
+                    "created_at": e.created_at,
+                })
+            })
+            .collect();
 
         serde_json::to_string(&output).map_err(|e| format!("Failed to serialize: {}", e))
     }
@@ -1917,50 +2207,63 @@ impl MemoryServer {
     }
 
     #[tool(description = "Extract structured facts from text using LLM and save to memory.")]
-    async fn extract_facts(&self, Parameters(params): Parameters<ExtractFactsParams>) -> Result<String, String> {
+    async fn extract_facts(
+        &self,
+        Parameters(params): Parameters<ExtractFactsParams>,
+    ) -> Result<String, String> {
         let (target_db, _warning) = self.resolve_write_scope("project");
-
-        // Spawn LLM extraction in background
-        let server = self.clone();
-        let text = params.text.clone();
         let source = params.source.clone();
-        tokio::spawn(async move {
-            match server.llm.extract_facts(&text).await {
-                Ok(facts) if facts.is_empty() => {
-                    eprintln!("[extract_facts] no facts extracted");
-                }
-                Ok(facts) => {
-                    let count = facts.len();
-                    let saved = server.with_store_for_scope(target_db, |store| {
-                        let mut saved = 0;
-                        for fact in &facts {
-                            let Some(entry) = fact_to_entry(
-                                fact,
-                                "extraction",
-                                serde_json::json!({"source": source}),
-                            ) else {
-                                continue;
-                            };
-                            if store.upsert(&entry).is_ok() {
-                                saved += 1;
-                            }
-                        }
-                        Ok(saved)
-                    });
-                    match saved {
-                        Ok(n) => eprintln!("[extract_facts] saved {n}/{count} facts"),
-                        Err(e) => eprintln!("[extract_facts] DB write failed: {e}"),
-                    }
-                }
-                Err(e) => eprintln!("[extract_facts] LLM extraction failed: {e}"),
-            }
-        });
 
-        Ok("extraction queued".to_string())
+        // Synchronous extraction — caller sees actual results or errors
+        let facts = self
+            .llm
+            .extract_facts(&params.text)
+            .await
+            .map_err(|e| format!("LLM extraction failed: {e}"))?;
+
+        if facts.is_empty() {
+            return Ok(serde_json::to_string(&serde_json::json!({
+                "status": "completed",
+                "source": source,
+                "facts_extracted": 0,
+                "facts_saved": 0
+            }))
+            .unwrap());
+        }
+
+        let count = facts.len();
+        let saved = self.with_store_for_scope(target_db, |store| {
+            let mut saved = 0;
+            for fact in &facts {
+                let Some(entry) = fact_to_entry(
+                    fact,
+                    "extraction",
+                    serde_json::json!({"source": source}),
+                ) else {
+                    continue;
+                };
+                if store.upsert(&entry).is_ok() {
+                    saved += 1;
+                }
+            }
+            Ok(saved)
+        })
+        .map_err(|e| format!("DB write failed: {e}"))?;
+
+        Ok(serde_json::to_string(&serde_json::json!({
+            "status": "completed",
+            "source": source,
+            "facts_extracted": count,
+            "facts_saved": saved
+        }))
+        .unwrap())
     }
 
     #[tool(description = "Ingest a conversation event and extract facts from messages.")]
-    async fn ingest_event(&self, Parameters(params): Parameters<IngestEventParams>) -> Result<String, String> {
+    async fn ingest_event(
+        &self,
+        Parameters(params): Parameters<IngestEventParams>,
+    ) -> Result<String, String> {
         // Stable hash: deterministic key from conversation+turn IDs (no DefaultHasher)
         let event_hash = stable_hash(&format!("{}:{}", params.conversation_id, params.turn_id));
         let (target_db, _warning) = self.resolve_write_scope("project");
@@ -1974,18 +2277,29 @@ impl MemoryServer {
             .join("\n");
 
         if combined_text.trim().is_empty() {
-            return Ok("No content to process.".to_string());
+            return Ok(serde_json::to_string(&serde_json::json!({
+                "status": "skipped",
+                "reason": "No content to process"
+            })).unwrap());
         }
 
         // Atomic dedup: try to claim the event first via INSERT OR IGNORE.
         // If another concurrent call already claimed it, we skip.
         let claimed = self.with_store_for_scope(target_db, |store| {
             store
-                .try_claim_event(&event_hash, &format!("{}:{}", params.conversation_id, params.turn_id), "ingest")
+                .try_claim_event(
+                    &event_hash,
+                    &format!("{}:{}", params.conversation_id, params.turn_id),
+                    "ingest",
+                )
                 .map_err(|e| format!("Failed to claim event: {e}"))
         })?;
         if !claimed {
-            return Ok(format!("Event already processed (hash: {})", event_hash));
+            return Ok(serde_json::to_string(&serde_json::json!({
+                "status": "skipped",
+                "reason": "Event already processed",
+                "hash": event_hash
+            })).unwrap());
         }
 
         // Spawn LLM fact extraction in background
@@ -2027,20 +2341,67 @@ impl MemoryServer {
                                 store.release_event_claim(&eh, "ingest")
                                     .map_err(|e| format!("{e}"))
                             });
+                            // Push to DLQ so failures are visible via dlq_list
+                            let dl = DeadLetter {
+                                id: uuid::Uuid::new_v4().to_string(),
+                                tool_name: "ingest_event".to_string(),
+                                arguments: Some(serde_json::Map::from_iter([
+                                    ("conversation_id".to_string(), serde_json::json!(conversation_id)),
+                                    ("turn_id".to_string(), serde_json::json!(turn_id)),
+                                ])),
+                                error: format!("DB write failed: {e}"),
+                                error_category: "internal".to_string(),
+                                timestamp: Utc::now().to_rfc3339(),
+                                retry_count: 0,
+                                max_retries: 3,
+                                status: "pending".to_string(),
+                            };
+                            {
+                                let mut dlq = server.dead_letters.lock().unwrap_or_else(|e| e.into_inner());
+                                dlq.push_back(dl);
+                                while dlq.len() > DLQ_MAX_ENTRIES {
+                                    dlq.pop_front();
+                                }
+                            }
                         }
                     }
                 }
                 Err(e) => {
                     eprintln!("[ingest_event] LLM extraction failed for {conversation_id}:{turn_id}: {e} — releasing claim for retry");
                     let _ = server.with_store_for_scope(target_db, |store| {
-                        store.release_event_claim(&eh, "ingest")
+                        store
+                            .release_event_claim(&eh, "ingest")
                             .map_err(|e| format!("{e}"))
                     });
+                    // Push to DLQ so failures are visible via dlq_list
+                    let dl = DeadLetter {
+                        id: uuid::Uuid::new_v4().to_string(),
+                        tool_name: "ingest_event".to_string(),
+                        arguments: Some(serde_json::Map::from_iter([
+                            ("conversation_id".to_string(), serde_json::json!(conversation_id)),
+                            ("turn_id".to_string(), serde_json::json!(turn_id)),
+                        ])),
+                        error: format!("LLM extraction failed: {e}"),
+                        error_category: "internal".to_string(),
+                        timestamp: Utc::now().to_rfc3339(),
+                        retry_count: 0,
+                        max_retries: 3,
+                        status: "pending".to_string(),
+                    };
+                    {
+                        let mut dlq = server.dead_letters.lock().unwrap_or_else(|e| e.into_inner());
+                        dlq.push_back(dl);
+                        while dlq.len() > DLQ_MAX_ENTRIES {
+                            dlq.pop_front();
+                        }
+                    }
                 }
             }
         });
-
-        Ok(format!("event claimed, processing in background (hash: {})", event_hash))
+        Ok(serde_json::to_string(&serde_json::json!({
+            "status": "ingestion queued",
+            "hash": event_hash
+        })).unwrap())
     }
 
     #[tool(description = "Get pipeline status and statistics.")]
@@ -2075,7 +2436,11 @@ impl MemoryServer {
             }
         }
 
-        let cache_size = self.tool_cache.lock().unwrap_or_else(|e| e.into_inner()).len();
+        let cache_size = self
+            .tool_cache
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .len();
         let hits = self.cache_hits.load(std::sync::atomic::Ordering::Relaxed);
         let misses = self.cache_misses.load(std::sync::atomic::Ordering::Relaxed);
 
@@ -2118,7 +2483,9 @@ impl MemoryServer {
         .map_err(|e| format!("Failed to serialize response: {}", e))
     }
 
-    #[tool(description = "Get only new or changed memories since last sync for this agent. Returns incremental diff to save tokens. Use agent_id to identify your agent uniquely.")]
+    #[tool(
+        description = "Get only new or changed memories since last sync for this agent. Returns incremental diff to save tokens. Use agent_id to identify your agent uniquely."
+    )]
     async fn sync_memories(
         &self,
         Parameters(params): Parameters<SyncMemoriesParams>,
@@ -2215,7 +2582,12 @@ impl MemoryServer {
                     .update_agent_known_state(&params.agent_id, &sync_updates)
                     .map_err(|e| format!("Failed to update agent state: {}", e))
             })
-            .map_err(|e| format!("sync_memories failed to persist agent state for '{}': {}", params.agent_id, e))?;
+            .map_err(|e| {
+                format!(
+                    "sync_memories failed to persist agent state for '{}': {}",
+                    params.agent_id, e
+                )
+            })?;
         }
 
         serde_json::to_string(&json!({
@@ -2229,12 +2601,16 @@ impl MemoryServer {
     }
 
     #[tool(description = "Register a capability (skill, plugin, or MCP server) in the Hub.")]
-    async fn hub_register(&self, Parameters(params): Parameters<HubRegisterParams>) -> Result<String, String> {
+    async fn hub_register(
+        &self,
+        Parameters(params): Parameters<HubRegisterParams>,
+    ) -> Result<String, String> {
         let (target_db, warning) = self.resolve_write_scope(&params.scope);
 
         // Security: validate MCP server commands against allowlist
         let auto_enabled = if params.cap_type == "mcp" {
-            let def: serde_json::Value = serde_json::from_str(&params.definition).unwrap_or_default();
+            let def: serde_json::Value =
+                serde_json::from_str(&params.definition).unwrap_or_default();
             if def["transport"].as_str().unwrap_or("stdio") == "stdio" {
                 if let Some(cmd) = def["command"].as_str() {
                     is_trusted_command(cmd)
@@ -2277,7 +2653,8 @@ impl MemoryServer {
             resp.insert("warning".into(), json!(w));
         }
         if !auto_enabled {
-            let def: serde_json::Value = serde_json::from_str(&params.definition).unwrap_or_default();
+            let def: serde_json::Value =
+                serde_json::from_str(&params.definition).unwrap_or_default();
             let cmd = def["command"].as_str().unwrap_or("unknown");
             resp.insert("warning".into(), json!(format!(
                 "Command '{}' is not in the trusted allowlist. Capability registered but disabled. Use hub_set_enabled to activate after review.", cmd
@@ -2296,38 +2673,48 @@ impl MemoryServer {
             }
 
             // L0 analysis: async background scan of the prompt template
-            let def: serde_json::Value = serde_json::from_str(&params.definition).unwrap_or_default();
+            let def: serde_json::Value =
+                serde_json::from_str(&params.definition).unwrap_or_default();
             if def["prompt"].as_str().is_some() {
                 let llm = self.llm.clone();
                 let cap_clone = cap.clone();
                 let desc_empty = params.description.is_empty();
                 let db_path = match target_db {
                     DbScope::Global => self.global_db_path.clone(),
-                    DbScope::Project => self.project_db_path.clone().unwrap_or_else(|| self.global_db_path.clone()),
+                    DbScope::Project => self
+                        .project_db_path
+                        .clone()
+                        .unwrap_or_else(|| self.global_db_path.clone()),
                 };
                 let prompt_text = def["prompt"].as_str().unwrap().to_string();
 
                 let cap_id = cap_clone.id.clone();
 
                 tokio::spawn(async move {
-                    match llm.call_llm(
-                        crate::prompts::SKILL_ANALYSIS_PROMPT,
-                        &prompt_text,
-                        None,
-                        0.3,
-                        500,
-                    ).await {
+                    match llm
+                        .call_llm(
+                            crate::prompts::SKILL_ANALYSIS_PROMPT,
+                            &prompt_text,
+                            None,
+                            0.3,
+                            500,
+                        )
+                        .await
+                    {
                         Ok(analysis_raw) => {
                             let analysis_json: serde_json::Value = serde_json::from_str(
-                                llm::LlmClient::strip_code_fence(&analysis_raw)
-                            ).unwrap_or(serde_json::json!({"summary": analysis_raw}));
+                                llm::LlmClient::strip_code_fence(&analysis_raw),
+                            )
+                            .unwrap_or(serde_json::json!({"summary": analysis_raw}));
 
                             // Auto-fill description if it was empty
                             if desc_empty {
                                 if let Some(summary) = analysis_json["summary"].as_str() {
                                     let mut updated_cap = cap_clone;
                                     updated_cap.description = summary.to_string();
-                                    if let Ok(store) = MemoryStore::open(db_path.to_str().unwrap_or("")) {
+                                    if let Ok(store) =
+                                        MemoryStore::open(db_path.to_str().unwrap_or(""))
+                                    {
                                         let _ = store.hub_register(&updated_cap);
                                     }
                                 }
@@ -2346,98 +2733,104 @@ impl MemoryServer {
             if !auto_enabled {
                 resp.insert("discovery".into(), json!("skipped (capability disabled)"));
             } else {
-            // Auto-discover tools from child MCP server
-            let def: serde_json::Value = serde_json::from_str(&cap.definition).unwrap_or_default();
-            let transport_type = def["transport"].as_str().unwrap_or("stdio");
-            let server_name = params.id.strip_prefix("mcp:").unwrap_or(&params.id);
+                // Auto-discover tools from child MCP server
+                let def: serde_json::Value =
+                    serde_json::from_str(&cap.definition).unwrap_or_default();
+                let transport_type = def["transport"].as_str().unwrap_or("stdio");
+                let server_name = params.id.strip_prefix("mcp:").unwrap_or(&params.id);
 
-            match transport_type {
-                "stdio" => {
-                    if let (Some(command), args) = (
-                        def["command"].as_str(),
-                        def["args"]
-                            .as_array()
-                            .map(|a| {
-                                a.iter()
-                                    .filter_map(|v| v.as_str().map(String::from))
-                                    .collect::<Vec<_>>()
-                            })
-                            .unwrap_or_default(),
-                    ) {
-                        let env_map = match resolve_env_map(&def) {
-                            Ok(m) => m,
-                            Err(e) => {
-                                resp.insert("discovery_error".into(), json!(e));
-                                HashMap::new()
-                            }
-                        };
+                match transport_type {
+                    "stdio" => {
+                        if let (Some(command), args) = (
+                            def["command"].as_str(),
+                            def["args"]
+                                .as_array()
+                                .map(|a| {
+                                    a.iter()
+                                        .filter_map(|v| v.as_str().map(String::from))
+                                        .collect::<Vec<_>>()
+                                })
+                                .unwrap_or_default(),
+                        ) {
+                            let env_map = match resolve_env_map(&def) {
+                                Ok(m) => m,
+                                Err(e) => {
+                                    resp.insert("discovery_error".into(), json!(e));
+                                    HashMap::new()
+                                }
+                            };
 
-                        let mut cmd = tokio::process::Command::new(command);
-                        cmd.args(&args);
-                        apply_sanitized_child_env(&mut cmd, &env_map);
+                            let mut cmd = tokio::process::Command::new(command);
+                            cmd.args(&args);
+                            apply_sanitized_child_env(&mut cmd, &env_map);
 
-                        match rmcp::transport::TokioChildProcess::new(cmd) {
-                            Ok(transport) => match rmcp::ServiceExt::serve((), transport).await {
-                                Ok(client) => match client.peer().list_all_tools().await {
-                                    Ok(tools) => {
-                                        let tools_count = tools.len();
+                            match rmcp::transport::TokioChildProcess::new(cmd) {
+                                Ok(transport) => match rmcp::ServiceExt::serve((), transport).await
+                                {
+                                    Ok(client) => match client.peer().list_all_tools().await {
+                                        Ok(tools) => {
+                                            let tools_count = tools.len();
 
-                                        self.proxy_tools
-                                            .lock()
-                                            .unwrap_or_else(|e| e.into_inner())
-                                            .insert(server_name.to_string(), tools.clone());
+                                            self.proxy_tools
+                                                .lock()
+                                                .unwrap_or_else(|e| e.into_inner())
+                                                .insert(server_name.to_string(), tools.clone());
 
-                                        let mut updated_def = def.clone();
-                                        updated_def["discovered_tools"] =
-                                            serde_json::to_value(&tools).unwrap_or_default();
-                                        updated_def["discovered_at"] = json!(Utc::now().to_rfc3339());
-                                        updated_def["tools_count"] = json!(tools_count);
+                                            let mut updated_def = def.clone();
+                                            updated_def["discovered_tools"] =
+                                                serde_json::to_value(&tools).unwrap_or_default();
+                                            updated_def["discovered_at"] =
+                                                json!(Utc::now().to_rfc3339());
+                                            updated_def["tools_count"] = json!(tools_count);
 
-                                        let updated_cap = HubCapability {
-                                            definition: serde_json::to_string(&updated_def)
-                                                .unwrap_or(cap.definition.clone()),
-                                            ..cap.clone()
-                                        };
-                                        let _ = self.with_store_for_scope(target_db, |store| {
-                                            store
-                                                .hub_register(&updated_cap)
-                                                .map_err(|e| format!("update: {e}"))
-                                        });
+                                            let updated_cap = HubCapability {
+                                                definition: serde_json::to_string(&updated_def)
+                                                    .unwrap_or(cap.definition.clone()),
+                                                ..cap.clone()
+                                            };
+                                            let _ = self.with_store_for_scope(target_db, |store| {
+                                                store
+                                                    .hub_register(&updated_cap)
+                                                    .map_err(|e| format!("update: {e}"))
+                                            });
 
-                                        // Disconnect after discovery — lazy-connect on first real use
-                                        let _ = client.cancel().await;
+                                            // Disconnect after discovery — lazy-connect on first real use
+                                            let _ = client.cancel().await;
 
-                                        resp.insert("tools_discovered".into(), json!(tools_count));
-                                    }
+                                            resp.insert(
+                                                "tools_discovered".into(),
+                                                json!(tools_count),
+                                            );
+                                        }
+                                        Err(e) => {
+                                            resp.insert(
+                                                "discovery_error".into(),
+                                                json!(format!("list_tools failed: {e}")),
+                                            );
+                                        }
+                                    },
                                     Err(e) => {
                                         resp.insert(
                                             "discovery_error".into(),
-                                            json!(format!("list_tools failed: {e}")),
+                                            json!(format!("MCP handshake failed: {e}")),
                                         );
                                     }
                                 },
                                 Err(e) => {
                                     resp.insert(
                                         "discovery_error".into(),
-                                        json!(format!("MCP handshake failed: {e}")),
+                                        json!(format!("spawn failed: {e}")),
                                     );
                                 }
-                            },
-                            Err(e) => {
-                                resp.insert(
-                                    "discovery_error".into(),
-                                    json!(format!("spawn failed: {e}")),
-                                );
                             }
                         }
                     }
-                }
-                "sse" | "http" | "streamable-http" => {
-                    if let Some(url) = def["url"].as_str() {
-                        // TODO(5a): inject auth headers when rmcp supports custom reqwest::Client
-                        //           Hub definition supports headers={"Authorization":"Bearer xxx"}
-                        let transport = StreamableHttpClientTransport::from_uri(url);
-                        match rmcp::ServiceExt::serve((), transport).await {
+                    "sse" | "http" | "streamable-http" => {
+                        if let Some(url) = def["url"].as_str() {
+                            // TODO(5a): inject auth headers when rmcp supports custom reqwest::Client
+                            //           Hub definition supports headers={"Authorization":"Bearer xxx"}
+                            let transport = StreamableHttpClientTransport::from_uri(url);
+                            match rmcp::ServiceExt::serve((), transport).await {
                                 Ok(client) => match client.peer().list_all_tools().await {
                                     Ok(tools) => {
                                         let tools_count = tools.len();
@@ -2450,7 +2843,8 @@ impl MemoryServer {
                                         let mut updated_def = def.clone();
                                         updated_def["discovered_tools"] =
                                             serde_json::to_value(&tools).unwrap_or_default();
-                                        updated_def["discovered_at"] = json!(Utc::now().to_rfc3339());
+                                        updated_def["discovered_at"] =
+                                            json!(Utc::now().to_rfc3339());
                                         updated_def["tools_count"] = json!(tools_count);
 
                                         let updated_cap = HubCapability {
@@ -2483,15 +2877,15 @@ impl MemoryServer {
                                     );
                                 }
                             }
+                        }
+                    }
+                    other => {
+                        resp.insert(
+                            "discovery_error".into(),
+                            json!(format!("unsupported transport: {other}")),
+                        );
                     }
                 }
-                other => {
-                    resp.insert(
-                        "discovery_error".into(),
-                        json!(format!("unsupported transport: {other}")),
-                    );
-                }
-            }
             } // else: auto_enabled — skip discovery for disabled
         } // end: else if params.cap_type == "mcp"
 
@@ -2499,8 +2893,13 @@ impl MemoryServer {
             .map_err(|e| format!("serialize: {e}"))
     }
 
-    #[tool(description = "Discover available capabilities (skills, plugins, MCP servers) in the Hub.")]
-    async fn hub_discover(&self, Parameters(params): Parameters<HubDiscoverParams>) -> Result<String, String> {
+    #[tool(
+        description = "Discover available capabilities (skills, plugins, MCP servers) in the Hub."
+    )]
+    async fn hub_discover(
+        &self,
+        Parameters(params): Parameters<HubDiscoverParams>,
+    ) -> Result<String, String> {
         let cap_type = params.cap_type.as_deref();
 
         let global_caps = self.with_global_store(|store| {
@@ -2557,7 +2956,10 @@ impl MemoryServer {
     }
 
     #[tool(description = "Get a specific capability from the Hub by ID.")]
-    async fn hub_get(&self, Parameters(params): Parameters<HubGetParams>) -> Result<String, String> {
+    async fn hub_get(
+        &self,
+        Parameters(params): Parameters<HubGetParams>,
+    ) -> Result<String, String> {
         if self.project_db_path.is_some() {
             if let Some(cap) = self.with_project_store(|store| {
                 store
@@ -2589,7 +2991,10 @@ impl MemoryServer {
     }
 
     #[tool(description = "Record feedback for a Hub capability invocation.")]
-    async fn hub_feedback(&self, Parameters(params): Parameters<HubFeedbackParams>) -> Result<String, String> {
+    async fn hub_feedback(
+        &self,
+        Parameters(params): Parameters<HubFeedbackParams>,
+    ) -> Result<String, String> {
         if self.project_db_path.is_some() {
             let found = self.with_project_store(|store| {
                 store
@@ -2602,8 +3007,10 @@ impl MemoryServer {
                         .hub_record_feedback(&params.id, params.success, params.rating)
                         .map_err(|e| format!("feedback: {e}"))
                 })?;
-                return serde_json::to_string(&json!({"id": params.id, "recorded": true, "db": "project"}))
-                    .map_err(|e| format!("serialize: {e}"));
+                return serde_json::to_string(
+                    &json!({"id": params.id, "recorded": true, "db": "project"}),
+                )
+                .map_err(|e| format!("serialize: {e}"));
             }
         }
         self.with_global_store(|store| {
@@ -2618,18 +3025,23 @@ impl MemoryServer {
     #[tool(description = "Get Hub capability statistics and metrics.")]
     async fn hub_stats(&self) -> Result<String, String> {
         let global_caps = self.with_global_store(|store| {
-            store.hub_list(None, false).map_err(|e| format!("hub list: {e}"))
+            store
+                .hub_list(None, false)
+                .map_err(|e| format!("hub list: {e}"))
         })?;
         let project_caps = if self.project_db_path.is_some() {
             self.with_project_store(|store| {
-                store.hub_list(None, false).map_err(|e| format!("hub list: {e}"))
+                store
+                    .hub_list(None, false)
+                    .map_err(|e| format!("hub list: {e}"))
             })?
         } else {
             vec![]
         };
 
         let total = global_caps.len() + project_caps.len();
-        let mut by_type: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+        let mut by_type: std::collections::HashMap<String, usize> =
+            std::collections::HashMap::new();
         let all_caps: Vec<&HubCapability> = global_caps.iter().chain(project_caps.iter()).collect();
         for cap in &all_caps {
             *by_type.entry(cap.cap_type.clone()).or_insert(0) += 1;
@@ -2649,31 +3061,44 @@ impl MemoryServer {
         .map_err(|e| format!("serialize: {e}"))
     }
 
-    #[tool(description = "Execute a registered Skill from the Hub using the internal LLM pipeline.")]
-    async fn run_skill(&self, Parameters(params): Parameters<RunSkillParams>) -> Result<String, String> {
+    #[tool(
+        description = "Execute a registered Skill from the Hub using the internal LLM pipeline."
+    )]
+    async fn run_skill(
+        &self,
+        Parameters(params): Parameters<RunSkillParams>,
+    ) -> Result<String, String> {
         let cap = {
             let mut found = None;
             if self.project_db_path.is_some() {
                 found = self.with_project_store(|store| {
-                    store.hub_get(&params.skill_id).map_err(|e| format!("hub get project: {e}"))
+                    store
+                        .hub_get(&params.skill_id)
+                        .map_err(|e| format!("hub get project: {e}"))
                 })?;
             }
             if found.is_none() {
                 found = self.with_global_store(|store| {
-                    store.hub_get(&params.skill_id).map_err(|e| format!("hub get global: {e}"))
+                    store
+                        .hub_get(&params.skill_id)
+                        .map_err(|e| format!("hub get global: {e}"))
                 })?;
             }
             found.ok_or_else(|| format!("Skill '{}' not found in Hub", params.skill_id))?
         };
 
         if cap.cap_type != "skill" {
-            return Err(format!("'{}' is type '{}', not 'skill'", params.skill_id, cap.cap_type));
+            return Err(format!(
+                "'{}' is type '{}', not 'skill'",
+                params.skill_id, cap.cap_type
+            ));
         }
 
         let def: serde_json::Value = serde_json::from_str(&cap.definition)
             .map_err(|e| format!("invalid skill definition JSON: {e}"))?;
 
-        let prompt_template = def["prompt"].as_str()
+        let prompt_template = def["prompt"]
+            .as_str()
             .ok_or_else(|| "skill definition missing 'prompt' field".to_string())?;
 
         let mut resolved_prompt = prompt_template.to_string();
@@ -2689,15 +3114,16 @@ impl MemoryServer {
             }
         }
 
-        self.llm.call_llm(
-            "You are an AI assistant executing a specialized skill.",
-            &resolved_prompt,
-            None,
-            0.3,
-            4000
-        )
-        .await
-        .map_err(|e| format!("skill execution failed: {}", e))
+        self.llm
+            .call_llm(
+                "You are an AI assistant executing a specialized skill.",
+                &resolved_prompt,
+                None,
+                0.3,
+                4000,
+            )
+            .await
+            .map_err(|e| format!("skill execution failed: {}", e))
     }
 
     #[tool(description = "View audit log of proxy tool calls through the Hub.")]
@@ -2713,13 +3139,16 @@ impl MemoryServer {
         })
     }
 
-    #[tool(description = "Call a tool on a registered MCP server through the Hub using the shared connection pool.")]
+    #[tool(
+        description = "Call a tool on a registered MCP server through the Hub using the shared connection pool."
+    )]
     async fn hub_call(
         &self,
         Parameters(params): Parameters<HubCallParams>,
     ) -> Result<String, String> {
         // Check enabled status before calling
-        let cap = self.get_capability(&params.server_id)
+        let cap = self
+            .get_capability(&params.server_id)
             .map_err(|e| format!("{e}"))?;
         if !cap.enabled {
             return Err(format!(
@@ -2745,9 +3174,9 @@ impl MemoryServer {
             .content
             .iter()
             .filter_map(|c| {
-                serde_json::to_value(c).ok().and_then(|v| {
-                    v.get("text").and_then(|t| t.as_str().map(String::from))
-                })
+                serde_json::to_value(c)
+                    .ok()
+                    .and_then(|v| v.get("text").and_then(|t| t.as_str().map(String::from)))
             })
             .collect();
         serde_json::to_string(&json!({
@@ -2759,7 +3188,9 @@ impl MemoryServer {
         .map_err(|e| format!("serialize: {e}"))
     }
 
-    #[tool(description = "Disconnect a cached MCP server connection from the pool. Forces a fresh reconnect (with updated env/config) on next hub_call.")]
+    #[tool(
+        description = "Disconnect a cached MCP server connection from the pool. Forces a fresh reconnect (with updated env/config) on next hub_call."
+    )]
     async fn hub_disconnect(
         &self,
         Parameters(params): Parameters<HubDisconnectParams>,
@@ -2771,7 +3202,11 @@ impl MemoryServer {
 
         // Remove from connection pool
         let had_connection = {
-            let mut conns = self.pool.connections.lock().unwrap_or_else(|e| e.into_inner());
+            let mut conns = self
+                .pool
+                .connections
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
             conns.remove(server_name).is_some()
         };
 
@@ -2795,7 +3230,9 @@ impl MemoryServer {
 
     // ─── Ghost Whispers (Inter-Agent Pub/Sub) ────────────────────────────────
 
-    #[tool(description = "Publish a message to a Ghost Whispers topic. Other agents can poll for new messages via ghost_subscribe.")]
+    #[tool(
+        description = "Publish a message to a Ghost Whispers topic. Other agents can poll for new messages via ghost_subscribe."
+    )]
     async fn ghost_publish(
         &self,
         Parameters(params): Parameters<GhostPublishParams>,
@@ -2812,7 +3249,10 @@ impl MemoryServer {
         };
 
         let mut state = self.pubsub.lock().unwrap_or_else(|e| e.into_inner());
-        let ring = state.messages.entry(params.topic.clone()).or_insert_with(VecDeque::new);
+        let ring = state
+            .messages
+            .entry(params.topic.clone())
+            .or_insert_with(VecDeque::new);
         ring.push_back(msg);
         if ring.len() > PUBSUB_RING_MAX {
             ring.pop_front();
@@ -2830,7 +3270,9 @@ impl MemoryServer {
         .map_err(|e| format!("serialize: {e}"))
     }
 
-    #[tool(description = "Subscribe to Ghost Whispers topics and get new messages since last poll. Advances the cursor so the same messages are not returned again.")]
+    #[tool(
+        description = "Subscribe to Ghost Whispers topics and get new messages since last poll. Advances the cursor so the same messages are not returned again."
+    )]
     async fn ghost_subscribe(
         &self,
         Parameters(params): Parameters<GhostSubscribeParams>,
@@ -2838,7 +3280,9 @@ impl MemoryServer {
         let mut state = self.pubsub.lock().unwrap_or_else(|e| e.into_inner());
 
         // Evict least-recently-active cursors if we exceed the limit
-        if state.cursors.len() >= PUBSUB_MAX_CURSORS && !state.cursors.contains_key(&params.agent_id) {
+        if state.cursors.len() >= PUBSUB_MAX_CURSORS
+            && !state.cursors.contains_key(&params.agent_id)
+        {
             let evict_agent = state
                 .cursor_recency
                 .iter()
@@ -2902,7 +3346,9 @@ impl MemoryServer {
         state.cursors.insert(params.agent_id.clone(), new_cursors);
         state.cursor_seq = state.cursor_seq.saturating_add(1);
         let recency_seq = state.cursor_seq;
-        state.cursor_recency.insert(params.agent_id.clone(), recency_seq);
+        state
+            .cursor_recency
+            .insert(params.agent_id.clone(), recency_seq);
 
         serde_json::to_string(&json!({
             "agent_id": params.agent_id,
@@ -2912,7 +3358,9 @@ impl MemoryServer {
         .map_err(|e| format!("serialize: {e}"))
     }
 
-    #[tool(description = "List active Ghost Whispers topics with message counts and last message time.")]
+    #[tool(
+        description = "List active Ghost Whispers topics with message counts and last message time."
+    )]
     async fn ghost_topics(&self) -> Result<String, String> {
         let state = self.pubsub.lock().unwrap_or_else(|e| e.into_inner());
 
@@ -2940,7 +3388,9 @@ impl MemoryServer {
 
     // ─── Skill Chaining (Unix Pipe-Style Composition) ────────────────────────
 
-    #[tool(description = "Execute a chain of skills in sequence (Unix pipe style). Output of each skill feeds as input to the next.")]
+    #[tool(
+        description = "Execute a chain of skills in sequence (Unix pipe style). Output of each skill feeds as input to the next."
+    )]
     async fn chain_skills(
         &self,
         Parameters(params): Parameters<ChainSkillsParams>,
@@ -3006,7 +3456,9 @@ impl MemoryServer {
 
     // ─── Dead Letter Queue Tools ──────────────────────────────────────────────
 
-    #[tool(description = "List dead letter queue entries (failed tool calls). Filter by status: pending, retrying, resolved, abandoned.")]
+    #[tool(
+        description = "List dead letter queue entries (failed tool calls). Filter by status: pending, retrying, resolved, abandoned."
+    )]
     async fn dlq_list(
         &self,
         Parameters(params): Parameters<DlqListParams>,
@@ -3061,7 +3513,9 @@ impl MemoryServer {
         .map_err(|e| format!("serialize: {e}"))
     }
 
-    #[tool(description = "Manually retry a dead letter queue entry by its ID. Re-dispatches the failed tool call.")]
+    #[tool(
+        description = "Manually retry a dead letter queue entry by its ID. Re-dispatches the failed tool call."
+    )]
     async fn dlq_retry(
         &self,
         Parameters(params): Parameters<DlqRetryParams>,
@@ -3088,10 +3542,9 @@ impl MemoryServer {
         };
 
         // Re-dispatch the tool call via shared retry dispatch
-        let retry_result = self.retry_dispatch(
-            &dead_letter.tool_name,
-            dead_letter.arguments.clone(),
-        ).await;
+        let retry_result = self
+            .retry_dispatch(&dead_letter.tool_name, dead_letter.arguments.clone())
+            .await;
 
         match retry_result {
             Ok(res) => {
@@ -3129,17 +3582,16 @@ impl MemoryServer {
                     }
                     dl.error = format!("{e}");
                 }
-                Err(format!(
-                    "Retry failed for '{}': {e}",
-                    params.dead_letter_id
-                ))
+                Err(format!("Retry failed for '{}': {e}", params.dead_letter_id))
             }
         }
     }
 
     // ─── Semantic Sandboxing Tools ───────────────────────────────────────────
 
-    #[tool(description = "Set a sandbox access rule for an agent role + path pattern. Controls which memories a role can access. Access levels: read, write, deny.")]
+    #[tool(
+        description = "Set a sandbox access rule for an agent role + path pattern. Controls which memories a role can access. Access levels: read, write, deny."
+    )]
     async fn sandbox_set_rule(
         &self,
         Parameters(params): Parameters<SandboxSetRuleParams>,
@@ -3172,7 +3624,9 @@ impl MemoryServer {
         .map_err(|e| format!("serialize: {e}"))
     }
 
-    #[tool(description = "Check if an agent role can access a given path for a specific operation. Advisory mode — not enforced in search_memory yet (TODO: future enforcement integration).")]
+    #[tool(
+        description = "Check if an agent role can access a given path for a specific operation. Advisory mode — not enforced in search_memory yet (TODO: future enforcement integration)."
+    )]
     async fn sandbox_check(
         &self,
         Parameters(params): Parameters<SandboxCheckParams>,
@@ -3219,7 +3673,8 @@ impl MemoryServer {
         // Not connected — acquire connecting lock to serialize connection attempts
         let connecting_lock = {
             let mut locks = self.pool.connecting_locks.lock().unwrap();
-            locks.entry(server_name.to_string())
+            locks
+                .entry(server_name.to_string())
                 .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
                 .clone()
         };
@@ -3260,10 +3715,14 @@ impl MemoryServer {
                     .ok_or_else(|| rmcp::ErrorData::internal_error("missing command", None))?;
                 let args: Vec<String> = def["args"]
                     .as_array()
-                    .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|v| v.as_str().map(String::from))
+                            .collect()
+                    })
                     .unwrap_or_default();
-                let env_map = resolve_env_map(&def)
-                    .map_err(|e| rmcp::ErrorData::internal_error(e, None))?;
+                let env_map =
+                    resolve_env_map(&def).map_err(|e| rmcp::ErrorData::internal_error(e, None))?;
 
                 let mut cmd = tokio::process::Command::new(command);
                 cmd.args(&args);
@@ -3281,9 +3740,9 @@ impl MemoryServer {
                     .ok_or_else(|| rmcp::ErrorData::internal_error("missing url for SSE", None))?;
                 // TODO(5a): inject auth headers when rmcp supports custom reqwest::Client
                 let transport = StreamableHttpClientTransport::from_uri(url);
-                rmcp::ServiceExt::serve((), transport)
-                    .await
-                    .map_err(|e| rmcp::ErrorData::internal_error(format!("SSE handshake: {e}"), None))?
+                rmcp::ServiceExt::serve((), transport).await.map_err(|e| {
+                    rmcp::ErrorData::internal_error(format!("SSE handshake: {e}"), None)
+                })?
             }
             other => {
                 return Err(rmcp::ErrorData::internal_error(
@@ -3329,7 +3788,10 @@ impl MemoryServer {
             let denied: Vec<&str> = deny_list.iter().filter_map(|v| v.as_str()).collect();
             if denied.contains(&tool_name) {
                 return Err(rmcp::ErrorData::invalid_params(
-                    format!("Tool '{}' is denied by permissions policy on '{}'", tool_name, server_name),
+                    format!(
+                        "Tool '{}' is denied by permissions policy on '{}'",
+                        tool_name, server_name
+                    ),
                     None,
                 ));
             }
@@ -3359,7 +3821,8 @@ impl MemoryServer {
         let semaphore = {
             let mut sems = self.pool.semaphores.lock().unwrap();
             let max_conc = cap_def["max_concurrency"].as_u64().unwrap_or(1) as usize;
-            let needs_rebuild = sems.get(server_name)
+            let needs_rebuild = sems
+                .get(server_name)
                 .map(|(_, cached_max)| *cached_max != max_conc)
                 .unwrap_or(true);
             if needs_rebuild {
@@ -3370,7 +3833,9 @@ impl MemoryServer {
             }
             sems.get(server_name).unwrap().0.clone()
         };
-        let _permit = semaphore.acquire().await
+        let _permit = semaphore
+            .acquire()
+            .await
             .map_err(|_| rmcp::ErrorData::internal_error("semaphore closed", None))?;
 
         // 4. Ensure connection exists (atomic check-and-connect to avoid TOCTOU race)
@@ -3398,7 +3863,8 @@ impl MemoryServer {
         let result = tokio::time::timeout(
             Duration::from_millis(timeout_ms),
             peer.call_tool(call_params),
-        ).await;
+        )
+        .await;
 
         let duration_ms = start.elapsed().as_millis() as u64;
 
@@ -3413,13 +3879,19 @@ impl MemoryServer {
             Ok(Err(e)) => {
                 // Transport/protocol error — increment circuit breaker
                 self.record_circuit_failure(server_name);
-                Err(rmcp::ErrorData::internal_error(format!("proxy call failed: {e}"), None))
+                Err(rmcp::ErrorData::internal_error(
+                    format!("proxy call failed: {e}"),
+                    None,
+                ))
             }
             Err(_timeout) => {
                 // Timeout — increment circuit breaker
                 self.record_circuit_failure(server_name);
                 Err(rmcp::ErrorData::internal_error(
-                    format!("Tool call '{}' on '{}' timed out after {}ms", tool_name, server_name, timeout_ms),
+                    format!(
+                        "Tool call '{}' on '{}' timed out after {}ms",
+                        tool_name, server_name, timeout_ms
+                    ),
                     None,
                 ))
             }
@@ -3431,10 +3903,17 @@ impl MemoryServer {
         let timestamp = Utc::now().to_rfc3339();
         let args_hash = stable_hash(&format!("{:?}", arguments));
         let _ = self.with_global_store(|store| {
-            store.audit_log_insert(
-                &timestamp, server_name, tool_name, &args_hash,
-                success, duration_ms, error_kind.as_deref(),
-            ).map_err(|e| format!("{e}"))
+            store
+                .audit_log_insert(
+                    &timestamp,
+                    server_name,
+                    tool_name,
+                    &args_hash,
+                    success,
+                    duration_ms,
+                    error_kind.as_deref(),
+                )
+                .map_err(|e| format!("{e}"))
         });
 
         final_result
@@ -3473,7 +3952,8 @@ impl ServerHandler for MemoryServer {
         &self,
         _: Option<rmcp::model::PaginatedRequestParams>,
         _: rmcp::service::RequestContext<rmcp::service::RoleServer>,
-    ) -> impl Future<Output = Result<rmcp::model::ListToolsResult, rmcp::ErrorData>> + Send + '_ {
+    ) -> impl Future<Output = Result<rmcp::model::ListToolsResult, rmcp::ErrorData>> + Send + '_
+    {
         async move {
             let mut tools = self.tool_router.list_all();
 
@@ -3504,7 +3984,8 @@ impl ServerHandler for MemoryServer {
         &self,
         params: rmcp::model::CallToolRequestParams,
         context: rmcp::service::RequestContext<rmcp::service::RoleServer>,
-    ) -> impl Future<Output = Result<rmcp::model::CallToolResult, rmcp::ErrorData>> + Send + '_ {
+    ) -> impl Future<Output = Result<rmcp::model::CallToolResult, rmcp::ErrorData>> + Send + '_
+    {
         async move {
             let name = params.name.as_ref();
 
@@ -3582,8 +4063,7 @@ impl ServerHandler for MemoryServer {
                 if !is_dlq_exempt {
                     let error_str = format!("{}", err);
                     let category = categorize_error(&error_str);
-                    let should_auto_retry =
-                        category == "timeout" || category == "internal";
+                    let should_auto_retry = category == "timeout" || category == "internal";
 
                     let dl = DeadLetter {
                         id: uuid::Uuid::new_v4().to_string(),
@@ -3599,8 +4079,7 @@ impl ServerHandler for MemoryServer {
 
                     let dl_id = dl.id.clone();
                     {
-                        let mut dlq =
-                            self.dead_letters.lock().unwrap_or_else(|e| e.into_inner());
+                        let mut dlq = self.dead_letters.lock().unwrap_or_else(|e| e.into_inner());
                         dlq.push_back(dl);
                         // Enforce ring buffer max
                         while dlq.len() > DLQ_MAX_ENTRIES {
@@ -3614,19 +4093,14 @@ impl ServerHandler for MemoryServer {
                         tokio::time::sleep(Duration::from_millis(100)).await;
 
                         // Retry via shared dispatch helper
-                        let retry_result = self.retry_dispatch(
-                            &tool_name_owned,
-                            tool_args_for_dlq,
-                        ).await;
+                        let retry_result = self
+                            .retry_dispatch(&tool_name_owned, tool_args_for_dlq)
+                            .await;
 
                         {
-                            let mut dlq = self
-                                .dead_letters
-                                .lock()
-                                .unwrap_or_else(|e| e.into_inner());
-                            if let Some(dl) =
-                                dlq.iter_mut().find(|dl| dl.id == dl_id)
-                            {
+                            let mut dlq =
+                                self.dead_letters.lock().unwrap_or_else(|e| e.into_inner());
+                            if let Some(dl) = dlq.iter_mut().find(|dl| dl.id == dl_id) {
                                 dl.retry_count = 1;
                                 if retry_result.is_ok() {
                                     dl.status = "resolved".to_string();
@@ -3641,9 +4115,7 @@ impl ServerHandler for MemoryServer {
 
                         if retry_result.is_ok() {
                             // Cache the retry result if applicable
-                            if let (Some(key), Ok(ref res)) =
-                                (&cache_key, &retry_result)
-                            {
+                            if let (Some(key), Ok(ref res)) = (&cache_key, &retry_result) {
                                 if let Ok(mut cache) = self.tool_cache.lock() {
                                     cache.insert(
                                         key.clone(),
@@ -3707,6 +4179,8 @@ async fn tokio_main(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         .map(|v| expand_user_path(&v))
         .unwrap_or_else(|_| home.join(".tachi"));
 
+    let expand_cli_path = |raw: &PathBuf| expand_user_path(raw.to_string_lossy().as_ref());
+
     let _ = dotenvy::from_path(home.join(".secrets/master.env"));
     let _ = dotenvy::from_path_override(app_home.join("config.env"));
     let _ = dotenvy::from_path_override(PathBuf::from(".tachi/config.env"));
@@ -3734,7 +4208,9 @@ async fn tokio_main(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     let git_root = find_git_root();
 
     // Resolve global DB path
-    let global_db_path = if let Ok(p) = std::env::var("MEMORY_DB_PATH") {
+    let global_db_path = if let Some(p) = cli.global_db.as_ref() {
+        expand_cli_path(p)
+    } else if let Ok(p) = std::env::var("MEMORY_DB_PATH") {
         expand_user_path(&p)
     } else {
         let default_global = app_home.join("global/memory.db");
@@ -3764,7 +4240,14 @@ async fn tokio_main(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     };
 
     // Resolve project DB path
-    let project_db_path = if let Some(root) = git_root.as_ref() {
+    let project_db_path = if cli.no_project_db {
+        if cli.project_db.is_some() {
+            eprintln!("--project-db is ignored because --no-project-db is set");
+        }
+        None
+    } else if let Some(p) = cli.project_db.as_ref() {
+        Some(expand_cli_path(p))
+    } else if let Some(root) = git_root.as_ref() {
         let project_default = root.join(".tachi/memory.db");
         let project_legacy = root.join(".sigil/memory.db");
 
@@ -3825,8 +4308,7 @@ async fn tokio_main(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     if gc_enabled {
         eprintln!(
             "Background GC enabled (initial_delay={}s, interval={}s)",
-            gc_initial_delay_secs,
-            gc_interval_secs
+            gc_initial_delay_secs, gc_interval_secs
         );
         let gc_server = server.clone();
         tokio::spawn(async move {
@@ -3835,16 +4317,16 @@ async fn tokio_main(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             loop {
                 interval.tick().await;
                 eprintln!("[gc] Running scheduled garbage collection...");
-                match gc_server.with_global_store(|store| {
-                    store.gc_tables().map_err(|e| format!("{}", e))
-                }) {
+                match gc_server
+                    .with_global_store(|store| store.gc_tables().map_err(|e| format!("{}", e)))
+                {
                     Ok(result) => eprintln!("[gc] Global DB: {}", result),
                     Err(e) => eprintln!("[gc] Global DB error: {}", e),
                 }
                 if gc_server.project_db_path.is_some() {
-                    match gc_server.with_project_store(|store| {
-                        store.gc_tables().map_err(|e| format!("{}", e))
-                    }) {
+                    match gc_server
+                        .with_project_store(|store| store.gc_tables().map_err(|e| format!("{}", e)))
+                    {
                         Ok(result) => eprintln!("[gc] Project DB: {}", result),
                         Err(e) => eprintln!("[gc] Project DB error: {}", e),
                     }
@@ -3890,7 +4372,8 @@ async fn tokio_main(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 .hub_list(Some("mcp"), true)
                 .map_err(|e| format!("hub list: {e}"))?;
             for cap in mcp_caps {
-                let def: serde_json::Value = serde_json::from_str(&cap.definition).unwrap_or_default();
+                let def: serde_json::Value =
+                    serde_json::from_str(&cap.definition).unwrap_or_default();
                 if let Some(tools_json) = def.get("discovered_tools") {
                     if let Ok(tools) =
                         serde_json::from_value::<Vec<rmcp::model::Tool>>(tools_json.clone())
@@ -3933,9 +4416,15 @@ async fn tokio_main(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         eprintln!("Pipeline workers: DISABLED (set ENABLE_PIPELINE=true to enable)");
     }
 
-
     eprintln!("Starting Tachi MCP Server v{}", env!("CARGO_PKG_VERSION"));
-    eprintln!("Transport: {}", if cli.daemon { format!("HTTP daemon on port {}", cli.port) } else { "stdio".to_string() });
+    eprintln!(
+        "Transport: {}",
+        if cli.daemon {
+            format!("HTTP daemon on port {}", cli.port)
+        } else {
+            "stdio".to_string()
+        }
+    );
     eprintln!("Global DB: {}", global_db_path.display());
     if let Some(ref p) = project_db_path {
         eprintln!("Project DB: {}", p.display());
@@ -3955,8 +4444,7 @@ async fn tokio_main(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         //       from a request header or query parameter.
 
         use rmcp::transport::streamable_http_server::{
-            StreamableHttpServerConfig, StreamableHttpService,
-            session::local::LocalSessionManager,
+            session::local::LocalSessionManager, StreamableHttpServerConfig, StreamableHttpService,
         };
         use tokio_util::sync::CancellationToken;
 

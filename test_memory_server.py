@@ -213,7 +213,7 @@ def test_memory_server():
             "cap_type": "mcp",
             "name": "GitHub MCP",
             "description": "GitHub API integration",
-            "definition": '{"command": "gh-mcp-server"}',
+            "definition": '{"command": "npx", "args": ["gh-mcp-server"]}',
             "scope": "project",
         })
         data = extract_text(resp)

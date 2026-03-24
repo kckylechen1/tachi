@@ -1,17 +1,61 @@
 import fs from "node:fs/promises";
 import path from "node:path";
-import { JsMemoryStore } from "@chaoxlabs/tachi-node";
-import type { BridgeConfig, MemoryEntry } from "./config.js";
+import type { MemoryEntry } from "./config.js";
+import { MemoryMcpClient, type HybridScore } from "./mcp-client.js";
 
-export class MemoryStore {
-  private store: JsMemoryStore;
+type LoggerLike = {
+  info?: (message: string) => void;
+  warn?: (message: string) => void;
+};
 
-  constructor(dbPath: string) {
-    this.store = new JsMemoryStore(dbPath);
+function asFiniteNumber(value: unknown): number {
+  const n = typeof value === "number" ? value : Number(value);
+  return Number.isFinite(n) ? n : 0;
+}
+
+// Dynamically loaded — null when @chaoxlabs/tachi-node is not installed
+interface NapiStoreBinding {
+  upsert(json: string): void;
+  get(id: string): string | null;
+  getAll(limit: number): string | null;
+  search(query: string, optionsJson?: string): string;
+  delete(id: string): boolean;
+  stats(verbose: boolean): string;
+}
+
+let JsMemoryStoreClass: (new (dbPath: string) => NapiStoreBinding) | null = null;
+
+let napiLoadAttempted = false;
+
+async function loadNapi(): Promise<typeof JsMemoryStoreClass> {
+  if (napiLoadAttempted) return JsMemoryStoreClass;
+  napiLoadAttempted = true;
+  try {
+    const mod = await import("@chaoxlabs/tachi-node");
+    JsMemoryStoreClass = mod.JsMemoryStore;
+  } catch {
+    // Native module not available — MCP-only mode
+  }
+  return JsMemoryStoreClass;
+}
+
+class NapiMemoryStore {
+  private readonly store: NapiStoreBinding;
+
+  constructor(store: NapiStoreBinding) {
+    this.store = store;
   }
 
-  upsert(entry: MemoryEntry) {
-    // Rust bindings expect JSON strings.
+  static create(dbPath: string): NapiMemoryStore | null {
+    if (!JsMemoryStoreClass) return null;
+    try {
+      return new NapiMemoryStore(new JsMemoryStoreClass(dbPath));
+    } catch {
+      return null;
+    }
+  }
+
+  upsert(entry: MemoryEntry): void {
     this.store.upsert(JSON.stringify(entry));
   }
 
@@ -27,12 +71,6 @@ export class MemoryStore {
     return JSON.parse(jsonStr) as MemoryEntry[];
   }
 
-  /**
-   * Delegates hybrid search to the Rust core.
-   * `queryVec` is passed to Rust, which merges FTS + Vec + Symbolic scores.
-   * Note: The Rust core expects the topK, pathPrefix, weights, etc. options
-   * to be passed as a JSON string to keep the NAPI boundary simple.
-   */
   search(
     query: string,
     queryVec?: number[],
@@ -42,11 +80,11 @@ export class MemoryStore {
       path_prefix?: string;
       record_access?: boolean;
       weights?: { semantic: number; fts: number; symbolic: number; decay: number };
-    }
-  ): { docs: MemoryEntry[]; scores: Record<string, number> } {
+    },
+  ): { docs: MemoryEntry[]; scores: Record<string, number>; scoreBreakdowns: Record<string, HybridScore> } {
     let optionsJson: string | undefined = undefined;
     if (opts || queryVec) {
-      const payload: any = { ...opts };
+      const payload: Record<string, unknown> = { ...(opts || {}) };
       if (queryVec) {
         payload.query_vec = queryVec;
       }
@@ -54,24 +92,43 @@ export class MemoryStore {
     }
 
     const resultsJson = this.store.search(query, optionsJson);
-    const results = JSON.parse(resultsJson) as Array<{ entry: MemoryEntry; score: any }>;
+    const results = JSON.parse(resultsJson) as Array<{ entry: MemoryEntry; score: unknown }>;
 
     const docs: MemoryEntry[] = [];
     const scores: Record<string, number> = {};
+    const scoreBreakdowns: Record<string, HybridScore> = {};
 
     for (const r of results) {
       docs.push(r.entry);
-      scores[r.entry.id] = r.score.final; // Or just r.score
+      const rawScore = r.score;
+
+      if (rawScore && typeof rawScore === "object") {
+        const scoreRecord = rawScore as Record<string, unknown>;
+        const breakdown: HybridScore = {
+          vector: asFiniteNumber(scoreRecord.vector),
+          fts: asFiniteNumber(scoreRecord.fts ?? scoreRecord.lexical),
+          symbolic: asFiniteNumber(scoreRecord.symbolic),
+          decay: asFiniteNumber(scoreRecord.decay),
+          final: asFiniteNumber(scoreRecord.final ?? scoreRecord.final_score),
+        };
+        scores[r.entry.id] = breakdown.final;
+        scoreBreakdowns[r.entry.id] = breakdown;
+      } else {
+        const final = asFiniteNumber(rawScore);
+        scores[r.entry.id] = final;
+        scoreBreakdowns[r.entry.id] = {
+          vector: 0,
+          fts: 0,
+          symbolic: 0,
+          decay: 0,
+          final,
+        };
+      }
     }
 
-    return { docs, scores };
+    return { docs, scores, scoreBreakdowns };
   }
 
-  /**
-   * Find entries similar to the given vector using Rust's sqlite-vec KNN.
-   * Returns entries with their raw cosine similarity (from the vector channel).
-   * Used for dedup/merge decisions — no FTS or symbolic scoring involved.
-   */
   findSimilar(queryVec: number[], topK: number = 5): Array<{ entry: MemoryEntry; similarity: number }> {
     const optionsJson = JSON.stringify({
       query_vec: queryVec,
@@ -79,40 +136,176 @@ export class MemoryStore {
       candidates: topK,
       record_access: false,
     });
-    // Empty query string → FTS returns nothing, only vector channel fires
     const resultsJson = this.store.search("", optionsJson);
-    const results = JSON.parse(resultsJson) as Array<{ entry: MemoryEntry; score: { vector: number; final: number } }>;
+    const results = JSON.parse(resultsJson) as Array<{
+      entry: MemoryEntry;
+      score: { vector: number; final: number };
+    }>;
 
     return results
-      .filter(r => r.score.vector > 0)
-      .map(r => ({ entry: r.entry, similarity: r.score.vector }));
+      .filter((r) => r.score.vector > 0)
+      .map((r) => ({ entry: r.entry, similarity: r.score.vector }));
   }
 
-  /**
-   * Delete a memory entry by ID (used after merge to remove the old entry).
-   * Falls back silently if the entry doesn't exist.
-   */
-  delete(id: string) {
-    // Rust binding doesn't expose delete yet; upsert with empty text as tombstone
-    // TODO: add proper delete to Rust binding
-    this.store.upsert(JSON.stringify({
-      id,
-      text: "",
-      summary: "[merged]",
-      keywords: [],
-      timestamp: new Date().toISOString(),
-      location: "",
-      persons: [],
-      entities: [],
-      topic: "",
-      scope: "general",
-      path: "/openclaw/merged",
-      category: "other",
-      importance: 0,
-      access_count: 0,
-      last_access: null,
-      metadata: { source_refs: [], merged: true },
-    }));
+  delete(id: string): boolean {
+    return this.store.delete(id);
+  }
+
+  stats(): unknown {
+    return JSON.parse(this.store.stats(false));
+  }
+}
+
+export class MemoryStore {
+  private readonly napiStore: NapiMemoryStore | null;
+  private readonly mcpClient: MemoryMcpClient | null;
+  private readonly preferredBackend: "mcp" | "napi";
+  private mcpFailedAt: number | null = null;
+  private static readonly MCP_RETRY_AFTER_MS = 30_000;
+
+  constructor(
+    dbPath: string,
+    napiStore: NapiMemoryStore | null,
+    private readonly logger?: LoggerLike,
+  ) {
+    this.napiStore = napiStore;
+    const backendRaw = (process.env.OPENCLAW_MEMORY_BACKEND || "mcp").trim().toLowerCase();
+    this.preferredBackend = backendRaw === "napi" ? "napi" : "mcp";
+    this.mcpClient = this.preferredBackend === "mcp" ? new MemoryMcpClient(dbPath, logger) : null;
+    if (!this.napiStore && !this.mcpClient) {
+      // Force MCP when NAPI is absent, regardless of env setting
+      this.mcpClient = new MemoryMcpClient(dbPath, logger);
+    }
+  }
+
+  private isMcpAvailable(): boolean {
+    if (this.mcpFailedAt === null) return true;
+    if (Date.now() - this.mcpFailedAt > MemoryStore.MCP_RETRY_AFTER_MS) {
+      this.mcpFailedAt = null;
+      this.logger?.info?.("memory-hybrid-bridge: MCP backend retry window reached, attempting reconnect");
+      return true;
+    }
+    return false;
+  }
+
+  private async withBackend<T>(
+    operation: string,
+    mcpRun: () => Promise<T>,
+    napiRun: (() => T | Promise<T>) | null,
+  ): Promise<T> {
+    if (this.preferredBackend === "napi" && napiRun) {
+      return await napiRun();
+    }
+
+    if (this.isMcpAvailable() && this.mcpClient) {
+      try {
+        return await mcpRun();
+      } catch (error) {
+        this.mcpFailedAt = Date.now();
+        if (napiRun) {
+          this.logger?.warn?.(
+            `memory-hybrid-bridge: MCP backend failed during ${operation}, falling back to NAPI (retry in ${MemoryStore.MCP_RETRY_AFTER_MS / 1000}s): ${String(error)}`,
+          );
+          return await napiRun();
+        }
+        throw error;
+      }
+    }
+
+    if (napiRun) {
+      return await napiRun();
+    }
+
+    throw new Error(`memory-hybrid-bridge: no backend available for ${operation} (NAPI absent, MCP unavailable)`);
+  }
+
+  async close(): Promise<void> {
+    await this.mcpClient?.close();
+  }
+
+  async upsert(entry: MemoryEntry): Promise<void> {
+    await this.withBackend(
+      "upsert",
+      async () => {
+        await this.mcpClient!.saveMemory(entry);
+      },
+      this.napiStore
+        ? () => { this.napiStore!.upsert(entry); }
+        : null,
+    );
+  }
+
+  async get(id: string): Promise<MemoryEntry | undefined> {
+    return await this.withBackend(
+      "get",
+      async () => await this.mcpClient!.getMemory(id),
+      this.napiStore
+        ? () => this.napiStore!.get(id)
+        : null,
+    );
+  }
+
+  async getAll(limit: number): Promise<MemoryEntry[]> {
+    return await this.withBackend(
+      "getAll",
+      async () => await this.mcpClient!.listMemories(limit),
+      this.napiStore
+        ? () => this.napiStore!.getAll(limit)
+        : null,
+    );
+  }
+
+  async search(
+    query: string,
+    queryVec?: number[],
+    opts?: {
+      top_k?: number;
+      candidates?: number;
+      path_prefix?: string;
+      record_access?: boolean;
+      weights?: { semantic: number; fts: number; symbolic: number; decay: number };
+    },
+  ): Promise<{ docs: MemoryEntry[]; scores: Record<string, number>; scoreBreakdowns: Record<string, HybridScore> }> {
+    return await this.withBackend(
+      "search",
+      async () => await this.mcpClient!.searchMemory(query, queryVec, opts),
+      this.napiStore
+        ? () => this.napiStore!.search(query, queryVec, opts)
+        : null,
+    );
+  }
+
+  async findSimilar(
+    queryVec: number[],
+    topK: number = 5,
+  ): Promise<Array<{ entry: MemoryEntry; similarity: number }>> {
+    return await this.withBackend(
+      "findSimilar",
+      async () => await this.mcpClient!.findSimilarMemory(queryVec, topK),
+      this.napiStore
+        ? () => this.napiStore!.findSimilar(queryVec, topK)
+        : null,
+    );
+  }
+
+  async delete(id: string): Promise<boolean> {
+    return await this.withBackend(
+      "delete",
+      async () => await this.mcpClient!.deleteMemory(id),
+      this.napiStore
+        ? () => this.napiStore!.delete(id)
+        : null,
+    );
+  }
+
+  async stats(): Promise<unknown> {
+    return await this.withBackend(
+      "stats",
+      async () => await this.mcpClient!.memoryStats(),
+      this.napiStore
+        ? () => this.napiStore!.stats()
+        : null,
+    );
   }
 }
 
@@ -122,6 +315,9 @@ export async function getStore(
   legacyShadowPath?: string,
   logger?: any,
 ): Promise<MemoryStore> {
+  // Attempt to load native module (no-op if already tried)
+  await loadNapi();
+
   const needsMigration =
     legacyShadowPath &&
     (await fs
@@ -131,7 +327,11 @@ export async function getStore(
     !(await fs.stat(dbPath).catch(() => false));
 
   await fs.mkdir(path.dirname(dbPath), { recursive: true });
-  const store = new MemoryStore(dbPath);
+  const napiStore = NapiMemoryStore.create(dbPath);
+  if (!napiStore) {
+    logger?.info?.("memory-hybrid-bridge: native module unavailable, running MCP-only");
+  }
+  const store = new MemoryStore(dbPath, napiStore, logger);
 
   if (needsMigration) {
     logger?.info("memory-hybrid-bridge: initiating SQLite migration from JSONL");
@@ -160,7 +360,7 @@ export async function getStore(
       if (toMigrate.length > 0) {
         // Just sequentially insert mapping old keys
         for (const e of toMigrate) {
-          store.upsert(e);
+          await store.upsert(e);
         }
         logger?.info(
           `memory-hybrid-bridge: successfully migrated ${toMigrate.length} memories to Rust SQLite`,

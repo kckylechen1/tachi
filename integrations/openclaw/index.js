@@ -80,7 +80,7 @@ export const memoryHybridBridgePlugin = {
             // Pull more candidates for reranking (3× topK), then rerank down to topK
             const candidates = topK * 3;
             try {
-                const { docs, scores } = store.search(query, queryVector ?? undefined, {
+                const { docs, scores } = await store.search(query, queryVector ?? undefined, {
                     top_k: candidates,
                     weights: config.weights
                 });
@@ -91,7 +91,7 @@ export const memoryHybridBridgePlugin = {
             catch (err) {
                 // Fallback path: keep memory search available if vector channel fails.
                 api.logger.warn(`memory-hybrid-bridge: hybrid search failed, fallback to FTS: ${String(err)}`);
-                const { docs, scores } = store.search(query, undefined, {
+                const { docs, scores } = await store.search(query, undefined, {
                     top_k: candidates,
                     weights: config.weights
                 });
@@ -104,7 +104,7 @@ export const memoryHybridBridgePlugin = {
         async function performFtsSearch(query, agentId, searchTopK) {
             const store = await ensureStore(agentId);
             const topK = searchTopK ?? config.topK;
-            const { docs, scores } = store.search(query, undefined, {
+            const { docs, scores } = await store.search(query, undefined, {
                 top_k: topK,
                 weights: config.weights
             });
@@ -196,7 +196,7 @@ export const memoryHybridBridgePlugin = {
                 const entryId = rawPath.replace(/^shadow-store\//, "");
                 const agentId = _context?.agentId || "main";
                 const store = await ensureStore(agentId);
-                const found = store.get(entryId);
+                const found = await store.get(entryId);
                 if (!found) {
                     return {
                         content: [
@@ -307,7 +307,7 @@ export const memoryHybridBridgePlugin = {
                 if (extracted.vector && extracted.vector.length > 0) {
                     let similar = [];
                     try {
-                        similar = store.findSimilar(extracted.vector, 1);
+                        similar = await store.findSimilar(extracted.vector, 1);
                     }
                     catch (similarErr) {
                         // sqlite-vec KNN can fail across vec0 versions.
@@ -327,7 +327,7 @@ export const memoryHybridBridgePlugin = {
                                 const mergedVec = await getEmbedding({ config, text: merged.text, logger: api.logger });
                                 if (mergedVec)
                                     merged.vector = mergedVec;
-                                store.upsert(merged);
+                                await store.upsert(merged);
                                 // W5 fix: audit-log in separate try/catch
                                 try {
                                     await appendAuditLog(audit, {
@@ -348,7 +348,7 @@ export const memoryHybridBridgePlugin = {
                         }
                     }
                 }
-                store.upsert(extracted);
+                await store.upsert(extracted);
                 // W5 fix: audit-log in separate try/catch
                 try {
                     await appendAuditLog(audit, {
@@ -369,7 +369,19 @@ export const memoryHybridBridgePlugin = {
         api.registerService({
             id: "memory-hybrid-bridge",
             start: () => api.logger.info("memory-hybrid-bridge: service started"),
-            stop: () => api.logger.info("memory-hybrid-bridge: service stopped"),
+            stop: async () => {
+                api.logger.info("memory-hybrid-bridge: shutting down...");
+                const entries = [...initStores.entries()];
+                initStores.clear();
+                for (const [, storePromise] of entries) {
+                    try {
+                        const store = await storePromise;
+                        await store.close();
+                    }
+                    catch { /* store never initialized successfully */ }
+                }
+                api.logger.info("memory-hybrid-bridge: service stopped");
+            },
         });
     },
 };

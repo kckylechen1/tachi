@@ -17,7 +17,6 @@ require_cmd() {
 require_cmd git
 require_cmd node
 require_cmd npm
-require_cmd cargo
 
 # 1. Determine target directory
 TARGET_DIR="${TACHI_INSTALL_DIR:-${SIGIL_INSTALL_DIR:-$HOME/tachi}}"
@@ -43,17 +42,24 @@ if [ ! -f "$TARGET_DIR/.env" ]; then
 fi
 
 echo ""
-# 3. Build NAPI-RS bindings
-echo ">> Installing Node.js dependencies..."
-npm --prefix "$NATIVE_MODULE_DIR" install
-npm --prefix "$OPENCLAW_PLUGIN_DIR" install
+# 3. Build NAPI-RS bindings (optional — skipped if cargo is not installed)
+if command -v cargo >/dev/null 2>&1; then
+    echo ">> Installing Node.js dependencies..."
+    npm --prefix "$NATIVE_MODULE_DIR" install
+    npm --prefix "$OPENCLAW_PLUGIN_DIR" install
 
-echo ">> Building Rust NAPI bindings for Node.js..."
-npm --prefix "$OPENCLAW_PLUGIN_DIR" run build
+    echo ">> Building Rust NAPI bindings for Node.js..."
+    npm --prefix "$OPENCLAW_PLUGIN_DIR" run build
 
-if ! ls "$NATIVE_MODULE_DIR"/memory-core.*.node >/dev/null 2>&1; then
-    echo "❌ Error: native NAPI binary was not produced under $NATIVE_MODULE_DIR"
-    exit 1
+    if ! ls "$NATIVE_MODULE_DIR"/memory-core.*.node >/dev/null 2>&1; then
+        echo "   ⚠ Native NAPI binary was not produced — will run in MCP-only mode."
+        echo "   Install 'tachi' via: brew tap kckylechen1/tachi && brew install tachi"
+    fi
+else
+    echo ">> Cargo not found — skipping NAPI native build (MCP-only mode)."
+    echo "   Install 'tachi' via: brew tap kckylechen1/tachi && brew install tachi"
+    npm --prefix "$OPENCLAW_PLUGIN_DIR" install
+    npm --prefix "$OPENCLAW_PLUGIN_DIR" run build
 fi
 
 if [ ! -f "$OPENCLAW_PLUGIN_DIR/index.js" ]; then

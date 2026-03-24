@@ -106,7 +106,7 @@
      }
    }
 
-程序将依据主目录的 .env 文件挂载环境变量。
+程序将依据项目根目录的 `.env` 文件挂载环境变量（参见 `.env.example`）。
 依赖服务清单：
 - Voyage API (向量与重排): https://dash.voyageai.com/
 - SiliconFlow (结构化抽取): https://cloud.siliconflow.cn/
@@ -123,19 +123,26 @@ Tachi 亦化身为 OpenClaw 气海之元婴法宝。
 ```text
 请协助执行自动化安装流，在 OpenClaw 中扩展部署 Tachi 组件。
 
-1. 直接运行部署脚本：
+1. 安装 Tachi MCP 服务（推荐）：
+   brew tap kckylechen1/tachi && brew install tachi
+
+2. 部署 OpenClaw 扩展：
    bash -c "$(curl -fsSL https://raw.githubusercontent.com/kckylechen1/tachi/main/scripts/install_openclaw_ext.sh)"
+   此脚本将负责拉取代码、编译扩展并在 extensions 库中建立软链��。
+   若系统安装了 Cargo，会额外编译 NAPI 原生模块（可选加速路径）；否则以 MCP-only 模式运行。
 
-2. 此脚本将负责拉取代码与编译原生的 Rust NAPI 库，进行集成验证并在 extensions 库中建立软链接。
+3. 执行完成后请打开 `plugins.allow` 参数权限，并将 `plugins.slots.memory` 设置为 `memory-hybrid-bridge`。
 
-3. 执行完成后请打开 `plugins.allow` 参数权限，并将 `plugins.slots.memory` 设置为 `memory-hybrid-bridge`。最后通过 `.env` 追加相关 Token。
+4. 在项目根目录的 `.env` 中配置 API 密钥（参见 `.env.example`）：
+   - VOYAGE_API_KEY (向量与重排)
+   - SILICONFLOW_API_KEY (结构化抽取)
 ```
 
 ---
 
 ## ✨ 五、 镇派绝学
 
-- **⚡ 玄铁剑心 (`memory-core`)**：计分、储纳、探囊取物等心法尽为 Rust 纯血铸就。辅以内丹于 Node.js (`NAPI-RS`) 与 Python (`PyO3`) 以应变千万。自 v0.8 、已有**三十四法器** (34 MCP tools) 始得面世。
+- **⚡ 玄铁剑心 (`memory-core`)**：计分、储纳、探囊取物等心法尽为 Rust 纯血铸就。辅以内丹于 Node.js (`NAPI-RS`, 可选) 与 Python (`PyO3`) 以应变千万。OpenClaw 分舵优先经 MCP stdio 通讯管道直连 Tachi 二进制，NAPI 为备降旁路。自 v0.8 、已有**三十四法器** (34 MCP tools) 始得面世。
 - **🗂️ 藏经阁流**：摒弃散沙。以 `path` 路径（如 `/user/preferences`, `/project/architecture`）作阁楼卷宗之分期，互不沾染走火入魔。
 - **🔍 三分天下（多系搜魂）**：
   - **太阴（语义）**：以 `sqlite-vec` 携 Voyage-4 直嵌玄冥。
@@ -214,7 +221,8 @@ graph TD
     RMCP -->|"reqwest"| VOYAGE
     RMCP -->|"async-openai"| SILICON
     MCP --> PYO3
-    OC --> NAPI
+    OC -->|"MCP stdio 优先"| RMCP
+    OC -.->|"NAPI 备降"| NAPI
     MCP -.->|"飞鸽传书"| Operations
     Operations -.->|"斩金截铁"| PYO3
 
