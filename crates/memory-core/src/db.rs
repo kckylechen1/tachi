@@ -6,11 +6,11 @@
 // All hot-path row iteration and data conversion happens here in Rust —
 // zero JSON round-trips to JS/Python during search.
 
+use chrono::{DateTime, SecondsFormat, Utc};
 use rusqlite::{params, Connection, Result as SqlResult};
+use serde_json;
 use std::collections::HashMap;
 use std::sync::Once;
-use chrono::{DateTime, SecondsFormat, Utc};
-use serde_json;
 use uuid::Uuid;
 
 use crate::error::MemoryError;
@@ -102,6 +102,7 @@ pub fn init_schema(conn: &Connection) -> Result<(), MemoryError> {
         );
         CREATE INDEX IF NOT EXISTS idx_access_hist_mem ON access_history(memory_id);
         CREATE INDEX IF NOT EXISTS idx_access_hist_time ON access_history(accessed_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_access_hist_mem_time ON access_history(memory_id, accessed_at DESC);
 
         -- Derived items (causal extractions, distilled rules, etc.)
         CREATE TABLE IF NOT EXISTS derived_items (
@@ -123,6 +124,7 @@ pub fn init_schema(conn: &Connection) -> Result<(), MemoryError> {
             created_at TEXT NOT NULL DEFAULT '',
             PRIMARY KEY (event_hash, worker)
         );
+        CREATE INDEX IF NOT EXISTS idx_processed_events_created_at ON processed_events(created_at DESC);
 
         -- Hub capability registry (skills, plugins, MCP servers)
         CREATE TABLE IF NOT EXISTS hub_capabilities (
@@ -159,6 +161,7 @@ pub fn init_schema(conn: &Connection) -> Result<(), MemoryError> {
         );
         CREATE INDEX IF NOT EXISTS idx_audit_timestamp ON audit_log(timestamp DESC);
         CREATE INDEX IF NOT EXISTS idx_audit_server ON audit_log(server_id);
+        CREATE INDEX IF NOT EXISTS idx_audit_created_at ON audit_log(created_at DESC);
 
         -- Agent known state for context diffing (incremental memory sync)
         CREATE TABLE IF NOT EXISTS agent_known_state (
@@ -169,6 +172,8 @@ pub fn init_schema(conn: &Connection) -> Result<(), MemoryError> {
             PRIMARY KEY (agent_id, memory_id)
         );
         CREATE INDEX IF NOT EXISTS idx_agent_known_agent ON agent_known_state(agent_id);
+        CREATE INDEX IF NOT EXISTS idx_agent_known_memory ON agent_known_state(memory_id);
+        CREATE INDEX IF NOT EXISTS idx_agent_known_synced_at ON agent_known_state(synced_at DESC);
 
         -- Sandbox rules for role-based memory isolation (Semantic Sandboxing)
         CREATE TABLE IF NOT EXISTS sandbox_rules (
@@ -183,50 +188,52 @@ pub fn init_schema(conn: &Connection) -> Result<(), MemoryError> {
 
     // Forward-compatible migrations for existing DB files created before
     // archived/created_at/updated_at columns existed.
-    ensure_column(
-        conn,
-        "memories",
-        "archived",
-        "INTEGER NOT NULL DEFAULT 0",
-    )?;
-    ensure_column(
-        conn,
-        "memories",
-        "created_at",
-        "TEXT NOT NULL DEFAULT ''",
-    )?;
-    ensure_column(
-        conn,
-        "memories",
-        "updated_at",
-        "TEXT NOT NULL DEFAULT ''",
-    )?;
-    ensure_column(
-        conn,
-        "memories",
-        "revision",
-        "INTEGER NOT NULL DEFAULT 1",
-    )?;
+    ensure_column(conn, "memories", "archived", "INTEGER NOT NULL DEFAULT 0")?;
+    ensure_column(conn, "memories", "created_at", "TEXT NOT NULL DEFAULT ''")?;
+    ensure_column(conn, "memories", "updated_at", "TEXT NOT NULL DEFAULT ''")?;
+    ensure_column(conn, "memories", "revision", "INTEGER NOT NULL DEFAULT 1")?;
 
     // Temporal edge columns for memory_edges
-    ensure_column(conn, "memory_edges", "valid_from", "TEXT NOT NULL DEFAULT ''")?;
+    ensure_column(
+        conn,
+        "memory_edges",
+        "valid_from",
+        "TEXT NOT NULL DEFAULT ''",
+    )?;
     ensure_column(conn, "memory_edges", "valid_to", "TEXT")?;
 
     // derived_items columns that may be missing on legacy databases
     ensure_column(conn, "derived_items", "summary", "TEXT NOT NULL DEFAULT ''")?;
-    ensure_column(conn, "derived_items", "importance", "REAL NOT NULL DEFAULT 0.5")?;
-    ensure_column(conn, "derived_items", "scope", "TEXT NOT NULL DEFAULT 'general'")?;
-    ensure_column(conn, "derived_items", "created_at", "TEXT NOT NULL DEFAULT ''")?;
+    ensure_column(
+        conn,
+        "derived_items",
+        "importance",
+        "REAL NOT NULL DEFAULT 0.5",
+    )?;
+    ensure_column(
+        conn,
+        "derived_items",
+        "scope",
+        "TEXT NOT NULL DEFAULT 'general'",
+    )?;
+    ensure_column(
+        conn,
+        "derived_items",
+        "created_at",
+        "TEXT NOT NULL DEFAULT ''",
+    )?;
 
     // Indexes on migrated columns — MUST come after ensure_column so the
     // columns exist on legacy databases that were created without them.
-    conn.execute_batch(r#"
+    conn.execute_batch(
+        r#"
         CREATE INDEX IF NOT EXISTS idx_memories_archived    ON memories(archived);
         CREATE INDEX IF NOT EXISTS idx_memories_last_access ON memories(last_access DESC);
         CREATE INDEX IF NOT EXISTS idx_derived_source       ON derived_items(source);
         CREATE INDEX IF NOT EXISTS idx_derived_path         ON derived_items(path);
         CREATE INDEX IF NOT EXISTS idx_derived_created_at   ON derived_items(created_at DESC);
-    "#)?;
+    "#,
+    )?;
 
     // Backfill empty values for legacy rows.
     conn.execute(
@@ -253,9 +260,9 @@ pub fn init_schema(conn: &Connection) -> Result<(), MemoryError> {
 /// Must be called ONCE before any Connection::open(). Safe to call multiple times.
 pub fn register_sqlite_vec() {
     SQLITE_VEC_AUTO_EXT_ONCE.call_once(|| unsafe {
-        let rc = rusqlite::ffi::sqlite3_auto_extension(Some(
-            std::mem::transmute(sqlite_vec::sqlite3_vec_init as *const ())
-        ));
+        let rc = rusqlite::ffi::sqlite3_auto_extension(Some(std::mem::transmute(
+            sqlite_vec::sqlite3_vec_init as *const (),
+        )));
         if rc != rusqlite::ffi::SQLITE_OK {
             eprintln!("warning: sqlite-vec auto_extension registration failed (rc={rc})");
         }
@@ -266,12 +273,14 @@ pub fn register_sqlite_vec() {
 /// Assumes `register_sqlite_vec()` was called before the connection was opened.
 /// Returns true if the vec0 table was created successfully, false otherwise.
 pub fn try_load_sqlite_vec(conn: &Connection) -> bool {
-    let r: SqlResult<()> = conn.execute_batch(r#"
+    let r: SqlResult<()> = conn.execute_batch(
+        r#"
         CREATE VIRTUAL TABLE IF NOT EXISTS memories_vec USING vec0(
             id      TEXT PRIMARY KEY,
             embedding float[1024]
         );
-    "#);
+    "#,
+    );
     r.is_ok()
 }
 
@@ -313,12 +322,14 @@ fn has_column(conn: &Connection, table: &str, column: &str) -> Result<bool, Memo
 }
 
 fn ensure_fts_backfilled(conn: &Connection) -> Result<(), MemoryError> {
-    let memories_count: i64 = conn.query_row("SELECT COUNT(*) FROM memories", [], |row| row.get(0))?;
+    let memories_count: i64 =
+        conn.query_row("SELECT COUNT(*) FROM memories", [], |row| row.get(0))?;
     if memories_count == 0 {
         return Ok(());
     }
 
-    let fts_count: i64 = conn.query_row("SELECT COUNT(*) FROM memories_fts", [], |row| row.get(0))?;
+    let fts_count: i64 =
+        conn.query_row("SELECT COUNT(*) FROM memories_fts", [], |row| row.get(0))?;
     if fts_count > 0 {
         return Ok(());
     }
@@ -363,7 +374,10 @@ fn normalize_utc_iso(ts: &str) -> Result<String, MemoryError> {
         return Ok(dt.to_rfc3339_opts(SecondsFormat::Millis, true));
     }
 
-    Err(MemoryError::InvalidArg(format!("invalid timestamp format: {}", ts)))
+    Err(MemoryError::InvalidArg(format!(
+        "invalid timestamp format: {}",
+        ts
+    )))
 }
 
 #[inline]
@@ -405,13 +419,23 @@ fn row_to_entry(row: &rusqlite::Row<'_>) -> SqlResult<MemoryEntry> {
 // ─── UPSERT ───────────────────────────────────────────────────────────────────
 
 /// Insert or update a memory entry (and its embedding vector if provided).
-pub fn upsert(conn: &mut Connection, entry: &MemoryEntry, vec_available: bool) -> Result<(), MemoryError> {
+pub fn upsert(
+    conn: &mut Connection,
+    entry: &MemoryEntry,
+    vec_available: bool,
+) -> Result<(), MemoryError> {
     if entry.id.trim().is_empty() {
-        return Err(MemoryError::InvalidArg("entry.id must be provided by caller".to_string()));
+        return Err(MemoryError::InvalidArg(
+            "entry.id must be provided by caller".to_string(),
+        ));
     }
 
     let timestamp_utc = normalize_utc_iso(&entry.timestamp)?;
-    let last_access_utc = entry.last_access.as_deref().map(normalize_utc_iso).transpose()?;
+    let last_access_utc = entry
+        .last_access
+        .as_deref()
+        .map(normalize_utc_iso)
+        .transpose()?;
     let write_time_utc = now_utc_iso();
 
     let metadata_json = serde_json::to_string(&entry.metadata)?;
@@ -479,10 +503,7 @@ pub fn upsert(conn: &mut Connection, entry: &MemoryEntry, vec_available: bool) -
     // Sync FTS: delete old row (if any) then re-insert
     let kws = entry.keywords.join(" ");
     let ents = entry.entities.join(" ");
-    tx.execute(
-        "DELETE FROM memories_fts WHERE id = ?1",
-        params![entry.id],
-    )?;
+    tx.execute("DELETE FROM memories_fts WHERE id = ?1", params![entry.id])?;
     tx.execute(
         "INSERT INTO memories_fts(id, path, summary, text, keywords, entities)
          VALUES (?1,?2,?3,?4,?5,?6)",
@@ -494,10 +515,7 @@ pub fn upsert(conn: &mut Connection, entry: &MemoryEntry, vec_available: bool) -
             let blob = serialize_f32(vec);
             // vec0 virtual tables do NOT support ON CONFLICT / UPSERT.
             // Use DELETE + INSERT (same pattern as FTS sync above).
-            tx.execute(
-                "DELETE FROM memories_vec WHERE id = ?1",
-                params![entry.id],
-            )?;
+            tx.execute("DELETE FROM memories_vec WHERE id = ?1", params![entry.id])?;
             tx.execute(
                 "INSERT INTO memories_vec(id, embedding) VALUES (?1, ?2)",
                 params![entry.id, blob],
@@ -569,7 +587,6 @@ pub fn release_event_claim(
     )?;
     Ok(())
 }
-
 
 /// Update a memory row only when its revision matches `expected_revision`.
 /// Returns `Ok(true)` when updated, `Ok(false)` on revision mismatch.
@@ -721,11 +738,14 @@ pub fn search_vec(
            ORDER BY v.distance"#,
     )?;
 
-    let rows = stmt.query_map(params![blob, include_archived as i64, top_k as i64], |row| {
-        let id: String = row.get(0)?;
-        let dist: f64 = row.get(1)?;
-        Ok((id, dist))
-    })?;
+    let rows = stmt.query_map(
+        params![blob, include_archived as i64, top_k as i64],
+        |row| {
+            let id: String = row.get(0)?;
+            let dist: f64 = row.get(1)?;
+            Ok((id, dist))
+        },
+    )?;
 
     let mut scores = HashMap::new();
     for r in rows {
@@ -751,7 +771,9 @@ pub fn search_fts(
     // Sanitise query: remove potentially dangerous characters
     let safe_query: String = query
         .chars()
-        .filter(|c| c.is_alphanumeric() || c.is_whitespace() || matches!(c, '"' | '\'' | '-' | '_' | '.'))
+        .filter(|c| {
+            c.is_alphanumeric() || c.is_whitespace() || matches!(c, '"' | '\'' | '-' | '_' | '.')
+        })
         .collect();
 
     if safe_query.trim().is_empty() {
@@ -769,11 +791,14 @@ pub fn search_fts(
            LIMIT ?3"#,
     )?;
 
-    let rows = stmt.query_map(params![safe_query, include_archived as i64, limit as i64], |row| {
-        let id: String = row.get(0)?;
-        let score: f64 = row.get(1)?;
-        Ok((id, score))
-    })?;
+    let rows = stmt.query_map(
+        params![safe_query, include_archived as i64, limit as i64],
+        |row| {
+            let id: String = row.get(0)?;
+            let score: f64 = row.get(1)?;
+            Ok((id, score))
+        },
+    )?;
 
     let mut raw: Vec<(String, f64)> = rows.filter_map(|r| r.ok()).collect();
     if raw.is_empty() {
@@ -781,7 +806,10 @@ pub fn search_fts(
     }
 
     // Normalise BM25 scores to [0, 1] based on the max in this result set
-    let max_score = raw.iter().map(|(_, s)| *s).fold(f64::NEG_INFINITY, f64::max);
+    let max_score = raw
+        .iter()
+        .map(|(_, s)| *s)
+        .fold(f64::NEG_INFINITY, f64::max);
     let max_score = if max_score <= 0.0 { 1.0 } else { max_score };
 
     Ok(raw
@@ -804,7 +832,12 @@ pub fn fetch_by_ids(
     }
 
     // Build a parameterised IN clause
-    let placeholders = ids.iter().enumerate().map(|(i, _)| format!("?{}", i + 1)).collect::<Vec<_>>().join(",");
+    let placeholders = ids
+        .iter()
+        .enumerate()
+        .map(|(i, _)| format!("?{}", i + 1))
+        .collect::<Vec<_>>()
+        .join(",");
     let mut sql = format!(
         "SELECT id,path,summary,text,importance,timestamp,category,topic,keywords,persons,entities,location,source,scope,archived,access_count,last_access,revision,metadata
          FROM memories WHERE id IN ({})",
@@ -829,14 +862,11 @@ pub fn fetch_by_ids(
         placeholders
     );
     if let Ok(mut vec_stmt) = conn.prepare(&vec_sql) {
-        if let Ok(vec_rows) = vec_stmt.query_map(
-            rusqlite::params_from_iter(ids.iter()),
-            |row| {
-                let id: String = row.get(0)?;
-                let blob: Vec<u8> = row.get(1)?;
-                Ok((id, blob))
-            },
-        ) {
+        if let Ok(vec_rows) = vec_stmt.query_map(rusqlite::params_from_iter(ids.iter()), |row| {
+            let id: String = row.get(0)?;
+            let blob: Vec<u8> = row.get(1)?;
+            Ok((id, blob))
+        }) {
             for r in vec_rows.flatten() {
                 let (id, blob) = r;
                 if let Some(entry) = out.get_mut(&id) {
@@ -871,7 +901,7 @@ pub fn get_all(
     };
     let mut stmt = conn.prepare(sql)?;
     let rows = stmt.query_map(params![limit], row_to_entry)?;
-    
+
     let mut out = Vec::new();
     for r in rows {
         out.push(r?);
@@ -953,17 +983,25 @@ pub fn record_access(conn: &mut Connection, ids: &[String]) -> Result<(), Memory
 
 /// Fetch access timestamps for a set of memory IDs (for ACT-R base-level activation).
 /// Returns a map from memory_id -> sorted list of seconds-since-epoch (age in seconds).
-pub fn get_access_times(conn: &Connection, ids: &[String]) -> Result<HashMap<String, Vec<f64>>, MemoryError> {
+pub fn get_access_times(
+    conn: &Connection,
+    ids: &[String],
+) -> Result<HashMap<String, Vec<f64>>, MemoryError> {
     if ids.is_empty() {
         return Ok(HashMap::new());
     }
-    let placeholders: Vec<String> = ids.iter().enumerate().map(|(i, _)| format!("?{}", i + 1)).collect();
+    let placeholders: Vec<String> = ids
+        .iter()
+        .enumerate()
+        .map(|(i, _)| format!("?{}", i + 1))
+        .collect();
     let sql = format!(
         "SELECT memory_id, accessed_at FROM access_history WHERE memory_id IN ({}) ORDER BY accessed_at DESC",
         placeholders.join(", ")
     );
     let mut stmt = conn.prepare(&sql)?;
-    let params_vec: Vec<&dyn rusqlite::ToSql> = ids.iter().map(|s| s as &dyn rusqlite::ToSql).collect();
+    let params_vec: Vec<&dyn rusqlite::ToSql> =
+        ids.iter().map(|s| s as &dyn rusqlite::ToSql).collect();
     let rows = stmt.query_map(params_vec.as_slice(), |row| {
         let mem_id: String = row.get(0)?;
         let at: String = row.get(1)?;
@@ -1008,13 +1046,22 @@ pub fn delete(conn: &mut Connection, id: &str, vec_available: bool) -> Result<bo
         }
 
         // Clean up graph edges
-        tx.execute("DELETE FROM memory_edges WHERE source_id = ?1 OR target_id = ?1", params![trimmed])?;
+        tx.execute(
+            "DELETE FROM memory_edges WHERE source_id = ?1 OR target_id = ?1",
+            params![trimmed],
+        )?;
 
         // Clean up access history (CASCADE)
-        tx.execute("DELETE FROM access_history WHERE memory_id = ?1", params![trimmed])?;
+        tx.execute(
+            "DELETE FROM access_history WHERE memory_id = ?1",
+            params![trimmed],
+        )?;
 
         // Clean up agent known state (CASCADE)
-        tx.execute("DELETE FROM agent_known_state WHERE memory_id = ?1", params![trimmed])?;
+        tx.execute(
+            "DELETE FROM agent_known_state WHERE memory_id = ?1",
+            params![trimmed],
+        )?;
     }
 
     tx.commit()?;
@@ -1027,29 +1074,36 @@ pub fn delete(conn: &mut Connection, id: &str, vec_available: bool) -> Result<bo
 /// Returns a summary of how many rows were deleted from each table.
 pub fn gc_tables(conn: &mut Connection) -> Result<serde_json::Value, MemoryError> {
     let tx = conn.transaction()?;
-    let now = now_utc_iso();
 
     // 1. access_history: retain latest 256 entries per memory_id, delete rest
     let ah_deleted: usize = tx.execute(
-        "DELETE FROM access_history WHERE rowid NOT IN (
-            SELECT rowid FROM access_history AS sub
-            WHERE sub.memory_id = access_history.memory_id
-            ORDER BY sub.accessed_at DESC
-            LIMIT 256
-        )",
+        "DELETE FROM access_history
+         WHERE rowid IN (
+             SELECT rowid FROM (
+                 SELECT rowid,
+                        ROW_NUMBER() OVER (
+                            PARTITION BY memory_id
+                            ORDER BY accessed_at DESC
+                        ) AS rn
+                 FROM access_history
+             ) ranked
+             WHERE rn > 256
+         )",
         [],
     )?;
 
     // 2. processed_events: delete older than 30 days
     let pe_deleted: usize = tx.execute(
-        "DELETE FROM processed_events WHERE created_at < DATETIME(?1, '-30 days')",
-        params![now],
+        "DELETE FROM processed_events
+         WHERE created_at < STRFTIME('%Y-%m-%dT%H:%M:%fZ', 'now', '-30 days')",
+        [],
     )?;
 
     // 3. audit_log: delete older than 30 days OR keep only latest 100k
     let al_deleted: usize = tx.execute(
-        "DELETE FROM audit_log WHERE created_at < DATETIME(?1, '-30 days')",
-        params![now],
+        "DELETE FROM audit_log
+         WHERE created_at < STRFTIME('%Y-%m-%dT%H:%M:%fZ', 'now', '-30 days')",
+        [],
     )?;
     // Also cap at 100k total
     let al_cap_deleted: usize = tx.execute(
@@ -1061,13 +1115,20 @@ pub fn gc_tables(conn: &mut Connection) -> Result<serde_json::Value, MemoryError
 
     // 4. agent_known_state: delete older than 90 days
     let aks_deleted: usize = tx.execute(
-        "DELETE FROM agent_known_state WHERE synced_at < DATETIME(?1, '-90 days')",
-        params![now],
+        "DELETE FROM agent_known_state
+         WHERE synced_at < STRFTIME('%Y-%m-%dT%H:%M:%fZ', 'now', '-90 days')",
+        [],
     )?;
 
     // 5. Orphaned access_history (memory was deleted but history remained)
     let orphan_deleted: usize = tx.execute(
         "DELETE FROM access_history WHERE memory_id NOT IN (SELECT id FROM memories)",
+        [],
+    )?;
+
+    // 6. Orphaned agent_known_state (memory was deleted but known-state remained)
+    let orphan_aks_deleted: usize = tx.execute(
+        "DELETE FROM agent_known_state WHERE memory_id NOT IN (SELECT id FROM memories)",
         [],
     )?;
 
@@ -1079,13 +1140,17 @@ pub fn gc_tables(conn: &mut Connection) -> Result<serde_json::Value, MemoryError
         "audit_log_pruned": al_deleted + al_cap_deleted,
         "agent_known_state_pruned": aks_deleted,
         "orphaned_access_history": orphan_deleted,
+        "orphaned_agent_known_state": orphan_aks_deleted,
     }))
 }
 
 // ─── STATS ────────────────────────────────────────────────────────────────────
 
 /// Get aggregate statistics about the memory store.
-pub fn stats(conn: &Connection, include_archived: bool) -> Result<crate::types::StatsResult, MemoryError> {
+pub fn stats(
+    conn: &Connection,
+    include_archived: bool,
+) -> Result<crate::types::StatsResult, MemoryError> {
     fn i64_to_u64(value: i64, label: &str) -> Result<u64, MemoryError> {
         u64::try_from(value)
             .map_err(|_| MemoryError::InvalidArg(format!("negative aggregate count for {label}")))
@@ -1144,10 +1209,10 @@ pub fn stats(conn: &Connection, include_archived: bool) -> Result<crate::types::
         "category",
     )?;
 
-    let mut stmt = conn.prepare(
-        "SELECT path FROM memories WHERE (?1 = 1 OR archived = 0)"
-    )?;
-    let rows = stmt.query_map(params![include_archived as i64], |row| row.get::<_, String>(0))?;
+    let mut stmt = conn.prepare("SELECT path FROM memories WHERE (?1 = 1 OR archived = 0)")?;
+    let rows = stmt.query_map(params![include_archived as i64], |row| {
+        row.get::<_, String>(0)
+    })?;
     let mut by_root_path: HashMap<String, u64> = HashMap::new();
     for row in rows {
         let path = row?;
@@ -1164,7 +1229,7 @@ pub fn stats(conn: &Connection, include_archived: bool) -> Result<crate::types::
 
 // ─── Graph Operations ─────────────────────────────────────────────────────────
 
-use crate::types::{MemoryEdge, GraphExpandResult};
+use crate::types::{GraphExpandResult, MemoryEdge};
 
 /// Add or update an edge in the memory graph.
 pub fn add_edge(conn: &Connection, edge: &MemoryEdge) -> Result<(), MemoryError> {
@@ -1178,8 +1243,7 @@ pub fn add_edge(conn: &Connection, edge: &MemoryEdge) -> Result<(), MemoryError>
     } else {
         normalize_utc_iso_or_now(&edge.valid_from)
     };
-    let meta_str = serde_json::to_string(&edge.metadata)
-        .unwrap_or_else(|_| "{}".to_string());
+    let meta_str = serde_json::to_string(&edge.metadata).unwrap_or_else(|_| "{}".to_string());
 
     conn.execute(
         r#"INSERT INTO memory_edges (source_id, target_id, relation, weight, metadata, created_at, valid_from, valid_to)
@@ -1344,7 +1408,8 @@ pub fn graph_expand(
     }
 
     // Fetch all discovered entries (exclude seeds — caller already has those)
-    let non_seed_ids: Vec<String> = distances.keys()
+    let non_seed_ids: Vec<String> = distances
+        .keys()
         .filter(|id| !seed_ids.contains(id))
         .cloned()
         .collect();
@@ -1358,8 +1423,7 @@ pub fn graph_expand(
 
     // Deduplicate edges
     all_edges.sort_by(|a, b| {
-        (&a.source_id, &a.target_id, &a.relation)
-            .cmp(&(&b.source_id, &b.target_id, &b.relation))
+        (&a.source_id, &a.target_id, &a.relation).cmp(&(&b.source_id, &b.target_id, &b.relation))
     });
     all_edges.dedup_by(|a, b| {
         a.source_id == b.source_id && a.target_id == b.target_id && a.relation == b.relation
@@ -1415,9 +1479,8 @@ pub fn get_state(
     namespace: &str,
     key: &str,
 ) -> Result<Option<(String, u32)>, MemoryError> {
-    let mut stmt = conn.prepare(
-        "SELECT value_json, version FROM hard_state WHERE namespace = ?1 AND key = ?2"
-    )?;
+    let mut stmt = conn
+        .prepare("SELECT value_json, version FROM hard_state WHERE namespace = ?1 AND key = ?2")?;
     let result = stmt.query_row(params![namespace, key], |row| {
         let val: String = row.get(0)?;
         let ver: u32 = row.get(1)?;
@@ -1482,7 +1545,7 @@ pub fn list_derived_by_source(
          FROM derived_items
          WHERE source = ?1 AND path LIKE ?2
          ORDER BY created_at DESC
-         LIMIT ?3"
+         LIMIT ?3",
     )?;
 
     let rows = stmt.query_map(params![source, like_pattern, limit as i64], |row| {
@@ -1521,10 +1584,7 @@ pub fn archive_memory(conn: &Connection, id: &str) -> Result<bool, MemoryError> 
 use crate::hub::HubCapability;
 
 /// Insert or update a hub capability.
-pub fn hub_upsert(
-    conn: &Connection,
-    cap: &HubCapability,
-) -> Result<(), MemoryError> {
+pub fn hub_upsert(conn: &Connection, cap: &HubCapability) -> Result<(), MemoryError> {
     let now = now_utc_iso();
     conn.execute(
         "INSERT INTO hub_capabilities (id, type, name, version, description, definition, enabled, created_at, updated_at)
@@ -1552,18 +1612,13 @@ pub fn hub_upsert(
 }
 
 /// Get a single hub capability by ID.
-pub fn hub_get(
-    conn: &Connection,
-    id: &str,
-) -> Result<Option<HubCapability>, MemoryError> {
+pub fn hub_get(conn: &Connection, id: &str) -> Result<Option<HubCapability>, MemoryError> {
     let mut stmt = conn.prepare(
         "SELECT id, type, name, version, description, definition, enabled,
                 uses, successes, failures, avg_rating, last_used, created_at, updated_at
-         FROM hub_capabilities WHERE id = ?1"
+         FROM hub_capabilities WHERE id = ?1",
     )?;
-    let result = stmt.query_row(params![id], |row| {
-        Ok(hub_cap_from_row(row))
-    });
+    let result = stmt.query_row(params![id], |row| Ok(hub_cap_from_row(row)));
     match result {
         Ok(cap) => Ok(Some(cap)),
         Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
@@ -1580,7 +1635,7 @@ pub fn hub_list(
     let mut sql = String::from(
         "SELECT id, type, name, version, description, definition, enabled,
                 uses, successes, failures, avg_rating, last_used, created_at, updated_at
-         FROM hub_capabilities WHERE 1=1"
+         FROM hub_capabilities WHERE 1=1",
     );
     let mut param_values: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
 
@@ -1594,10 +1649,9 @@ pub fn hub_list(
     sql.push_str(" ORDER BY name ASC");
 
     let mut stmt = conn.prepare(&sql)?;
-    let params_refs: Vec<&dyn rusqlite::types::ToSql> = param_values.iter().map(|b| b.as_ref()).collect();
-    let rows = stmt.query_map(params_refs.as_slice(), |row| {
-        Ok(hub_cap_from_row(row))
-    })?;
+    let params_refs: Vec<&dyn rusqlite::types::ToSql> =
+        param_values.iter().map(|b| b.as_ref()).collect();
+    let rows = stmt.query_map(params_refs.as_slice(), |row| Ok(hub_cap_from_row(row)))?;
 
     let mut caps = Vec::new();
     for row in rows {
@@ -1617,7 +1671,7 @@ pub fn hub_search(
         "SELECT id, type, name, version, description, definition, enabled,
                 uses, successes, failures, avg_rating, last_used, created_at, updated_at
          FROM hub_capabilities
-         WHERE (name LIKE ?1 OR description LIKE ?1)"
+         WHERE (name LIKE ?1 OR description LIKE ?1)",
     );
     let mut param_values: Vec<Box<dyn rusqlite::types::ToSql>> = vec![Box::new(pattern)];
 
@@ -1628,10 +1682,9 @@ pub fn hub_search(
     sql.push_str(" ORDER BY uses DESC, name ASC");
 
     let mut stmt = conn.prepare(&sql)?;
-    let params_refs: Vec<&dyn rusqlite::types::ToSql> = param_values.iter().map(|b| b.as_ref()).collect();
-    let rows = stmt.query_map(params_refs.as_slice(), |row| {
-        Ok(hub_cap_from_row(row))
-    })?;
+    let params_refs: Vec<&dyn rusqlite::types::ToSql> =
+        param_values.iter().map(|b| b.as_ref()).collect();
+    let rows = stmt.query_map(params_refs.as_slice(), |row| Ok(hub_cap_from_row(row)))?;
 
     let mut caps = Vec::new();
     for row in rows {
@@ -1641,11 +1694,7 @@ pub fn hub_search(
 }
 
 /// Enable or disable a hub capability. Returns true if the row was found.
-pub fn hub_set_enabled(
-    conn: &Connection,
-    id: &str,
-    enabled: bool,
-) -> Result<bool, MemoryError> {
+pub fn hub_set_enabled(conn: &Connection, id: &str, enabled: bool) -> Result<bool, MemoryError> {
     let now = now_utc_iso();
     conn.execute(
         "UPDATE hub_capabilities SET enabled = ?1, updated_at = ?2 WHERE id = ?3",
@@ -1671,12 +1720,7 @@ pub fn hub_record_feedback(
            last_used = ?3,
            updated_at = ?3
          WHERE id = ?4",
-        params![
-            success as i32,
-            (!success) as i32,
-            &now,
-            id,
-        ],
+        params![success as i32, (!success) as i32, &now, id,],
     )?;
 
     // Update running average rating if provided
@@ -1696,10 +1740,7 @@ pub fn hub_record_feedback(
 }
 
 /// Delete a hub capability. Returns true if found and deleted.
-pub fn hub_delete(
-    conn: &Connection,
-    id: &str,
-) -> Result<bool, MemoryError> {
+pub fn hub_delete(conn: &Connection, id: &str) -> Result<bool, MemoryError> {
     conn.execute("DELETE FROM hub_capabilities WHERE id = ?1", params![id])?;
     Ok(conn.changes() > 0)
 }
@@ -1751,7 +1792,9 @@ pub fn audit_log_list(
     limit: usize,
     server_filter: Option<&str>,
 ) -> Result<Vec<serde_json::Value>, MemoryError> {
-    let (sql, param_values): (String, Vec<Box<dyn rusqlite::types::ToSql>>) = if let Some(server) = server_filter {
+    let (sql, param_values): (String, Vec<Box<dyn rusqlite::types::ToSql>>) = if let Some(server) =
+        server_filter
+    {
         (
             "SELECT timestamp, server_id, tool_name, success, duration_ms, error_kind FROM audit_log WHERE server_id = ?1 ORDER BY timestamp DESC LIMIT ?2".to_string(),
             vec![Box::new(server.to_string()), Box::new(limit as i64)],
@@ -1764,7 +1807,8 @@ pub fn audit_log_list(
     };
 
     let mut stmt = conn.prepare(&sql)?;
-    let params_refs: Vec<&dyn rusqlite::types::ToSql> = param_values.iter().map(|b| b.as_ref()).collect();
+    let params_refs: Vec<&dyn rusqlite::types::ToSql> =
+        param_values.iter().map(|b| b.as_ref()).collect();
     let rows = stmt.query_map(params_refs.as_slice(), |row| {
         Ok(serde_json::json!({
             "timestamp": row.get::<_, String>(0)?,
@@ -1796,7 +1840,9 @@ pub fn get_agent_known_revisions(
         return Ok(HashMap::new());
     }
 
-    let placeholders: Vec<String> = (0..memory_ids.len()).map(|i| format!("?{}", i + 2)).collect();
+    let placeholders: Vec<String> = (0..memory_ids.len())
+        .map(|i| format!("?{}", i + 2))
+        .collect();
     let sql = format!(
         "SELECT memory_id, revision FROM agent_known_state WHERE agent_id = ?1 AND memory_id IN ({})",
         placeholders.join(",")
@@ -1808,7 +1854,8 @@ pub fn get_agent_known_revisions(
     for id in memory_ids {
         param_values.push(Box::new(id.clone()));
     }
-    let params_refs: Vec<&dyn rusqlite::types::ToSql> = param_values.iter().map(|b| b.as_ref()).collect();
+    let params_refs: Vec<&dyn rusqlite::types::ToSql> =
+        param_values.iter().map(|b| b.as_ref()).collect();
 
     let rows = stmt.query_map(params_refs.as_slice(), |row| {
         Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
@@ -1841,7 +1888,7 @@ pub fn update_agent_known_state(
              VALUES (?1, ?2, ?3, ?4)
              ON CONFLICT(agent_id, memory_id) DO UPDATE SET
                  revision = excluded.revision,
-                 synced_at = excluded.synced_at"
+                 synced_at = excluded.synced_at",
         )?;
         for (memory_id, revision) in entries {
             stmt.execute(params![agent_id, memory_id, revision, &now])?;
@@ -2089,7 +2136,11 @@ mod tests {
 
         // Verify it's gone from main table
         let count: i64 = conn
-            .query_row("SELECT COUNT(*) FROM memories WHERE id = 'del-1'", [], |row| row.get(0))
+            .query_row(
+                "SELECT COUNT(*) FROM memories WHERE id = 'del-1'",
+                [],
+                |row| row.get(0),
+            )
             .unwrap();
         assert_eq!(count, 0);
 
@@ -2175,18 +2226,34 @@ mod tests {
         for id in &["a", "b", "c", "d"] {
             upsert(&mut conn, &make_entry(id, &format!("node {}", id)), false).unwrap();
         }
-        add_edge(&conn, &MemoryEdge {
-            source_id: "a".into(), target_id: "b".into(),
-            relation: "follows".into(), weight: 1.0,
-            metadata: serde_json::json!({}), created_at: String::new(),
-            valid_from: String::new(), valid_to: None,
-        }).unwrap();
-        add_edge(&conn, &MemoryEdge {
-            source_id: "b".into(), target_id: "c".into(),
-            relation: "follows".into(), weight: 1.0,
-            metadata: serde_json::json!({}), created_at: String::new(),
-            valid_from: String::new(), valid_to: None,
-        }).unwrap();
+        add_edge(
+            &conn,
+            &MemoryEdge {
+                source_id: "a".into(),
+                target_id: "b".into(),
+                relation: "follows".into(),
+                weight: 1.0,
+                metadata: serde_json::json!({}),
+                created_at: String::new(),
+                valid_from: String::new(),
+                valid_to: None,
+            },
+        )
+        .unwrap();
+        add_edge(
+            &conn,
+            &MemoryEdge {
+                source_id: "b".into(),
+                target_id: "c".into(),
+                relation: "follows".into(),
+                weight: 1.0,
+                metadata: serde_json::json!({}),
+                created_at: String::new(),
+                valid_from: String::new(),
+                valid_to: None,
+            },
+        )
+        .unwrap();
         // d is disconnected
 
         // Expand 1 hop from "a"
@@ -2209,15 +2276,214 @@ mod tests {
         let e2 = make_entry("del-e2", "target");
         upsert(&mut conn, &e1, false).unwrap();
         upsert(&mut conn, &e2, false).unwrap();
-        add_edge(&conn, &MemoryEdge {
-            source_id: "del-e1".into(), target_id: "del-e2".into(),
-            relation: "causes".into(), weight: 1.0,
-            metadata: serde_json::json!({}), created_at: String::new(),
-            valid_from: String::new(), valid_to: None,
-        }).unwrap();
+        add_edge(
+            &conn,
+            &MemoryEdge {
+                source_id: "del-e1".into(),
+                target_id: "del-e2".into(),
+                relation: "causes".into(),
+                weight: 1.0,
+                metadata: serde_json::json!({}),
+                created_at: String::new(),
+                valid_from: String::new(),
+                valid_to: None,
+            },
+        )
+        .unwrap();
 
         delete(&mut conn, "del-e1", false).unwrap();
         let edges = get_edges(&conn, "del-e2", "both", None).unwrap();
         assert!(edges.is_empty(), "edges should be cleaned up on delete");
+    }
+
+    #[test]
+    fn delete_cascades_access_history_and_known_state() {
+        let mut conn = make_conn();
+        let e = make_entry("del-cascade", "delete target");
+        upsert(&mut conn, &e, false).unwrap();
+
+        record_access(&mut conn, &["del-cascade".to_string()]).unwrap();
+        update_agent_known_state(
+            &conn,
+            "agent-delete-test",
+            &[("del-cascade".to_string(), 1)],
+        )
+        .unwrap();
+
+        let ah_before: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM access_history WHERE memory_id = ?1",
+                params!["del-cascade"],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let aks_before: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM agent_known_state WHERE memory_id = ?1",
+                params!["del-cascade"],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(ah_before > 0);
+        assert!(aks_before > 0);
+
+        delete(&mut conn, "del-cascade", false).unwrap();
+
+        let ah_after: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM access_history WHERE memory_id = ?1",
+                params!["del-cascade"],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let aks_after: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM agent_known_state WHERE memory_id = ?1",
+                params!["del-cascade"],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(ah_after, 0, "access_history should be cleaned up on delete");
+        assert_eq!(
+            aks_after, 0,
+            "agent_known_state should be cleaned up on delete"
+        );
+    }
+
+    #[test]
+    fn gc_tables_prunes_retention_and_orphans() {
+        let mut conn = make_conn();
+        let e = make_entry("gc-keep", "gc target");
+        upsert(&mut conn, &e, false).unwrap();
+
+        for _ in 0..300 {
+            conn.execute(
+                "INSERT INTO access_history (memory_id, accessed_at, query_hash) VALUES (?1, ?2, ?3)",
+                params!["gc-keep", now_utc_iso(), ""],
+            )
+            .unwrap();
+        }
+        conn.execute(
+            "INSERT INTO access_history (memory_id, accessed_at, query_hash) VALUES (?1, ?2, ?3)",
+            params!["gc-orphan", now_utc_iso(), ""],
+        )
+        .unwrap();
+
+        conn.execute(
+            "INSERT INTO processed_events (event_hash, event_id, worker, created_at) VALUES (?1, ?2, ?3, ?4)",
+            params!["ev-old", "id-old", "ingest", "2000-01-01T00:00:00.000Z"],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO processed_events (event_hash, event_id, worker, created_at) VALUES (?1, ?2, ?3, ?4)",
+            params!["ev-new", "id-new", "ingest", "2999-01-01T00:00:00.000Z"],
+        )
+        .unwrap();
+
+        conn.execute(
+            "INSERT INTO audit_log (timestamp, server_id, tool_name, args_hash, success, duration_ms, error_kind, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![
+                "2000-01-01T00:00:00.000Z",
+                "mcp:test",
+                "tool_old",
+                "",
+                1,
+                1,
+                Option::<String>::None,
+                "2000-01-01T00:00:00.000Z"
+            ],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO audit_log (timestamp, server_id, tool_name, args_hash, success, duration_ms, error_kind, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![
+                "2999-01-01T00:00:00.000Z",
+                "mcp:test",
+                "tool_new",
+                "",
+                1,
+                1,
+                Option::<String>::None,
+                "2999-01-01T00:00:00.000Z"
+            ],
+        )
+        .unwrap();
+
+        conn.execute(
+            "INSERT INTO agent_known_state (agent_id, memory_id, revision, synced_at) VALUES (?1, ?2, ?3, ?4)",
+            params!["agent-old", "gc-keep", 1, "2000-01-01T00:00:00.000Z"],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO agent_known_state (agent_id, memory_id, revision, synced_at) VALUES (?1, ?2, ?3, ?4)",
+            params!["agent-new", "gc-keep", 2, "2999-01-01T00:00:00.000Z"],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO agent_known_state (agent_id, memory_id, revision, synced_at) VALUES (?1, ?2, ?3, ?4)",
+            params!["agent-orphan", "gc-orphan", 1, "2999-01-01T00:00:00.000Z"],
+        )
+        .unwrap();
+
+        let summary = gc_tables(&mut conn).unwrap();
+
+        let kept_access: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM access_history WHERE memory_id = ?1",
+                params!["gc-keep"],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let orphan_access: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM access_history WHERE memory_id = ?1",
+                params!["gc-orphan"],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let processed_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM processed_events", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        let audit_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM audit_log", [], |row| row.get(0))
+            .unwrap();
+        let known_state_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM agent_known_state", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        let orphan_known_state: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM agent_known_state WHERE memory_id = ?1",
+                params!["gc-orphan"],
+                |row| row.get(0),
+            )
+            .unwrap();
+
+        assert_eq!(
+            kept_access, 256,
+            "access_history should retain latest 256 per memory"
+        );
+        assert_eq!(orphan_access, 0, "orphaned access rows should be removed");
+        assert_eq!(
+            processed_count, 1,
+            "old processed_events row should be pruned"
+        );
+        assert_eq!(audit_count, 1, "old audit_log row should be pruned");
+        assert_eq!(
+            known_state_count, 1,
+            "old + orphan known-state rows should be pruned"
+        );
+        assert_eq!(
+            orphan_known_state, 0,
+            "orphaned known-state rows should be removed"
+        );
+
+        assert!(summary["access_history_pruned"].as_u64().unwrap_or(0) > 0);
+        assert!(summary["orphaned_agent_known_state"].as_u64().unwrap_or(0) > 0);
     }
 }
