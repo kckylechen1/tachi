@@ -20,7 +20,7 @@ use rmcp::{
 };
 use serde::Deserialize;
 use serde_json::{json, Value};
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::future::Future;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -184,6 +184,10 @@ struct MemoryServer {
     tool_cache: Arc<StdMutex<HashMap<String, CachedResult>>>,
     cache_hits: Arc<std::sync::atomic::AtomicU64>,
     cache_misses: Arc<std::sync::atomic::AtomicU64>,
+    // ─── Ghost Whispers (pub/sub) ───────────────────────────────────────────
+    pubsub: Arc<StdMutex<PubSubState>>,
+    // ─── Dead Letter Queue (failed tool call auto-retry) ─────────────────
+    dead_letters: Arc<StdMutex<VecDeque<DeadLetter>>>,
 }
 
 // ─── MCP Client Connection Pool ──────────────────────────────────────────────
@@ -269,6 +273,8 @@ impl MemoryServer {
             tool_cache: Arc::new(StdMutex::new(HashMap::new())),
             cache_hits: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             cache_misses: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            pubsub: Arc::new(StdMutex::new(PubSubState::new())),
+            dead_letters: Arc::new(StdMutex::new(VecDeque::new())),
         })
     }
 
@@ -425,6 +431,34 @@ impl MemoryServer {
             "tool_name": tool_name,
             "output": output
         }))
+    }
+
+    /// Shared retry dispatch for DLQ entries.
+    /// Handles skill tools and proxy tools. Native tools are excluded from retry
+    /// since they are synchronous and should be retried by the caller directly.
+    async fn retry_dispatch(
+        &self,
+        tool_name: &str,
+        arguments: Option<serde_json::Map<String, serde_json::Value>>,
+    ) -> Result<rmcp::model::CallToolResult, rmcp::ErrorData> {
+        let args_obj = arguments.map(|m| m.into_iter().collect::<rmcp::model::JsonObject>());
+
+        // 1. Skill tool?
+        if self.skill_tools.lock().map(|s| s.contains_key(tool_name)).unwrap_or(false) {
+            return self.call_skill_tool(tool_name, args_obj).await;
+        }
+
+        // 2. Proxy tool? (format: "server__tool")
+        if let Some((server_name, remote_tool)) = tool_name.split_once("__") {
+            return self.proxy_call_internal(server_name, remote_tool, args_obj).await;
+        }
+
+        // 3. Native tool — cannot retry via DLQ (needs RequestContext).
+        //    These are marked abandoned; the client should retry the MCP call directly.
+        Err(rmcp::ErrorData::invalid_params(
+            format!("Native tool '{}' cannot be retried via DLQ — retry the MCP call directly", tool_name),
+            None,
+        ))
     }
 }
 
@@ -732,12 +766,16 @@ fn fact_to_entry(fact: &serde_json::Value, source: &str, metadata: serde_json::V
         return None;
     }
     let topic = fact["topic"].as_str().unwrap_or("").to_string();
-    let importance = fact["importance"].as_f64().unwrap_or(0.7);
+    let importance = fact["importance"].as_f64().unwrap_or(0.7).clamp(0.0, 1.0);
     let keywords: Vec<String> = fact["keywords"]
         .as_array()
         .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
         .unwrap_or_default();
-    let scope = fact["scope"].as_str().unwrap_or("general").to_string();
+    let scope_raw = fact["scope"].as_str().unwrap_or("general");
+    let scope = match scope_raw {
+        "user" | "project" | "general" => scope_raw.to_string(),
+        _ => "general".to_string(),
+    };
     let summary = text.chars().take(100).collect::<String>();
     Some(MemoryEntry {
         id: uuid::Uuid::new_v4().to_string(),
@@ -944,6 +982,12 @@ struct HubCallParams {
     arguments: serde_json::Value,
 }
 
+#[derive(Debug, Deserialize, JsonSchema)]
+struct HubDisconnectParams {
+    /// MCP server capability ID (e.g. "mcp:longbridge") or server name
+    server_id: String,
+}
+
 #[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 struct AuditLogParams {
@@ -976,6 +1020,165 @@ struct SyncMemoriesParams {
     /// Maximum entries to return (default: 100)
     #[serde(default = "default_sync_limit")]
     limit: usize,
+}
+
+// ─── Ghost Whispers (Inter-Agent Pub/Sub) ─────────────────────────────────────
+
+const PUBSUB_RING_MAX: usize = 100;
+const PUBSUB_MAX_CURSORS: usize = 1000;
+
+#[derive(Clone)]
+struct PubSubMessage {
+    topic: String,
+    payload: serde_json::Value,
+    publisher: String,
+    timestamp: String,
+    id: String,
+}
+
+struct PubSubState {
+    /// topic → ring buffer of messages (max PUBSUB_RING_MAX per topic)
+    messages: HashMap<String, VecDeque<PubSubMessage>>,
+    /// Global monotonic index per topic (total messages ever published)
+    next_index: HashMap<String, usize>,
+    /// agent_id → (topic → last_seen_global_index)
+    cursors: HashMap<String, HashMap<String, usize>>,
+    /// agent_id → monotonic recency sequence (used for LRU cursor eviction)
+    cursor_recency: HashMap<String, u64>,
+    /// Monotonic sequence counter for cursor recency tracking
+    cursor_seq: u64,
+}
+
+impl PubSubState {
+    fn new() -> Self {
+        Self {
+            messages: HashMap::new(),
+            next_index: HashMap::new(),
+            cursors: HashMap::new(),
+            cursor_recency: HashMap::new(),
+            cursor_seq: 0,
+        }
+    }
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+struct GhostPublishParams {
+    /// Topic to publish to (e.g. "build-status", "code-review")
+    topic: String,
+    /// Message payload (any JSON value)
+    payload: serde_json::Value,
+    /// Publisher agent identifier
+    publisher: String,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+struct GhostSubscribeParams {
+    /// Unique agent identifier for cursor tracking
+    agent_id: String,
+    /// Topics to subscribe to and poll for new messages
+    topics: Vec<String>,
+}
+
+// ─── Dead Letter Queue (Failed Tool Call Auto-Retry) ─────────────────────────
+
+const DLQ_MAX_ENTRIES: usize = 200;
+const DLQ_TTL_SECS: u64 = 3600; // 1 hour
+
+#[derive(Clone)]
+struct DeadLetter {
+    id: String,
+    tool_name: String,
+    arguments: Option<serde_json::Map<String, serde_json::Value>>,
+    error: String,
+    error_category: String, // "invalid_params", "timeout", "internal", "not_found"
+    timestamp: String,
+    retry_count: u32,
+    max_retries: u32,
+    status: String, // "pending", "retrying", "resolved", "abandoned"
+}
+
+fn categorize_error(error: &str) -> String {
+    let lower = error.to_lowercase();
+    if lower.contains("not found") || lower.contains("not_found") {
+        "not_found".to_string()
+    } else if lower.contains("timeout") || lower.contains("timed out") {
+        "timeout".to_string()
+    } else if lower.contains("invalid") || lower.contains("param") {
+        "invalid_params".to_string()
+    } else {
+        "internal".to_string()
+    }
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+struct DlqListParams {
+    /// Filter by status: "pending", "retrying", "resolved", "abandoned"
+    #[serde(default)]
+    status_filter: Option<String>,
+    /// Max entries to return (default: 50)
+    #[serde(default)]
+    limit: Option<usize>,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+struct DlqRetryParams {
+    /// ID of the dead letter entry to retry
+    dead_letter_id: String,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+struct SandboxSetRuleParams {
+    /// Agent role (e.g. "code-review", "finance", "admin")
+    agent_role: String,
+    /// Path pattern to match (e.g. "/finance/*", "/project/secrets")
+    path_pattern: String,
+    /// Access level: "read", "write", or "deny"
+    #[serde(default = "default_access_level")]
+    access_level: String,
+}
+
+fn default_access_level() -> String {
+    "read".to_string()
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+struct SandboxCheckParams {
+    /// Agent role to check access for
+    agent_role: String,
+    /// Memory path to check
+    path: String,
+    /// Operation type: "read" or "write"
+    #[serde(default = "default_sandbox_operation")]
+    operation: String,
+}
+
+fn default_sandbox_operation() -> String {
+    "read".to_string()
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+struct ChainStep {
+    /// Skill capability ID (e.g. "skill:summarize")
+    skill_id: String,
+    /// Extra arguments to merge with piped input
+    #[serde(default)]
+    extra_args: Option<serde_json::Value>,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+struct ChainSkillsParams {
+    /// Ordered list of skill steps to execute
+    steps: Vec<ChainStep>,
+    /// Input for the first step
+    initial_input: String,
 }
 
 // ─── Tool Implementations ────────────────────────────────────────────────────────
@@ -1027,35 +1230,45 @@ impl MemoryServer {
         })?;
 
         // Spawn background enrichment (embedding + summary)
+        // Uses revision-aware update to avoid overwriting concurrent changes
         let server = self.clone();
         let enrich_id = id.clone();
         let enrich_text = entry.text.clone();
+        let enrich_revision = 1_i64; // initial revision at time of save
         tokio::spawn(async move {
-            let mut enriched_entry = entry;
+            let mut new_vec: Option<Vec<f32>> = None;
+            let mut new_summary: Option<String> = None;
 
             // Generate embedding
             match server.llm.embed_voyage(&enrich_text, "document").await {
-                Ok(vec) => enriched_entry.vector = Some(vec),
+                Ok(vec) => new_vec = Some(vec),
                 Err(e) => eprintln!("[enrichment] embedding failed for {enrich_id}: {e}"),
             }
 
             // Generate summary if not provided
             if needs_summary {
                 match server.llm.generate_summary(&enrich_text).await {
-                    Ok(s) => enriched_entry.summary = s,
+                    Ok(s) => new_summary = Some(s),
                     Err(e) => eprintln!("[enrichment] summary failed for {enrich_id}: {e}"),
                 }
             }
 
-            // Update entry with enriched data
-            if let Err(e) = server.with_store_for_scope(target_db, |store| {
-                store
-                    .upsert(&enriched_entry)
-                    .map_err(|e| format!("Failed to update enriched entry: {e}"))
-            }) {
-                eprintln!("[enrichment] DB update failed for {enrich_id}: {e}");
-            } else {
-                eprintln!("[enrichment] completed for {enrich_id}");
+            // Revision-aware targeted update — discards enrichment if entry was modified
+            if new_vec.is_some() || new_summary.is_some() {
+                match server.with_store_for_scope(target_db, |store| {
+                    store
+                        .update_enrichment_fields(
+                            &enrich_id,
+                            new_summary.as_deref(),
+                            new_vec.as_deref(),
+                            enrich_revision,
+                        )
+                        .map_err(|e| format!("Failed to update enriched entry: {e}"))
+                }) {
+                    Ok(true) => eprintln!("[enrichment] completed for {enrich_id}"),
+                    Ok(false) => eprintln!("[enrichment] discarded for {enrich_id} (revision changed)"),
+                    Err(e) => eprintln!("[enrichment] DB update failed for {enrich_id}: {e}"),
+                }
             }
         });
 
@@ -1422,6 +1635,7 @@ impl MemoryServer {
         let server = self.clone();
         let conversation_id = params.conversation_id.clone();
         let turn_id = params.turn_id.clone();
+        let eh = event_hash.clone();
         tokio::spawn(async move {
             match server.llm.extract_facts(&combined_text).await {
                 Ok(facts) if facts.is_empty() => {
@@ -1450,10 +1664,22 @@ impl MemoryServer {
                     });
                     match saved {
                         Ok(n) => eprintln!("[ingest_event] saved {n}/{count} facts for {conversation_id}:{turn_id}"),
-                        Err(e) => eprintln!("[ingest_event] DB write failed: {e}"),
+                        Err(e) => {
+                            eprintln!("[ingest_event] DB write failed: {e} — releasing claim for retry");
+                            let _ = server.with_store_for_scope(target_db, |store| {
+                                store.release_event_claim(&eh, "ingest")
+                                    .map_err(|e| format!("{e}"))
+                            });
+                        }
                     }
                 }
-                Err(e) => eprintln!("[ingest_event] LLM extraction failed for {conversation_id}:{turn_id}: {e}"),
+                Err(e) => {
+                    eprintln!("[ingest_event] LLM extraction failed for {conversation_id}:{turn_id}: {e} — releasing claim for retry");
+                    let _ = server.with_store_for_scope(target_db, |store| {
+                        store.release_event_claim(&eh, "ingest")
+                            .map_err(|e| format!("{e}"))
+                    });
+                }
             }
         });
 
@@ -1496,6 +1722,16 @@ impl MemoryServer {
         let hits = self.cache_hits.load(std::sync::atomic::Ordering::Relaxed);
         let misses = self.cache_misses.load(std::sync::atomic::Ordering::Relaxed);
 
+        // DLQ stats
+        let (dlq_total, dlq_pending, dlq_resolved, dlq_abandoned) = {
+            let dlq = self.dead_letters.lock().unwrap_or_else(|e| e.into_inner());
+            let total = dlq.len();
+            let pending = dlq.iter().filter(|d| d.status == "pending").count();
+            let resolved = dlq.iter().filter(|d| d.status == "resolved").count();
+            let abandoned = dlq.iter().filter(|d| d.status == "abandoned").count();
+            (total, pending, resolved, abandoned)
+        };
+
         serde_json::to_string(&json!({
             "status": "running",
             "workers": if self.pipeline_enabled { "rust_async" } else { "disabled" },
@@ -1512,6 +1748,14 @@ impl MemoryServer {
                 "cache_hits": hits,
                 "cache_misses": misses,
                 "ttl_seconds": TOOL_CACHE_TTL.as_secs(),
+            },
+            "dead_letter_queue": {
+                "total": dlq_total,
+                "pending": dlq_pending,
+                "resolved": dlq_resolved,
+                "abandoned": dlq_abandoned,
+                "max_entries": DLQ_MAX_ENTRIES,
+                "ttl_seconds": DLQ_TTL_SECS,
             },
         }))
         .map_err(|e| format!("Failed to serialize response: {}", e))
@@ -1609,11 +1853,12 @@ impl MemoryServer {
 
         // Update agent known state in global DB
         if !sync_updates.is_empty() {
-            let _ = self.with_global_store(|store| {
+            self.with_global_store(|store| {
                 store
                     .update_agent_known_state(&params.agent_id, &sync_updates)
                     .map_err(|e| format!("Failed to update agent state: {}", e))
-            });
+            })
+            .map_err(|e| format!("sync_memories failed to persist agent state for '{}': {}", params.agent_id, e))?;
         }
 
         serde_json::to_string(&json!({
@@ -1740,6 +1985,10 @@ impl MemoryServer {
                 resp.insert("analysis".into(), json!("pending (async)"));
             }
         } else if params.cap_type == "mcp" {
+            // Skip discovery for disabled MCP capabilities (security: don't spawn untrusted commands)
+            if !auto_enabled {
+                resp.insert("discovery".into(), json!("skipped (capability disabled)"));
+            } else {
             // Auto-discover tools from child MCP server
             let def: serde_json::Value = serde_json::from_str(&cap.definition).unwrap_or_default();
             let transport_type = def["transport"].as_str().unwrap_or("stdio");
@@ -1786,7 +2035,7 @@ impl MemoryServer {
 
                                         self.proxy_tools
                                             .lock()
-                                            .unwrap()
+                                            .unwrap_or_else(|e| e.into_inner())
                                             .insert(server_name.to_string(), tools.clone());
 
                                         let mut updated_def = def.clone();
@@ -1844,7 +2093,7 @@ impl MemoryServer {
 
                                         self.proxy_tools
                                             .lock()
-                                            .unwrap()
+                                            .unwrap_or_else(|e| e.into_inner())
                                             .insert(server_name.to_string(), tools.clone());
 
                                         let mut updated_def = def.clone();
@@ -1892,7 +2141,8 @@ impl MemoryServer {
                     );
                 }
             }
-        }
+            } // else: auto_enabled — skip discovery for disabled
+        } // end: else if params.cap_type == "mcp"
 
         serde_json::to_string(&serde_json::Value::Object(resp))
             .map_err(|e| format!("serialize: {e}"))
@@ -2117,6 +2367,16 @@ impl MemoryServer {
         &self,
         Parameters(params): Parameters<HubCallParams>,
     ) -> Result<String, String> {
+        // Check enabled status before calling
+        let cap = self.get_capability(&params.server_id)
+            .map_err(|e| format!("{e}"))?;
+        if !cap.enabled {
+            return Err(format!(
+                "MCP server '{}' is disabled. Use hub_set_enabled to activate after review.",
+                params.server_id
+            ));
+        }
+
         let server_name = params
             .server_id
             .strip_prefix("mcp:")
@@ -2144,6 +2404,451 @@ impl MemoryServer {
             "tool": params.tool_name,
             "content": content_texts,
             "is_error": result.is_error.unwrap_or(false),
+        }))
+        .map_err(|e| format!("serialize: {e}"))
+    }
+
+    #[tool(description = "Disconnect a cached MCP server connection from the pool. Forces a fresh reconnect (with updated env/config) on next hub_call.")]
+    async fn hub_disconnect(
+        &self,
+        Parameters(params): Parameters<HubDisconnectParams>,
+    ) -> Result<String, String> {
+        let server_name = params
+            .server_id
+            .strip_prefix("mcp:")
+            .unwrap_or(&params.server_id);
+
+        // Remove from connection pool
+        let had_connection = {
+            let mut conns = self.pool.connections.lock().unwrap_or_else(|e| e.into_inner());
+            conns.remove(server_name).is_some()
+        };
+
+        // Also clear discovered tools cache
+        {
+            let mut tools = self.proxy_tools.lock().unwrap_or_else(|e| e.into_inner());
+            tools.remove(server_name);
+        }
+
+        serde_json::to_string(&json!({
+            "server": server_name,
+            "disconnected": had_connection,
+            "message": if had_connection {
+                "Connection dropped. Next hub_call will reconnect with latest config."
+            } else {
+                "No active connection found (will connect fresh on next hub_call)."
+            },
+        }))
+        .map_err(|e| format!("serialize: {e}"))
+    }
+
+    // ─── Ghost Whispers (Inter-Agent Pub/Sub) ────────────────────────────────
+
+    #[tool(description = "Publish a message to a Ghost Whispers topic. Other agents can poll for new messages via ghost_subscribe.")]
+    async fn ghost_publish(
+        &self,
+        Parameters(params): Parameters<GhostPublishParams>,
+    ) -> Result<String, String> {
+        let msg_id = uuid::Uuid::new_v4().to_string();
+        let timestamp = Utc::now().to_rfc3339();
+
+        let msg = PubSubMessage {
+            topic: params.topic.clone(),
+            payload: params.payload,
+            publisher: params.publisher.clone(),
+            timestamp: timestamp.clone(),
+            id: msg_id.clone(),
+        };
+
+        let mut state = self.pubsub.lock().unwrap_or_else(|e| e.into_inner());
+        let ring = state.messages.entry(params.topic.clone()).or_insert_with(VecDeque::new);
+        ring.push_back(msg);
+        if ring.len() > PUBSUB_RING_MAX {
+            ring.pop_front();
+        }
+        let idx = state.next_index.entry(params.topic.clone()).or_insert(0);
+        *idx += 1;
+
+        serde_json::to_string(&json!({
+            "id": msg_id,
+            "topic": params.topic,
+            "publisher": params.publisher,
+            "timestamp": timestamp,
+            "global_index": *idx,
+        }))
+        .map_err(|e| format!("serialize: {e}"))
+    }
+
+    #[tool(description = "Subscribe to Ghost Whispers topics and get new messages since last poll. Advances the cursor so the same messages are not returned again.")]
+    async fn ghost_subscribe(
+        &self,
+        Parameters(params): Parameters<GhostSubscribeParams>,
+    ) -> Result<String, String> {
+        let mut state = self.pubsub.lock().unwrap_or_else(|e| e.into_inner());
+
+        // Evict least-recently-active cursors if we exceed the limit
+        if state.cursors.len() >= PUBSUB_MAX_CURSORS && !state.cursors.contains_key(&params.agent_id) {
+            let evict_agent = state
+                .cursor_recency
+                .iter()
+                .min_by_key(|(_, seq)| *seq)
+                .map(|(agent_id, _)| agent_id.clone())
+                .or_else(|| state.cursors.keys().next().cloned());
+
+            if let Some(agent_id) = evict_agent {
+                state.cursors.remove(&agent_id);
+                state.cursor_recency.remove(&agent_id);
+            }
+        }
+
+        // Read current cursors for this agent (clone to release borrow)
+        let prev_cursors: HashMap<String, usize> = state
+            .cursors
+            .get(&params.agent_id)
+            .cloned()
+            .unwrap_or_default();
+
+        let mut new_messages: Vec<serde_json::Value> = Vec::new();
+        let mut new_cursors: HashMap<String, usize> = prev_cursors.clone();
+
+        for topic in &params.topics {
+            let global_idx = state.next_index.get(topic).copied().unwrap_or(0);
+            let cursor = prev_cursors.get(topic).copied().unwrap_or(0);
+
+            if cursor >= global_idx {
+                new_cursors.insert(topic.clone(), global_idx);
+                continue; // no new messages
+            }
+
+            if let Some(ring) = state.messages.get(topic) {
+                let ring_start_idx = if global_idx >= ring.len() {
+                    global_idx - ring.len()
+                } else {
+                    0
+                };
+                let skip = if cursor > ring_start_idx {
+                    cursor - ring_start_idx
+                } else {
+                    0
+                };
+
+                for msg in ring.iter().skip(skip) {
+                    new_messages.push(json!({
+                        "id": msg.id,
+                        "topic": msg.topic,
+                        "payload": msg.payload,
+                        "publisher": msg.publisher,
+                        "timestamp": msg.timestamp,
+                    }));
+                }
+            }
+
+            // Advance cursor to current head
+            new_cursors.insert(topic.clone(), global_idx);
+        }
+
+        // Write back updated cursors
+        state.cursors.insert(params.agent_id.clone(), new_cursors);
+        state.cursor_seq = state.cursor_seq.saturating_add(1);
+        let recency_seq = state.cursor_seq;
+        state.cursor_recency.insert(params.agent_id.clone(), recency_seq);
+
+        serde_json::to_string(&json!({
+            "agent_id": params.agent_id,
+            "new_count": new_messages.len(),
+            "messages": new_messages,
+        }))
+        .map_err(|e| format!("serialize: {e}"))
+    }
+
+    #[tool(description = "List active Ghost Whispers topics with message counts and last message time.")]
+    async fn ghost_topics(&self) -> Result<String, String> {
+        let state = self.pubsub.lock().unwrap_or_else(|e| e.into_inner());
+
+        let mut topics: Vec<serde_json::Value> = Vec::new();
+        for (topic, ring) in &state.messages {
+            if ring.is_empty() {
+                continue;
+            }
+            let last_msg = ring.back().unwrap();
+            topics.push(json!({
+                "topic": topic,
+                "count": ring.len(),
+                "total_published": state.next_index.get(topic).copied().unwrap_or(0),
+                "last_message_time": last_msg.timestamp,
+                "last_publisher": last_msg.publisher,
+            }));
+        }
+
+        serde_json::to_string(&json!({
+            "active_topics": topics.len(),
+            "topics": topics,
+        }))
+        .map_err(|e| format!("serialize: {e}"))
+    }
+
+    // ─── Skill Chaining (Unix Pipe-Style Composition) ────────────────────────
+
+    #[tool(description = "Execute a chain of skills in sequence (Unix pipe style). Output of each skill feeds as input to the next.")]
+    async fn chain_skills(
+        &self,
+        Parameters(params): Parameters<ChainSkillsParams>,
+    ) -> Result<String, String> {
+        if params.steps.is_empty() {
+            return Err("chain_skills requires at least one step".to_string());
+        }
+
+        let mut current_input = params.initial_input;
+        let mut step_results: Vec<serde_json::Value> = Vec::new();
+
+        for (i, step) in params.steps.iter().enumerate() {
+            let start = Instant::now();
+
+            // Build args: merge extra_args with piped input
+            let mut args = match &step.extra_args {
+                Some(Value::Object(obj)) => Value::Object(obj.clone()),
+                _ => json!({}),
+            };
+            if let Value::Object(ref mut map) = args {
+                map.insert("input".into(), json!(current_input));
+            }
+
+            let run_params = RunSkillParams {
+                skill_id: step.skill_id.clone(),
+                args,
+            };
+
+            match self.run_skill(Parameters(run_params)).await {
+                Ok(output) => {
+                    let elapsed_ms = start.elapsed().as_millis();
+                    step_results.push(json!({
+                        "step": i,
+                        "skill_id": step.skill_id,
+                        "elapsed_ms": elapsed_ms,
+                        "status": "ok",
+                    }));
+                    current_input = output;
+                }
+                Err(e) => {
+                    step_results.push(json!({
+                        "step": i,
+                        "skill_id": step.skill_id,
+                        "status": "error",
+                        "error": e,
+                    }));
+                    return Err(format!(
+                        "chain_skills failed at step {} (skill '{}'): {}",
+                        i, step.skill_id, e
+                    ));
+                }
+            }
+        }
+
+        serde_json::to_string(&json!({
+            "status": "ok",
+            "total_steps": params.steps.len(),
+            "output": current_input,
+            "steps": step_results,
+        }))
+        .map_err(|e| format!("serialize: {e}"))
+    }
+
+    // ─── Dead Letter Queue Tools ──────────────────────────────────────────────
+
+    #[tool(description = "List dead letter queue entries (failed tool calls). Filter by status: pending, retrying, resolved, abandoned.")]
+    async fn dlq_list(
+        &self,
+        Parameters(params): Parameters<DlqListParams>,
+    ) -> Result<String, String> {
+        let limit = params.limit.unwrap_or(50).min(200);
+        let now = Utc::now();
+
+        let mut dlq = self.dead_letters.lock().unwrap_or_else(|e| e.into_inner());
+
+        // Expire old entries (> 1 hour)
+        dlq.retain(|dl| {
+            if let Ok(ts) = chrono::DateTime::parse_from_rfc3339(&dl.timestamp) {
+                (now - ts.with_timezone(&Utc)).num_seconds() < DLQ_TTL_SECS as i64
+            } else {
+                false
+            }
+        });
+
+        let entries: Vec<serde_json::Value> = dlq
+            .iter()
+            .filter(|dl| {
+                if let Some(ref filter) = params.status_filter {
+                    dl.status == *filter
+                } else {
+                    true
+                }
+            })
+            .rev() // newest first
+            .take(limit)
+            .map(|dl| {
+                json!({
+                    "id": dl.id,
+                    "tool_name": dl.tool_name,
+                    "error": dl.error,
+                    "error_category": dl.error_category,
+                    "timestamp": dl.timestamp,
+                    "retry_count": dl.retry_count,
+                    "max_retries": dl.max_retries,
+                    "status": dl.status,
+                })
+            })
+            .collect();
+
+        let total = dlq.len();
+        drop(dlq);
+
+        serde_json::to_string(&json!({
+            "total": total,
+            "returned": entries.len(),
+            "entries": entries,
+        }))
+        .map_err(|e| format!("serialize: {e}"))
+    }
+
+    #[tool(description = "Manually retry a dead letter queue entry by its ID. Re-dispatches the failed tool call.")]
+    async fn dlq_retry(
+        &self,
+        Parameters(params): Parameters<DlqRetryParams>,
+    ) -> Result<String, String> {
+        // Find and extract the dead letter entry
+        let dead_letter = {
+            let mut dlq = self.dead_letters.lock().unwrap_or_else(|e| e.into_inner());
+            let pos = dlq.iter().position(|dl| dl.id == params.dead_letter_id);
+            match pos {
+                Some(idx) => {
+                    let mut dl = dlq[idx].clone();
+                    dl.retry_count += 1;
+                    dl.status = "retrying".to_string();
+                    dlq[idx] = dl.clone();
+                    dl
+                }
+                None => {
+                    return Err(format!(
+                        "Dead letter entry '{}' not found",
+                        params.dead_letter_id
+                    ))
+                }
+            }
+        };
+
+        // Re-dispatch the tool call via shared retry dispatch
+        let retry_result = self.retry_dispatch(
+            &dead_letter.tool_name,
+            dead_letter.arguments.clone(),
+        ).await;
+
+        match retry_result {
+            Ok(res) => {
+                // Mark as resolved
+                let mut dlq = self.dead_letters.lock().unwrap_or_else(|e| e.into_inner());
+                if let Some(dl) = dlq.iter_mut().find(|dl| dl.id == params.dead_letter_id) {
+                    dl.status = "resolved".to_string();
+                }
+                let text = res
+                    .content
+                    .first()
+                    .and_then(|c| {
+                        if let rmcp::model::RawContent::Text(t) = &c.raw {
+                            Some(t.text.clone())
+                        } else {
+                            None
+                        }
+                    })
+                    .unwrap_or_else(|| "ok".to_string());
+                serde_json::to_string(&json!({
+                    "status": "resolved",
+                    "dead_letter_id": params.dead_letter_id,
+                    "result": text,
+                }))
+                .map_err(|e| format!("serialize: {e}"))
+            }
+            Err(e) => {
+                // Update retry count, abandon if exhausted
+                let mut dlq = self.dead_letters.lock().unwrap_or_else(|e| e.into_inner());
+                if let Some(dl) = dlq.iter_mut().find(|dl| dl.id == params.dead_letter_id) {
+                    if dl.retry_count >= dl.max_retries {
+                        dl.status = "abandoned".to_string();
+                    } else {
+                        dl.status = "pending".to_string();
+                    }
+                    dl.error = format!("{e}");
+                }
+                Err(format!(
+                    "Retry failed for '{}': {e}",
+                    params.dead_letter_id
+                ))
+            }
+        }
+    }
+
+    // ─── Semantic Sandboxing Tools ───────────────────────────────────────────
+
+    #[tool(description = "Set a sandbox access rule for an agent role + path pattern. Controls which memories a role can access. Access levels: read, write, deny.")]
+    async fn sandbox_set_rule(
+        &self,
+        Parameters(params): Parameters<SandboxSetRuleParams>,
+    ) -> Result<String, String> {
+        // Validate access_level
+        if !["read", "write", "deny"].contains(&params.access_level.as_str()) {
+            return Err(format!(
+                "Invalid access_level '{}'. Must be: read, write, deny",
+                params.access_level
+            ));
+        }
+
+        // Write to global DB (sandbox rules are global)
+        self.with_global_store(|store| {
+            memory_core::db::set_sandbox_rule(
+                store.connection(),
+                &params.agent_role,
+                &params.path_pattern,
+                &params.access_level,
+            )
+            .map_err(|e| format!("Failed to set sandbox rule: {e}"))
+        })?;
+
+        serde_json::to_string(&json!({
+            "status": "ok",
+            "agent_role": params.agent_role,
+            "path_pattern": params.path_pattern,
+            "access_level": params.access_level,
+        }))
+        .map_err(|e| format!("serialize: {e}"))
+    }
+
+    #[tool(description = "Check if an agent role can access a given path for a specific operation. Advisory mode — not enforced in search_memory yet (TODO: future enforcement integration).")]
+    async fn sandbox_check(
+        &self,
+        Parameters(params): Parameters<SandboxCheckParams>,
+    ) -> Result<String, String> {
+        if !["read", "write"].contains(&params.operation.as_str()) {
+            return Err(format!(
+                "Invalid operation '{}'. Must be: read, write",
+                params.operation
+            ));
+        }
+
+        let (allowed, matching_rule) = self.with_global_store(|store| {
+            memory_core::db::check_sandbox_access(
+                store.connection(),
+                &params.agent_role,
+                &params.path,
+                &params.operation,
+            )
+            .map_err(|e| format!("Failed to check sandbox access: {e}"))
+        })?;
+
+        serde_json::to_string(&json!({
+            "agent_role": params.agent_role,
+            "path": params.path,
+            "operation": params.operation,
+            "allowed": allowed,
+            "matching_rule": matching_rule,
         }))
         .map_err(|e| format!("serialize: {e}"))
     }
@@ -2181,22 +2886,16 @@ impl MemoryServer {
     async fn connect_child(&self, server_name: &str) -> Result<(), rmcp::ErrorData> {
         let server_id = format!("mcp:{}", server_name);
 
-        let cap = {
-            let mut found = None;
-            if self.project_db_path.is_some() {
-                found = self
-                    .with_project_store(|store| store.hub_get(&server_id).map_err(|e| format!("{e}")))
-                    .unwrap_or(None);
-            }
-            if found.is_none() {
-                found = self
-                    .with_global_store(|store| store.hub_get(&server_id).map_err(|e| format!("{e}")))
-                    .unwrap_or(None);
-            }
-            found.ok_or_else(|| {
-                rmcp::ErrorData::invalid_params(format!("MCP server '{}' not found", server_id), None)
-            })?
-        };
+        let cap = self.get_capability(&server_id)?;
+        if !cap.enabled {
+            return Err(rmcp::ErrorData::invalid_params(
+                format!(
+                    "MCP server '{}' is disabled. Use hub_set_enabled to activate after review.",
+                    server_id
+                ),
+                None,
+            ));
+        }
 
         let def: serde_json::Value = serde_json::from_str(&cap.definition)
             .map_err(|e| rmcp::ErrorData::internal_error(format!("bad definition: {e}"), None))?;
@@ -2268,21 +2967,18 @@ impl MemoryServer {
     ) -> Result<rmcp::model::CallToolResult, rmcp::ErrorData> {
         // 0. Look up capability for deny-list and timeout config
         let server_id = format!("mcp:{}", server_name);
-        let cap_def = {
-            let mut found = None;
-            if self.project_db_path.is_some() {
-                found = self.with_project_store(|store| {
-                    store.hub_get(&server_id).map_err(|e| format!("{e}"))
-                }).unwrap_or(None);
-            }
-            if found.is_none() {
-                found = self.with_global_store(|store| {
-                    store.hub_get(&server_id).map_err(|e| format!("{e}"))
-                }).unwrap_or(None);
-            }
-            found.map(|c| serde_json::from_str::<serde_json::Value>(&c.definition).unwrap_or_default())
-                .unwrap_or_default()
-        };
+        let cap = self.get_capability(&server_id)?;
+        if !cap.enabled {
+            return Err(rmcp::ErrorData::invalid_params(
+                format!(
+                    "MCP server '{}' is disabled. Use hub_set_enabled to activate after review.",
+                    server_id
+                ),
+                None,
+            ));
+        }
+        let cap_def: serde_json::Value = serde_json::from_str(&cap.definition)
+            .map_err(|e| rmcp::ErrorData::internal_error(format!("bad definition: {e}"), None))?;
 
         // 1. Check deny-list permissions
         if let Some(deny_list) = cap_def["permissions"]["deny"].as_array() {
@@ -2503,6 +3199,10 @@ impl ServerHandler for MemoryServer {
             };
 
             // ─── Dispatch to handler ─────────────────────────────────────
+            // Save tool name and arguments for DLQ capture on failure
+            let tool_name_owned = name.to_string();
+            let tool_args_for_dlq = params.arguments.clone();
+
             let result = {
                 // 1. Native tools first (highest priority)
                 if self.tool_router.has_route(name) {
@@ -2527,6 +3227,94 @@ impl ServerHandler for MemoryServer {
                     Err(rmcp::ErrorData::invalid_params("tool not found", None))
                 }
             };
+
+            // ─── Dead Letter Queue: capture failures ─────────────────────
+            // Skip DLQ for DLQ tools themselves and ghost_* tools
+            let is_dlq_exempt = tool_name_owned.starts_with("dlq_")
+                || tool_name_owned.starts_with("ghost_")
+                || tool_name_owned == "get_pipeline_status";
+
+            if let Err(ref err) = result {
+                if !is_dlq_exempt {
+                    let error_str = format!("{}", err);
+                    let category = categorize_error(&error_str);
+                    let should_auto_retry =
+                        category == "timeout" || category == "internal";
+
+                    let dl = DeadLetter {
+                        id: uuid::Uuid::new_v4().to_string(),
+                        tool_name: tool_name_owned.clone(),
+                        arguments: tool_args_for_dlq.clone(),
+                        error: error_str.clone(),
+                        error_category: category.clone(),
+                        timestamp: Utc::now().to_rfc3339(),
+                        retry_count: 0,
+                        max_retries: if should_auto_retry { 1 } else { 3 },
+                        status: "pending".to_string(),
+                    };
+
+                    let dl_id = dl.id.clone();
+                    {
+                        let mut dlq =
+                            self.dead_letters.lock().unwrap_or_else(|e| e.into_inner());
+                        dlq.push_back(dl);
+                        // Enforce ring buffer max
+                        while dlq.len() > DLQ_MAX_ENTRIES {
+                            dlq.pop_front();
+                        }
+                    }
+
+                    // Auto-retry once for timeout/internal errors
+                    if should_auto_retry {
+                        // Brief delay before retry
+                        tokio::time::sleep(Duration::from_millis(100)).await;
+
+                        // Retry via shared dispatch helper
+                        let retry_result = self.retry_dispatch(
+                            &tool_name_owned,
+                            tool_args_for_dlq,
+                        ).await;
+
+                        {
+                            let mut dlq = self
+                                .dead_letters
+                                .lock()
+                                .unwrap_or_else(|e| e.into_inner());
+                            if let Some(dl) =
+                                dlq.iter_mut().find(|dl| dl.id == dl_id)
+                            {
+                                dl.retry_count = 1;
+                                if retry_result.is_ok() {
+                                    dl.status = "resolved".to_string();
+                                } else {
+                                    dl.status = "abandoned".to_string();
+                                    if let Err(ref e) = retry_result {
+                                        dl.error = format!("{e}");
+                                    }
+                                }
+                            }
+                        }
+
+                        if retry_result.is_ok() {
+                            // Cache the retry result if applicable
+                            if let (Some(key), Ok(ref res)) =
+                                (&cache_key, &retry_result)
+                            {
+                                if let Ok(mut cache) = self.tool_cache.lock() {
+                                    cache.insert(
+                                        key.clone(),
+                                        CachedResult {
+                                            result: res.clone(),
+                                            created_at: Instant::now(),
+                                        },
+                                    );
+                                }
+                            }
+                            return retry_result;
+                        }
+                    }
+                }
+            }
 
             // ─── Phantom Tools: store result in cache ────────────────────
             if let (Some(key), Ok(ref res)) = (&cache_key, &result) {
@@ -2840,4 +3628,175 @@ fn stable_hash(input: &str) -> String {
         hash = hash.wrapping_mul(FNV_PRIME);
     }
     format!("{:016x}", hash)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn ensure_test_env() {
+        static INIT: std::sync::Once = std::sync::Once::new();
+        INIT.call_once(|| {
+            std::env::set_var("VOYAGE_API_KEY", "test-voyage-key");
+            std::env::set_var("SILICONFLOW_API_KEY", "test-siliconflow-key");
+            std::env::set_var("SILICONFLOW_MODEL", "test-model");
+            std::env::set_var("SUMMARY_MODEL", "test-summary-model");
+        });
+    }
+
+    fn make_server() -> MemoryServer {
+        ensure_test_env();
+        let db_path = std::env::temp_dir().join(format!(
+            "memory-server-test-{}.sqlite",
+            uuid::Uuid::new_v4()
+        ));
+        MemoryServer::new(db_path, None).expect("failed to create test server")
+    }
+
+    fn make_entry(id: &str) -> MemoryEntry {
+        MemoryEntry {
+            id: id.to_string(),
+            path: "/".to_string(),
+            summary: "".to_string(),
+            text: "test memory".to_string(),
+            importance: 0.7,
+            timestamp: Utc::now().to_rfc3339(),
+            category: "fact".to_string(),
+            topic: "".to_string(),
+            keywords: Vec::new(),
+            persons: Vec::new(),
+            entities: Vec::new(),
+            location: "".to_string(),
+            source: "test".to_string(),
+            scope: "general".to_string(),
+            archived: false,
+            access_count: 0,
+            last_access: None,
+            revision: 1,
+            metadata: json!({}),
+            vector: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn proxy_call_blocks_disabled_capability_even_directly() {
+        let server = make_server();
+
+        let cap = HubCapability {
+            id: "mcp:blocked".to_string(),
+            cap_type: "mcp".to_string(),
+            name: "blocked".to_string(),
+            version: 1,
+            description: "test disabled server".to_string(),
+            definition: r#"{"transport":"stdio","command":"npx","args":[]}"#.to_string(),
+            enabled: false,
+            uses: 0,
+            successes: 0,
+            failures: 0,
+            avg_rating: 0.0,
+            last_used: None,
+            created_at: String::new(),
+            updated_at: String::new(),
+        };
+
+        server
+            .with_global_store(|store| {
+                store
+                    .hub_register(&cap)
+                    .map_err(|e| format!("register failed: {e}"))
+            })
+            .expect("failed to register capability");
+
+        let err = server
+            .proxy_call_internal("blocked", "some_tool", None)
+            .await
+            .expect_err("disabled MCP capability should be blocked");
+
+        assert!(
+            err.to_string().contains("disabled"),
+            "expected disabled error, got: {}",
+            err
+        );
+    }
+
+    #[tokio::test]
+    async fn ghost_subscribe_evicts_least_recent_cursor_when_full() {
+        let server = make_server();
+
+        {
+            let mut state = server.pubsub.lock().unwrap_or_else(|e| e.into_inner());
+            for i in 0..PUBSUB_MAX_CURSORS {
+                let agent_id = format!("agent-{i}");
+                state.cursors.insert(agent_id.clone(), HashMap::new());
+                state.cursor_recency.insert(agent_id, (i as u64) + 1);
+            }
+            state.cursor_seq = PUBSUB_MAX_CURSORS as u64;
+        }
+
+        let params = GhostSubscribeParams {
+            agent_id: "agent-new".to_string(),
+            topics: vec![],
+        };
+
+        let _ = server
+            .ghost_subscribe(Parameters(params))
+            .await
+            .expect("ghost_subscribe should succeed");
+
+        let state = server.pubsub.lock().unwrap_or_else(|e| e.into_inner());
+        assert_eq!(state.cursors.len(), PUBSUB_MAX_CURSORS);
+        assert!(
+            !state.cursors.contains_key("agent-0"),
+            "expected least-recent agent to be evicted"
+        );
+        assert!(state.cursors.contains_key("agent-new"));
+        assert!(state.cursor_recency.contains_key("agent-new"));
+    }
+
+    #[tokio::test]
+    async fn sync_memories_errors_if_agent_state_persist_fails() {
+        let server = make_server();
+
+        server
+            .with_global_store(|store| {
+                store
+                    .upsert(&make_entry("sync-1"))
+                    .map_err(|e| format!("upsert failed: {e}"))
+            })
+            .expect("failed to seed memory");
+
+        server
+            .with_global_store(|store| {
+                store
+                    .connection()
+                    .execute_batch(
+                        r#"
+                        DROP TRIGGER IF EXISTS block_agent_known_state_insert;
+                        CREATE TRIGGER block_agent_known_state_insert
+                        BEFORE INSERT ON agent_known_state
+                        BEGIN
+                            SELECT RAISE(FAIL, 'blocked by test');
+                        END;
+                        "#,
+                    )
+                    .map_err(|e| format!("trigger setup failed: {e}"))
+            })
+            .expect("failed to install blocking trigger");
+
+        let params = SyncMemoriesParams {
+            agent_id: "agent-sync-test".to_string(),
+            path_prefix: Some("/".to_string()),
+            limit: 10,
+        };
+
+        let err = server
+            .sync_memories(Parameters(params))
+            .await
+            .expect_err("sync_memories should fail when state persistence fails");
+
+        assert!(
+            err.contains("failed to persist agent state"),
+            "unexpected error: {err}"
+        );
+    }
 }
