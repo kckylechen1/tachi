@@ -291,6 +291,13 @@ impl MemoryStore {
         db::archive_memory(&self.conn, id)
     }
 
+    /// Run retention-based garbage collection on growing tables.
+    /// Prunes access_history (keep 256/memory), processed_events (30d),
+    /// audit_log (30d + 100k cap), agent_known_state (90d), and orphans.
+    pub fn gc_tables(&mut self) -> Result<serde_json::Value, MemoryError> {
+        db::gc_tables(&mut self.conn)
+    }
+
     // ─── Hard State Operations ────────────────────────────────────────────────
 
     /// Set a deterministic key-value state.
