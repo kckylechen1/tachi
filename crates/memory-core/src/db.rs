@@ -155,7 +155,7 @@ pub fn init_schema(conn: &Connection) -> Result<(), MemoryError> {
             success     INTEGER NOT NULL DEFAULT 1,
             duration_ms INTEGER NOT NULL DEFAULT 0,
             error_kind  TEXT,
-            created_at  TEXT NOT NULL DEFAULT ''
+            created_at  TEXT NOT NULL DEFAULT (STRFTIME('%Y-%m-%dT%H:%M:%fZ', 'now'))
         );
         CREATE INDEX IF NOT EXISTS idx_audit_timestamp ON audit_log(timestamp DESC);
         CREATE INDEX IF NOT EXISTS idx_audit_server ON audit_log(server_id);
@@ -556,6 +556,20 @@ pub fn try_claim_event(
     Ok(rows_changed > 0)
 }
 
+/// Release a previously claimed event so it can be retried.
+/// Called when background processing fails to ensure at-least-once delivery.
+pub fn release_event_claim(
+    conn: &Connection,
+    event_hash: &str,
+    worker: &str,
+) -> Result<(), MemoryError> {
+    conn.execute(
+        "DELETE FROM processed_events WHERE event_hash = ?1 AND worker = ?2",
+        params![event_hash, worker],
+    )?;
+    Ok(())
+}
+
 
 /// Update a memory row only when its revision matches `expected_revision`.
 /// Returns `Ok(true)` when updated, `Ok(false)` on revision mismatch.
@@ -616,6 +630,72 @@ pub fn update_with_revision(
 
     tx.commit()?;
     Ok(updated)
+}
+
+/// Update only the enrichment fields (summary + embedding) if the revision
+/// hasn't changed since the enrichment was queued. This prevents stale
+/// background enrichment from overwriting concurrent updates.
+pub fn update_enrichment_fields(
+    conn: &mut Connection,
+    id: &str,
+    new_summary: Option<&str>,
+    new_vec: Option<&[u8]>,
+    expected_revision: i64,
+) -> Result<bool, MemoryError> {
+    if new_summary.is_none() && new_vec.is_none() {
+        return Ok(true); // nothing to do
+    }
+
+    let now = now_utc_iso();
+    let tx = conn.transaction()?;
+
+    // Always check revision first, regardless of which fields are being updated.
+    // This prevents stale enrichment from overwriting concurrent edits.
+    let rows_affected = if let Some(summary) = new_summary {
+        tx.execute(
+            "UPDATE memories SET summary = ?1, updated_at = ?2 WHERE id = ?3 AND revision = ?4",
+            params![summary, &now, id, expected_revision],
+        )?
+    } else {
+        // No summary to update — still verify revision by touching updated_at
+        tx.execute(
+            "UPDATE memories SET updated_at = ?1 WHERE id = ?2 AND revision = ?3",
+            params![&now, id, expected_revision],
+        )?
+    };
+
+    if rows_affected == 0 {
+        tx.commit()?;
+        return Ok(false); // revision mismatch — entry was updated concurrently, discard enrichment
+    }
+
+    // Refresh FTS if summary was updated
+    if new_summary.is_some() {
+        tx.execute("DELETE FROM memories_fts WHERE id = ?1", params![id])?;
+        tx.execute(
+            r#"INSERT INTO memories_fts(id, path, summary, text, keywords, entities)
+               SELECT
+                 id,
+                 path,
+                 summary,
+                 text,
+                 trim(replace(replace(replace(keywords, '[', ' '), ']', ' '), '"', ' ')),
+                 trim(replace(replace(replace(entities, '[', ' '), ']', ' '), '"', ' '))
+               FROM memories WHERE id = ?1"#,
+            params![id],
+        )?;
+    }
+
+    if let Some(vec_blob) = new_vec {
+        tx.execute("DELETE FROM memories_vec WHERE id = ?1", params![id])?;
+        tx.execute(
+            "INSERT INTO memories_vec(id, embedding) VALUES (?1, ?2)",
+            params![id, vec_blob],
+        )?;
+    }
+
+    tx.commit()?;
+    Ok(true)
 }
 
 // ─── VECTOR SEARCH ────────────────────────────────────────────────────────────
@@ -871,24 +951,6 @@ pub fn record_access(conn: &mut Connection, ids: &[String]) -> Result<(), Memory
     Ok(())
 }
 
-/// Record access timestamps for ACT-R base-level activation.
-/// Called alongside record_access after each search.
-pub fn record_access_history(conn: &mut Connection, ids: &[String]) -> Result<(), MemoryError> {
-    if ids.is_empty() {
-        return Ok(());
-    }
-    let now = now_utc_iso();
-    let tx = conn.transaction()?;
-    for id in ids {
-        tx.execute(
-            "INSERT INTO access_history (memory_id, accessed_at) VALUES (?1, ?2)",
-            params![id, &now],
-        )?;
-    }
-    tx.commit()?;
-    Ok(())
-}
-
 /// Fetch access timestamps for a set of memory IDs (for ACT-R base-level activation).
 /// Returns a map from memory_id -> sorted list of seconds-since-epoch (age in seconds).
 pub fn get_access_times(conn: &Connection, ids: &[String]) -> Result<HashMap<String, Vec<f64>>, MemoryError> {
@@ -1084,32 +1146,27 @@ pub fn get_edges(
     direction: &str,
     relation_filter: Option<&str>,
 ) -> Result<Vec<MemoryEdge>, MemoryError> {
-    let (sql, id_param) = match direction {
-        "incoming" => (
+    let base_sql = match direction {
+        "incoming" =>
             "SELECT source_id, target_id, relation, weight, metadata, created_at, valid_from, valid_to FROM memory_edges WHERE target_id = ?1
              AND (valid_to IS NULL OR valid_to > datetime('now'))",
-            memory_id,
-        ),
-        "outgoing" => (
+        "outgoing" =>
             "SELECT source_id, target_id, relation, weight, metadata, created_at, valid_from, valid_to FROM memory_edges WHERE source_id = ?1
              AND (valid_to IS NULL OR valid_to > datetime('now'))",
-            memory_id,
-        ),
-        _ => (
-            "SELECT source_id, target_id, relation, weight, metadata, created_at, valid_from, valid_to FROM memory_edges WHERE source_id = ?1 OR target_id = ?1
+        _ =>
+            "SELECT source_id, target_id, relation, weight, metadata, created_at, valid_from, valid_to FROM memory_edges WHERE (source_id = ?1 OR target_id = ?1)
              AND (valid_to IS NULL OR valid_to > datetime('now'))",
-            memory_id,
-        ),
     };
 
-    let full_sql = if let Some(rel) = relation_filter {
-        format!("{} AND relation = '{}'", sql, rel.replace('\'', "''"))
+    // Use parameterized query for relation_filter to prevent SQL injection
+    let full_sql = if relation_filter.is_some() {
+        format!("{} AND relation = ?2", base_sql)
     } else {
-        sql.to_string()
+        base_sql.to_string()
     };
 
     let mut stmt = conn.prepare(&full_sql)?;
-    let edges = stmt.query_map(params![id_param], |row| {
+    let row_mapper = |row: &rusqlite::Row| {
         let meta_str: String = row.get(4)?;
         let metadata = serde_json::from_str(&meta_str).unwrap_or_default();
         Ok(MemoryEdge {
@@ -1122,7 +1179,17 @@ pub fn get_edges(
             valid_from: row.get(6)?,
             valid_to: row.get(7)?,
         })
-    })?.filter_map(|r| r.ok()).collect();
+    };
+
+    let edges: Vec<MemoryEdge> = if let Some(rel) = relation_filter {
+        stmt.query_map(params![memory_id, rel], row_mapper)?
+            .filter_map(|r| r.ok())
+            .collect()
+    } else {
+        stmt.query_map(params![memory_id], row_mapper)?
+            .filter_map(|r| r.ok())
+            .collect()
+    };
 
     Ok(edges)
 }
@@ -1570,23 +1637,23 @@ pub fn hub_delete(
     Ok(conn.changes() > 0)
 }
 
-/// Helper: build HubCapability from a row.
+/// Helper: build HubCapability from a row (tolerant of unexpected data).
 fn hub_cap_from_row(row: &rusqlite::Row) -> HubCapability {
     HubCapability {
-        id: row.get_unwrap(0),
-        cap_type: row.get_unwrap(1),
-        name: row.get_unwrap(2),
-        version: row.get_unwrap::<_, u32>(3),
-        description: row.get_unwrap(4),
-        definition: row.get_unwrap(5),
-        enabled: row.get_unwrap::<_, i32>(6) != 0,
-        uses: row.get_unwrap::<_, i64>(7) as u64,
-        successes: row.get_unwrap::<_, i64>(8) as u64,
-        failures: row.get_unwrap::<_, i64>(9) as u64,
-        avg_rating: row.get_unwrap(10),
-        last_used: row.get_unwrap(11),
-        created_at: row.get_unwrap(12),
-        updated_at: row.get_unwrap(13),
+        id: row.get(0).unwrap_or_default(),
+        cap_type: row.get(1).unwrap_or_default(),
+        name: row.get(2).unwrap_or_default(),
+        version: row.get::<_, u32>(3).unwrap_or(1),
+        description: row.get(4).unwrap_or_default(),
+        definition: row.get(5).unwrap_or_default(),
+        enabled: row.get::<_, i32>(6).unwrap_or(1) != 0,
+        uses: row.get::<_, i64>(7).unwrap_or(0) as u64,
+        successes: row.get::<_, i64>(8).unwrap_or(0) as u64,
+        failures: row.get::<_, i64>(9).unwrap_or(0) as u64,
+        avg_rating: row.get(10).unwrap_or(0.0),
+        last_used: row.get(11).unwrap_or(None),
+        created_at: row.get(12).unwrap_or_default(),
+        updated_at: row.get(13).unwrap_or_default(),
     }
 }
 
@@ -1740,52 +1807,54 @@ pub fn set_sandbox_rule(
 
 /// Check if an agent role can access a given path for a specific operation.
 /// Returns (allowed, matching_rule_description).
-/// Logic: find the most specific path_pattern matching the given path.
-/// "deny" overrides everything. Default = allow if no rule matches.
+/// Logic: "deny" overrides everything (checked across ALL matching rules).
+/// Among non-deny rules, the most specific match wins. Default = allow if no rule matches.
 pub fn check_sandbox_access(
     conn: &Connection,
     agent_role: &str,
     path: &str,
     operation: &str,
 ) -> Result<(bool, Option<String>), MemoryError> {
-    // Fetch all rules for this role
+    // Fetch all rules for this role, ordered by specificity (longest pattern first)
     let mut stmt = conn.prepare(
-        "SELECT path_pattern, access_level FROM sandbox_rules WHERE agent_role = ?1"
+        "SELECT path_pattern, access_level FROM sandbox_rules WHERE agent_role = ?1 ORDER BY LENGTH(path_pattern) DESC, path_pattern ASC"
     )?;
     let rows = stmt.query_map(params![agent_role], |row| {
         Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
     })?;
 
-    let mut best_match: Option<(String, String, usize)> = None; // (pattern, access_level, specificity)
+    let mut best_non_deny: Option<(String, String, usize)> = None;
 
     for row in rows {
         let (pattern, access_level) = row?;
         if path_matches_pattern(path, &pattern) {
+            // deny overrides everything — return immediately
+            if access_level == "deny" {
+                let rule_desc = format!("{}:{} -> deny", agent_role, pattern);
+                return Ok((false, Some(rule_desc)));
+            }
+            // Track best non-deny match by specificity
             let specificity = pattern.len();
-            let is_better = match &best_match {
+            let is_better = match &best_non_deny {
                 None => true,
                 Some((_, _, best_spec)) => specificity > *best_spec,
             };
             if is_better {
-                best_match = Some((pattern, access_level, specificity));
+                best_non_deny = Some((pattern, access_level, specificity));
             }
         }
     }
 
-    match best_match {
+    match best_non_deny {
         None => {
             // No rule matches — default: allow
             Ok((true, None))
         }
         Some((pattern, access_level, _)) => {
             let rule_desc = format!("{}:{} -> {}", agent_role, pattern, access_level);
-            if access_level == "deny" {
-                Ok((false, Some(rule_desc)))
-            } else if operation == "write" && access_level == "read" {
-                // Read-only rule blocks writes
+            if operation == "write" && access_level == "read" {
                 Ok((false, Some(rule_desc)))
             } else {
-                // "read" allows read, "write" allows both read and write
                 Ok((true, Some(rule_desc)))
             }
         }
