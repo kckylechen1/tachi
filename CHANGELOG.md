@@ -21,6 +21,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`hub_set_enabled` Tool**: Enable or disable a Hub capability by ID at runtime, without requiring re-registration.
 - **Environment Variable Whitelist**: `env_clear()` for child MCP server processes now preserves 21 critical system variables: `PATH`, `HOME`, `USER`, `LANG`, `LC_ALL`, `SSL_CERT_FILE`, `SSL_CERT_DIR`, `TMPDIR`, `TMP`, `TEMP`, `XDG_RUNTIME_DIR`, `XDG_CACHE_HOME`, `XDG_CONFIG_HOME`, `XDG_DATA_HOME`, and all proxy vars (`HTTP_PROXY`, `HTTPS_PROXY`, `NO_PROXY`, `ALL_PROXY` in both cases). Prevents child processes from failing due to missing SSL certificates or PATH.
 - **Transport Aliases**: MCP proxy now accepts `"http"` and `"streamable-http"` as transport type aliases for `"sse"`, reducing misconfiguration errors.
+- **MCP Tool Exposure Modes**: Child MCP capabilities now support `tool_exposure` in definition (`"flatten"` or `"gateway"`). `gateway` keeps child tools callable via `hub_call` but hides `server__tool` fan-out from `tools/list` to avoid tool-count explosion.
+- **Global Exposure Default**: New env var `MCP_TOOL_EXPOSURE_MODE` sets default exposure for child MCPs when `tool_exposure` is not explicitly set.
+- **Agent Config Bootstrap Script**: Added `scripts/setup_agent_mcp.py` to detect common local agent config files and safely inject Tachi MCP entries (dry-run by default, `--apply` to write).
 
 #### Wave 6 — Graph Activation
 - **`add_edge` Tool**: Create or update directed edges in the memory graph. Supports causal, temporal, and entity relationship types with optional metadata and weight.
@@ -35,6 +38,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 - **DELETE CASCADE**: `delete()` now properly cascades to `access_history` and `agent_known_state` tables, preventing orphaned rows after memory deletion.
 - **Scoped Graph Persistence**: Graph edges are now correctly persisted within the appropriate database scope (project vs. global).
+- **Proxy Discovery Safety**: `hub_register(type=mcp)` now applies discovery timeouts before finalizing capability state and records failed discovery as disabled metadata instead of leaving a silently-enabled broken proxy.
 
 ## [0.7.2] - 2026-03-24
 

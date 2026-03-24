@@ -81,6 +81,33 @@ impl DbScope {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum McpToolExposureMode {
+    Flatten,
+    Gateway,
+}
+
+impl McpToolExposureMode {
+    fn from_str(raw: &str) -> Option<Self> {
+        let normalized = raw.trim().to_ascii_lowercase();
+        match normalized.as_str() {
+            "flatten" | "direct" | "expanded" | "server-tools" | "server_tools" => {
+                Some(Self::Flatten)
+            }
+            "gateway" | "hub-call" | "hub_call" | "hub_call_only" | "proxy-only" | "proxy_only"
+            | "compact" => Some(Self::Gateway),
+            _ => None,
+        }
+    }
+
+    fn as_str(&self) -> &'static str {
+        match self {
+            Self::Flatten => "flatten",
+            Self::Gateway => "gateway",
+        }
+    }
+}
+
 /// Build a slim JSON representation of a MemoryEntry for MCP output.
 /// Strips internal fields (access_count, last_access, revision, source, vector)
 /// and omits empty strings/arrays to minimize token usage.
@@ -159,6 +186,7 @@ fn slim_l0_rule(rule: &MemoryEntry, db: DbScope) -> serde_json::Value {
 
 /// TTL for cached tool results (Phantom Tools)
 const TOOL_CACHE_TTL: Duration = Duration::from_secs(30);
+const DEFAULT_MCP_DISCOVERY_TIMEOUT_MS: u64 = 10_000;
 
 /// Tools whose results can be cached (read-only, no side effects)
 const CACHEABLE_TOOLS: &[&str] = &[
@@ -223,6 +251,8 @@ struct MemoryServer {
     pubsub: Arc<StdMutex<PubSubState>>,
     // ─── Dead Letter Queue (failed tool call auto-retry) ─────────────────
     dead_letters: Arc<StdMutex<VecDeque<DeadLetter>>>,
+    mcp_discovery_timeout: Duration,
+    mcp_tool_exposure_mode: McpToolExposureMode,
 }
 
 // ─── MCP Client Connection Pool ──────────────────────────────────────────────
@@ -291,6 +321,27 @@ impl MemoryServer {
         let pipeline_enabled = std::env::var("ENABLE_PIPELINE")
             .map(|v| v == "true" || v == "1")
             .unwrap_or(false);
+        let mcp_discovery_timeout_ms = match parse_env_u64("MCP_DISCOVERY_TIMEOUT_MS") {
+            Some(0) => {
+                eprintln!("MCP_DISCOVERY_TIMEOUT_MS must be >= 1; using 1ms");
+                1
+            }
+            Some(value) => value,
+            None => DEFAULT_MCP_DISCOVERY_TIMEOUT_MS,
+        };
+        let mcp_tool_exposure_mode = std::env::var("MCP_TOOL_EXPOSURE_MODE")
+            .ok()
+            .and_then(|raw| match McpToolExposureMode::from_str(&raw) {
+                Some(mode) => Some(mode),
+                None => {
+                    eprintln!(
+                        "Ignoring invalid MCP_TOOL_EXPOSURE_MODE value '{}' (expected flatten|gateway)",
+                        raw
+                    );
+                    None
+                }
+            })
+            .unwrap_or(McpToolExposureMode::Flatten);
         Ok(Self {
             global_store: Arc::new(StdMutex::new(global_store)),
             project_store,
@@ -310,6 +361,8 @@ impl MemoryServer {
             cache_misses: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             pubsub: Arc::new(StdMutex::new(PubSubState::new())),
             dead_letters: Arc::new(StdMutex::new(VecDeque::new())),
+            mcp_discovery_timeout: Duration::from_millis(mcp_discovery_timeout_ms),
+            mcp_tool_exposure_mode,
         })
     }
 
@@ -382,6 +435,21 @@ impl MemoryServer {
         found.ok_or_else(|| {
             rmcp::ErrorData::invalid_params(format!("Capability '{cap_id}' not found"), None)
         })
+    }
+
+    fn proxy_tool_exposure_mode_for_server(
+        &self,
+        server_name: &str,
+    ) -> Result<McpToolExposureMode, rmcp::ErrorData> {
+        let cap_id = format!("mcp:{server_name}");
+        let cap = self.get_capability(&cap_id)?;
+        let def: serde_json::Value = serde_json::from_str(&cap.definition).map_err(|e| {
+            rmcp::ErrorData::internal_error(
+                format!("bad definition for capability '{cap_id}': {e}"),
+                None,
+            )
+        })?;
+        Ok(resolve_mcp_tool_exposure(&def, self.mcp_tool_exposure_mode))
     }
 
     fn register_skill_tool(&self, cap: &HubCapability) -> Result<String, String> {
@@ -499,6 +567,16 @@ impl MemoryServer {
 
         // 2. Proxy tool? (format: "server__tool")
         if let Some((server_name, remote_tool)) = tool_name.split_once("__") {
+            let exposure_mode = self.proxy_tool_exposure_mode_for_server(server_name)?;
+            if exposure_mode == McpToolExposureMode::Gateway {
+                return Err(rmcp::ErrorData::invalid_params(
+                    format!(
+                        "Direct proxy tool '{}' is disabled by tool_exposure=gateway for '{}'. Retry via hub_call.",
+                        tool_name, server_name
+                    ),
+                    None,
+                ));
+            }
             return self
                 .proxy_call_internal(server_name, remote_tool, args_obj)
                 .await;
@@ -639,6 +717,118 @@ fn resolve_env_map(def: &serde_json::Value) -> Result<HashMap<String, String>, S
         }
     }
     Ok(result)
+}
+
+fn clear_mcp_discovery_metadata(def: &mut serde_json::Value) {
+    if let Some(obj) = def.as_object_mut() {
+        obj.remove("discovered_tools");
+        obj.remove("discovered_at");
+        obj.remove("tools_count");
+        obj.remove("discovery_status");
+        obj.remove("discovery_checked_at");
+        obj.remove("last_discovery_error");
+    }
+}
+
+fn set_mcp_discovery_success(def: &mut serde_json::Value, tools: &[rmcp::model::Tool]) {
+    if !def.is_object() {
+        *def = json!({});
+    }
+    clear_mcp_discovery_metadata(def);
+    def["discovery_status"] = json!("ready");
+    def["discovered_tools"] = serde_json::to_value(tools).unwrap_or_default();
+    def["discovered_at"] = json!(Utc::now().to_rfc3339());
+    def["tools_count"] = json!(tools.len());
+}
+
+fn set_mcp_discovery_failure(def: &mut serde_json::Value, error: &str) {
+    if !def.is_object() {
+        *def = json!({});
+    }
+    clear_mcp_discovery_metadata(def);
+    def["discovery_status"] = json!("failed");
+    def["discovery_checked_at"] = json!(Utc::now().to_rfc3339());
+    def["last_discovery_error"] = json!(error);
+}
+
+fn append_warning(
+    resp: &mut serde_json::Map<String, serde_json::Value>,
+    warning: impl Into<String>,
+) {
+    let warning = warning.into();
+    if warning.is_empty() {
+        return;
+    }
+
+    match resp.remove("warning") {
+        Some(serde_json::Value::String(existing)) if !existing.is_empty() => {
+            resp.insert("warning".into(), json!(format!("{existing}; {warning}")));
+        }
+        _ => {
+            resp.insert("warning".into(), json!(warning));
+        }
+    }
+}
+
+fn parse_tool_name_set(def: &serde_json::Value, key: &str) -> Option<HashSet<String>> {
+    let names: HashSet<String> = def
+        .get("permissions")
+        .and_then(|v| v.get(key))
+        .and_then(|v| v.as_array())
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|v| v.as_str().map(|name| name.to_string()))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    if names.is_empty() {
+        None
+    } else {
+        Some(names)
+    }
+}
+
+fn filter_mcp_tools_by_permissions(
+    def: &serde_json::Value,
+    tools: Vec<rmcp::model::Tool>,
+) -> Vec<rmcp::model::Tool> {
+    let allow_list = parse_tool_name_set(def, "allow");
+    let deny_list = parse_tool_name_set(def, "deny").unwrap_or_default();
+
+    tools
+        .into_iter()
+        .filter(|tool| {
+            let tool_name = tool.name.as_ref();
+            let allowed = allow_list
+                .as_ref()
+                .map(|set| set.contains(tool_name))
+                .unwrap_or(true);
+            allowed && !deny_list.contains(tool_name)
+        })
+        .collect()
+}
+
+fn resolve_mcp_tool_exposure(
+    def: &serde_json::Value,
+    default_mode: McpToolExposureMode,
+) -> McpToolExposureMode {
+    if let Some(raw_mode) = def.get("tool_exposure").and_then(|v| v.as_str()) {
+        if let Some(mode) = McpToolExposureMode::from_str(raw_mode) {
+            return mode;
+        }
+    }
+
+    if let Some(expose_tools) = def.get("expose_tools").and_then(|v| v.as_bool()) {
+        return if expose_tools {
+            McpToolExposureMode::Flatten
+        } else {
+            McpToolExposureMode::Gateway
+        };
+    }
+
+    default_mode
 }
 
 fn sanitize_skill_tool_name(skill_id: &str) -> Option<String> {
@@ -826,10 +1016,18 @@ struct HybridWeightsParam {
     decay: f64,
 }
 
-fn default_weight_semantic() -> f64 { 0.40 }
-fn default_weight_fts() -> f64 { 0.30 }
-fn default_weight_symbolic() -> f64 { 0.20 }
-fn default_weight_decay() -> f64 { 0.10 }
+fn default_weight_semantic() -> f64 {
+    0.40
+}
+fn default_weight_fts() -> f64 {
+    0.30
+}
+fn default_weight_symbolic() -> f64 {
+    0.20
+}
+fn default_weight_decay() -> f64 {
+    0.10
+}
 
 #[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
@@ -2072,6 +2270,30 @@ impl MemoryServer {
             }
         }
 
+        if updated {
+            if let Some(server_name) = params.id.strip_prefix("mcp:") {
+                if params.enabled {
+                    if let Ok(cap) = self.get_capability(&params.id) {
+                        if let Ok(def) = serde_json::from_str::<serde_json::Value>(&cap.definition)
+                        {
+                            if let Some(tools_json) = def.get("discovered_tools") {
+                                if let Ok(tools) = serde_json::from_value::<Vec<rmcp::model::Tool>>(
+                                    tools_json.clone(),
+                                ) {
+                                    self.cache_proxy_tools(
+                                        server_name,
+                                        filter_mcp_tools_by_permissions(&def, tools),
+                                    );
+                                }
+                            }
+                        }
+                    }
+                } else {
+                    self.clear_proxy_tools(server_name);
+                }
+            }
+        }
+
         serde_json::to_string(&json!({
             "updated": updated,
             "db": target_db,
@@ -2232,23 +2454,22 @@ impl MemoryServer {
         }
 
         let count = facts.len();
-        let saved = self.with_store_for_scope(target_db, |store| {
-            let mut saved = 0;
-            for fact in &facts {
-                let Some(entry) = fact_to_entry(
-                    fact,
-                    "extraction",
-                    serde_json::json!({"source": source}),
-                ) else {
-                    continue;
-                };
-                if store.upsert(&entry).is_ok() {
-                    saved += 1;
+        let saved = self
+            .with_store_for_scope(target_db, |store| {
+                let mut saved = 0;
+                for fact in &facts {
+                    let Some(entry) =
+                        fact_to_entry(fact, "extraction", serde_json::json!({"source": source}))
+                    else {
+                        continue;
+                    };
+                    if store.upsert(&entry).is_ok() {
+                        saved += 1;
+                    }
                 }
-            }
-            Ok(saved)
-        })
-        .map_err(|e| format!("DB write failed: {e}"))?;
+                Ok(saved)
+            })
+            .map_err(|e| format!("DB write failed: {e}"))?;
 
         Ok(serde_json::to_string(&serde_json::json!({
             "status": "completed",
@@ -2280,7 +2501,8 @@ impl MemoryServer {
             return Ok(serde_json::to_string(&serde_json::json!({
                 "status": "skipped",
                 "reason": "No content to process"
-            })).unwrap());
+            }))
+            .unwrap());
         }
 
         // Atomic dedup: try to claim the event first via INSERT OR IGNORE.
@@ -2299,7 +2521,8 @@ impl MemoryServer {
                 "status": "skipped",
                 "reason": "Event already processed",
                 "hash": event_hash
-            })).unwrap());
+            }))
+            .unwrap());
         }
 
         // Spawn LLM fact extraction in background
@@ -2378,7 +2601,10 @@ impl MemoryServer {
                         id: uuid::Uuid::new_v4().to_string(),
                         tool_name: "ingest_event".to_string(),
                         arguments: Some(serde_json::Map::from_iter([
-                            ("conversation_id".to_string(), serde_json::json!(conversation_id)),
+                            (
+                                "conversation_id".to_string(),
+                                serde_json::json!(conversation_id),
+                            ),
                             ("turn_id".to_string(), serde_json::json!(turn_id)),
                         ])),
                         error: format!("LLM extraction failed: {e}"),
@@ -2389,7 +2615,10 @@ impl MemoryServer {
                         status: "pending".to_string(),
                     };
                     {
-                        let mut dlq = server.dead_letters.lock().unwrap_or_else(|e| e.into_inner());
+                        let mut dlq = server
+                            .dead_letters
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner());
                         dlq.push_back(dl);
                         while dlq.len() > DLQ_MAX_ENTRIES {
                             dlq.pop_front();
@@ -2401,7 +2630,8 @@ impl MemoryServer {
         Ok(serde_json::to_string(&serde_json::json!({
             "status": "ingestion queued",
             "hash": event_hash
-        })).unwrap())
+        }))
+        .unwrap())
     }
 
     #[tool(description = "Get pipeline status and statistics.")]
@@ -2607,11 +2837,27 @@ impl MemoryServer {
     ) -> Result<String, String> {
         let (target_db, warning) = self.resolve_write_scope(&params.scope);
 
-        // Security: validate MCP server commands against allowlist
-        let auto_enabled = if params.cap_type == "mcp" {
-            let def: serde_json::Value =
-                serde_json::from_str(&params.definition).unwrap_or_default();
-            if def["transport"].as_str().unwrap_or("stdio") == "stdio" {
+        let mut resp = serde_json::Map::new();
+        resp.insert("id".into(), json!(params.id));
+        resp.insert("db".into(), json!(target_db.as_str()));
+        resp.insert("version".into(), json!(params.version));
+        if let Some(w) = warning {
+            append_warning(&mut resp, w);
+        }
+
+        let mut cap_definition = params.definition.clone();
+        let mut enabled = true;
+
+        if params.cap_type == "mcp" {
+            let mut def: serde_json::Value = serde_json::from_str(&params.definition)
+                .map_err(|e| format!("invalid mcp definition JSON: {e}"))?;
+            let transport_type = def["transport"].as_str().unwrap_or("stdio").to_string();
+            let tool_exposure_mode = resolve_mcp_tool_exposure(&def, self.mcp_tool_exposure_mode);
+            def["tool_exposure"] = json!(tool_exposure_mode.as_str());
+            resp.insert("tool_exposure".into(), json!(tool_exposure_mode.as_str()));
+
+            // Security: validate MCP server commands against allowlist
+            let auto_enabled = if transport_type == "stdio" {
                 if let Some(cmd) = def["command"].as_str() {
                     is_trusted_command(cmd)
                 } else {
@@ -2619,18 +2865,85 @@ impl MemoryServer {
                 }
             } else {
                 true // SSE/HTTP are URLs, no local exec risk
+            };
+
+            let server_name = params
+                .id
+                .strip_prefix("mcp:")
+                .unwrap_or(&params.id)
+                .to_string();
+            self.clear_proxy_tools(&server_name);
+
+            if !auto_enabled {
+                enabled = false;
+                clear_mcp_discovery_metadata(&mut def);
+                let cmd = def["command"].as_str().unwrap_or("unknown");
+                append_warning(
+                    &mut resp,
+                    format!(
+                        "Command '{}' is not in the trusted allowlist. Capability registered but disabled. Use hub_set_enabled to activate after review.",
+                        cmd
+                    ),
+                );
+                resp.insert("enabled".into(), json!(false));
+                resp.insert("discovery".into(), json!("skipped (capability disabled)"));
+            } else {
+                match self.discover_mcp_tools(&def).await {
+                    Ok(tools) => {
+                        let total_tools = tools.len();
+                        let filtered_tools = filter_mcp_tools_by_permissions(&def, tools);
+                        let tools_discovered = filtered_tools.len();
+                        let tools_filtered_out = total_tools.saturating_sub(tools_discovered);
+
+                        set_mcp_discovery_success(&mut def, &filtered_tools);
+                        self.cache_proxy_tools(&server_name, filtered_tools);
+
+                        resp.insert("enabled".into(), json!(true));
+                        resp.insert("tools_discovered".into(), json!(tools_discovered));
+                        resp.insert("tools_total".into(), json!(total_tools));
+                        if tools_filtered_out > 0 {
+                            resp.insert("tools_filtered_out".into(), json!(tools_filtered_out));
+                        }
+                        if total_tools > 0 && tools_discovered == 0 {
+                            append_warning(
+                                &mut resp,
+                                "MCP discovery succeeded, but all tools were filtered by permissions",
+                            );
+                        }
+                        if tool_exposure_mode == McpToolExposureMode::Gateway {
+                            append_warning(
+                                &mut resp,
+                                "Direct server__tool exposure is disabled (tool_exposure=gateway); call child tools via hub_call",
+                            );
+                        }
+                    }
+                    Err(discovery_error) => {
+                        enabled = false;
+                        set_mcp_discovery_failure(&mut def, &discovery_error);
+                        self.clear_proxy_tools(&server_name);
+
+                        resp.insert("enabled".into(), json!(false));
+                        resp.insert("discovery_error".into(), json!(discovery_error.clone()));
+                        append_warning(
+                            &mut resp,
+                            "MCP discovery failed; capability registered as disabled. Fix config and re-register to recover.",
+                        );
+                    }
+                }
             }
-        } else {
-            true
-        };
+
+            cap_definition = serde_json::to_string(&def)
+                .map_err(|e| format!("Failed to serialize MCP definition: {e}"))?;
+        }
+
         let cap = HubCapability {
             id: params.id.clone(),
             cap_type: params.cap_type.clone(),
             name: params.name.clone(),
             version: params.version,
             description: params.description.clone(),
-            definition: params.definition.clone(),
-            enabled: auto_enabled,
+            definition: cap_definition,
+            enabled,
             uses: 0,
             successes: 0,
             failures: 0,
@@ -2644,23 +2957,6 @@ impl MemoryServer {
                 .hub_register(&cap)
                 .map_err(|e| format!("Failed to register: {e}"))
         })?;
-
-        let mut resp = serde_json::Map::new();
-        resp.insert("id".into(), json!(params.id));
-        resp.insert("db".into(), json!(target_db.as_str()));
-        resp.insert("version".into(), json!(params.version));
-        if let Some(w) = warning {
-            resp.insert("warning".into(), json!(w));
-        }
-        if !auto_enabled {
-            let def: serde_json::Value =
-                serde_json::from_str(&params.definition).unwrap_or_default();
-            let cmd = def["command"].as_str().unwrap_or("unknown");
-            resp.insert("warning".into(), json!(format!(
-                "Command '{}' is not in the trusted allowlist. Capability registered but disabled. Use hub_set_enabled to activate after review.", cmd
-            )));
-            resp.insert("enabled".into(), json!(false));
-        }
 
         if params.cap_type == "skill" {
             match self.register_skill_tool(&cap) {
@@ -2728,166 +3024,7 @@ impl MemoryServer {
                 });
                 resp.insert("analysis".into(), json!("pending (async)"));
             }
-        } else if params.cap_type == "mcp" {
-            // Skip discovery for disabled MCP capabilities (security: don't spawn untrusted commands)
-            if !auto_enabled {
-                resp.insert("discovery".into(), json!("skipped (capability disabled)"));
-            } else {
-                // Auto-discover tools from child MCP server
-                let def: serde_json::Value =
-                    serde_json::from_str(&cap.definition).unwrap_or_default();
-                let transport_type = def["transport"].as_str().unwrap_or("stdio");
-                let server_name = params.id.strip_prefix("mcp:").unwrap_or(&params.id);
-
-                match transport_type {
-                    "stdio" => {
-                        if let (Some(command), args) = (
-                            def["command"].as_str(),
-                            def["args"]
-                                .as_array()
-                                .map(|a| {
-                                    a.iter()
-                                        .filter_map(|v| v.as_str().map(String::from))
-                                        .collect::<Vec<_>>()
-                                })
-                                .unwrap_or_default(),
-                        ) {
-                            let env_map = match resolve_env_map(&def) {
-                                Ok(m) => m,
-                                Err(e) => {
-                                    resp.insert("discovery_error".into(), json!(e));
-                                    HashMap::new()
-                                }
-                            };
-
-                            let mut cmd = tokio::process::Command::new(command);
-                            cmd.args(&args);
-                            apply_sanitized_child_env(&mut cmd, &env_map);
-
-                            match rmcp::transport::TokioChildProcess::new(cmd) {
-                                Ok(transport) => match rmcp::ServiceExt::serve((), transport).await
-                                {
-                                    Ok(client) => match client.peer().list_all_tools().await {
-                                        Ok(tools) => {
-                                            let tools_count = tools.len();
-
-                                            self.proxy_tools
-                                                .lock()
-                                                .unwrap_or_else(|e| e.into_inner())
-                                                .insert(server_name.to_string(), tools.clone());
-
-                                            let mut updated_def = def.clone();
-                                            updated_def["discovered_tools"] =
-                                                serde_json::to_value(&tools).unwrap_or_default();
-                                            updated_def["discovered_at"] =
-                                                json!(Utc::now().to_rfc3339());
-                                            updated_def["tools_count"] = json!(tools_count);
-
-                                            let updated_cap = HubCapability {
-                                                definition: serde_json::to_string(&updated_def)
-                                                    .unwrap_or(cap.definition.clone()),
-                                                ..cap.clone()
-                                            };
-                                            let _ = self.with_store_for_scope(target_db, |store| {
-                                                store
-                                                    .hub_register(&updated_cap)
-                                                    .map_err(|e| format!("update: {e}"))
-                                            });
-
-                                            // Disconnect after discovery — lazy-connect on first real use
-                                            let _ = client.cancel().await;
-
-                                            resp.insert(
-                                                "tools_discovered".into(),
-                                                json!(tools_count),
-                                            );
-                                        }
-                                        Err(e) => {
-                                            resp.insert(
-                                                "discovery_error".into(),
-                                                json!(format!("list_tools failed: {e}")),
-                                            );
-                                        }
-                                    },
-                                    Err(e) => {
-                                        resp.insert(
-                                            "discovery_error".into(),
-                                            json!(format!("MCP handshake failed: {e}")),
-                                        );
-                                    }
-                                },
-                                Err(e) => {
-                                    resp.insert(
-                                        "discovery_error".into(),
-                                        json!(format!("spawn failed: {e}")),
-                                    );
-                                }
-                            }
-                        }
-                    }
-                    "sse" | "http" | "streamable-http" => {
-                        if let Some(url) = def["url"].as_str() {
-                            // TODO(5a): inject auth headers when rmcp supports custom reqwest::Client
-                            //           Hub definition supports headers={"Authorization":"Bearer xxx"}
-                            let transport = StreamableHttpClientTransport::from_uri(url);
-                            match rmcp::ServiceExt::serve((), transport).await {
-                                Ok(client) => match client.peer().list_all_tools().await {
-                                    Ok(tools) => {
-                                        let tools_count = tools.len();
-
-                                        self.proxy_tools
-                                            .lock()
-                                            .unwrap_or_else(|e| e.into_inner())
-                                            .insert(server_name.to_string(), tools.clone());
-
-                                        let mut updated_def = def.clone();
-                                        updated_def["discovered_tools"] =
-                                            serde_json::to_value(&tools).unwrap_or_default();
-                                        updated_def["discovered_at"] =
-                                            json!(Utc::now().to_rfc3339());
-                                        updated_def["tools_count"] = json!(tools_count);
-
-                                        let updated_cap = HubCapability {
-                                            definition: serde_json::to_string(&updated_def)
-                                                .unwrap_or(cap.definition.clone()),
-                                            ..cap.clone()
-                                        };
-                                        let _ = self.with_store_for_scope(target_db, |store| {
-                                            store
-                                                .hub_register(&updated_cap)
-                                                .map_err(|e| format!("update: {e}"))
-                                        });
-
-                                        // Disconnect after discovery — lazy-connect on first real use
-                                        let _ = client.cancel().await;
-
-                                        resp.insert("tools_discovered".into(), json!(tools_count));
-                                    }
-                                    Err(e) => {
-                                        resp.insert(
-                                            "discovery_error".into(),
-                                            json!(format!("list_tools failed: {e}")),
-                                        );
-                                    }
-                                },
-                                Err(e) => {
-                                    resp.insert(
-                                        "discovery_error".into(),
-                                        json!(format!("SSE handshake failed: {e}")),
-                                    );
-                                }
-                            }
-                        }
-                    }
-                    other => {
-                        resp.insert(
-                            "discovery_error".into(),
-                            json!(format!("unsupported transport: {other}")),
-                        );
-                    }
-                }
-            } // else: auto_enabled — skip discovery for disabled
-        } // end: else if params.cap_type == "mcp"
+        }
 
         serde_json::to_string(&serde_json::Value::Object(resp))
             .map_err(|e| format!("serialize: {e}"))
@@ -3660,6 +3797,93 @@ impl MemoryServer {
 }
 
 impl MemoryServer {
+    fn clear_proxy_tools(&self, server_name: &str) {
+        let mut tools = self.proxy_tools.lock().unwrap_or_else(|e| e.into_inner());
+        tools.remove(server_name);
+    }
+
+    fn cache_proxy_tools(&self, server_name: &str, tools: Vec<rmcp::model::Tool>) {
+        self.proxy_tools
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(server_name.to_string(), tools);
+    }
+
+    async fn connect_mcp_service(
+        &self,
+        def: &serde_json::Value,
+        timeout: Duration,
+    ) -> Result<rmcp::service::RunningService<rmcp::service::RoleClient, ()>, String> {
+        let transport_type = def["transport"].as_str().unwrap_or("stdio");
+        match transport_type {
+            "stdio" => {
+                let command = def["command"]
+                    .as_str()
+                    .ok_or_else(|| "missing command".to_string())?;
+                let args: Vec<String> = def["args"]
+                    .as_array()
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|v| v.as_str().map(String::from))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                let env_map = resolve_env_map(def)?;
+
+                let mut cmd = tokio::process::Command::new(command);
+                cmd.args(&args);
+                cmd.kill_on_drop(true);
+                apply_sanitized_child_env(&mut cmd, &env_map);
+
+                let transport = rmcp::transport::TokioChildProcess::new(cmd)
+                    .map_err(|e| format!("spawn failed: {e}"))?;
+                tokio::time::timeout(timeout, rmcp::ServiceExt::serve((), transport))
+                    .await
+                    .map_err(|_| {
+                        format!("MCP handshake timed out after {}ms", timeout.as_millis())
+                    })?
+                    .map_err(|e| format!("MCP handshake failed: {e}"))
+            }
+            "sse" | "http" | "streamable-http" => {
+                let url = def["url"]
+                    .as_str()
+                    .ok_or_else(|| "missing url for SSE".to_string())?;
+                let transport = StreamableHttpClientTransport::from_uri(url);
+                tokio::time::timeout(timeout, rmcp::ServiceExt::serve((), transport))
+                    .await
+                    .map_err(|_| {
+                        format!("SSE handshake timed out after {}ms", timeout.as_millis())
+                    })?
+                    .map_err(|e| format!("SSE handshake failed: {e}"))
+            }
+            other => Err(format!("unsupported transport: {other}")),
+        }
+    }
+
+    async fn discover_mcp_tools(
+        &self,
+        def: &serde_json::Value,
+    ) -> Result<Vec<rmcp::model::Tool>, String> {
+        let client = self
+            .connect_mcp_service(def, self.mcp_discovery_timeout)
+            .await?;
+        let list_result =
+            tokio::time::timeout(self.mcp_discovery_timeout, client.peer().list_all_tools()).await;
+        let cancel_result = client.cancel().await;
+
+        match list_result {
+            Ok(Ok(tools)) => {
+                let _ = cancel_result;
+                Ok(tools)
+            }
+            Ok(Err(e)) => Err(format!("list_tools failed: {e}")),
+            Err(_) => Err(format!(
+                "list_tools timed out after {}ms",
+                self.mcp_discovery_timeout.as_millis()
+            )),
+        }
+    }
+
     /// Atomically check if connection exists and create if not.
     /// Prevents TOCTOU race where two concurrent calls both spawn a child.
     async fn ensure_child_connected(&self, server_name: &str) -> Result<(), rmcp::ErrorData> {
@@ -3705,52 +3929,12 @@ impl MemoryServer {
 
         let def: serde_json::Value = serde_json::from_str(&cap.definition)
             .map_err(|e| rmcp::ErrorData::internal_error(format!("bad definition: {e}"), None))?;
-
-        let transport_type = def["transport"].as_str().unwrap_or("stdio");
-
-        let client = match transport_type {
-            "stdio" => {
-                let command = def["command"]
-                    .as_str()
-                    .ok_or_else(|| rmcp::ErrorData::internal_error("missing command", None))?;
-                let args: Vec<String> = def["args"]
-                    .as_array()
-                    .map(|a| {
-                        a.iter()
-                            .filter_map(|v| v.as_str().map(String::from))
-                            .collect()
-                    })
-                    .unwrap_or_default();
-                let env_map =
-                    resolve_env_map(&def).map_err(|e| rmcp::ErrorData::internal_error(e, None))?;
-
-                let mut cmd = tokio::process::Command::new(command);
-                cmd.args(&args);
-                apply_sanitized_child_env(&mut cmd, &env_map);
-
-                let transport = rmcp::transport::TokioChildProcess::new(cmd)
-                    .map_err(|e| rmcp::ErrorData::internal_error(format!("spawn: {e}"), None))?;
-                rmcp::ServiceExt::serve((), transport)
-                    .await
-                    .map_err(|e| rmcp::ErrorData::internal_error(format!("handshake: {e}"), None))?
-            }
-            "sse" | "http" | "streamable-http" => {
-                let url = def["url"]
-                    .as_str()
-                    .ok_or_else(|| rmcp::ErrorData::internal_error("missing url for SSE", None))?;
-                // TODO(5a): inject auth headers when rmcp supports custom reqwest::Client
-                let transport = StreamableHttpClientTransport::from_uri(url);
-                rmcp::ServiceExt::serve((), transport).await.map_err(|e| {
-                    rmcp::ErrorData::internal_error(format!("SSE handshake: {e}"), None)
-                })?
-            }
-            other => {
-                return Err(rmcp::ErrorData::internal_error(
-                    format!("unsupported transport: {other}"),
-                    None,
-                ));
-            }
-        };
+        let startup_timeout_ms = def["startup_timeout_ms"].as_u64().unwrap_or(30_000);
+        let startup_timeout = Duration::from_millis(startup_timeout_ms.max(1));
+        let client = self
+            .connect_mcp_service(&def, startup_timeout)
+            .await
+            .map_err(|e| rmcp::ErrorData::internal_error(e, None))?;
 
         self.pool.connections.lock().unwrap().insert(
             server_name.to_string(),
@@ -3783,7 +3967,20 @@ impl MemoryServer {
         let cap_def: serde_json::Value = serde_json::from_str(&cap.definition)
             .map_err(|e| rmcp::ErrorData::internal_error(format!("bad definition: {e}"), None))?;
 
-        // 1. Check deny-list permissions
+        // 1. Check allow/deny permissions
+        if let Some(allow_list) = cap_def["permissions"]["allow"].as_array() {
+            let allowed: HashSet<&str> = allow_list.iter().filter_map(|v| v.as_str()).collect();
+            if !allowed.is_empty() && !allowed.contains(tool_name) {
+                return Err(rmcp::ErrorData::invalid_params(
+                    format!(
+                        "Tool '{}' is not in permissions.allow for '{}'",
+                        tool_name, server_name
+                    ),
+                    None,
+                ));
+            }
+        }
+
         if let Some(deny_list) = cap_def["permissions"]["deny"].as_array() {
             let denied: Vec<&str> = deny_list.iter().filter_map(|v| v.as_str()).collect();
             if denied.contains(&tool_name) {
@@ -3958,14 +4155,34 @@ impl ServerHandler for MemoryServer {
             let mut tools = self.tool_router.list_all();
 
             // Add proxy tools from registered MCP servers
-            if let Ok(proxy) = self.proxy_tools.lock() {
-                for (server_name, server_tools) in proxy.iter() {
-                    for tool in server_tools {
-                        let mut proxied = tool.clone();
-                        proxied.name =
-                            std::borrow::Cow::Owned(format!("{}__{}", server_name, tool.name));
-                        tools.push(proxied);
-                    }
+            let proxy_snapshot = self
+                .proxy_tools
+                .lock()
+                .map(|proxy| proxy.clone())
+                .unwrap_or_default();
+            for (server_name, server_tools) in proxy_snapshot {
+                let cap_id = format!("mcp:{server_name}");
+                let cap = match self.get_capability(&cap_id) {
+                    Ok(cap) if cap.enabled => cap,
+                    _ => continue,
+                };
+
+                let cap_def = serde_json::from_str::<serde_json::Value>(&cap.definition)
+                    .unwrap_or_else(|_| json!({}));
+                let exposure_mode =
+                    resolve_mcp_tool_exposure(&cap_def, self.mcp_tool_exposure_mode);
+                if exposure_mode == McpToolExposureMode::Gateway {
+                    continue;
+                }
+
+                let filtered_tools =
+                    filter_mcp_tools_by_permissions(&cap_def, server_tools.clone());
+
+                for tool in filtered_tools {
+                    let mut proxied = tool.clone();
+                    proxied.name =
+                        std::borrow::Cow::Owned(format!("{}__{}", server_name, tool.name));
+                    tools.push(proxied);
                 }
             }
             // Add skill tools
@@ -4046,8 +4263,19 @@ impl ServerHandler for MemoryServer {
                 }
                 // 3. Proxy tools (server__tool pattern)
                 else if let Some((server_name, tool_name)) = name.split_once("__") {
-                    self.proxy_call_internal(server_name, tool_name, params.arguments)
-                        .await
+                    let exposure_mode = self.proxy_tool_exposure_mode_for_server(server_name)?;
+                    if exposure_mode == McpToolExposureMode::Gateway {
+                        Err(rmcp::ErrorData::invalid_params(
+                            format!(
+                                "Direct proxy tools are disabled for '{}'; use hub_call(server_id='mcp:{}', tool_name='{}')",
+                                server_name, server_name, tool_name
+                            ),
+                            None,
+                        ))
+                    } else {
+                        self.proxy_call_internal(server_name, tool_name, params.arguments)
+                            .await
+                    }
                 } else {
                     Err(rmcp::ErrorData::invalid_params("tool not found", None))
                 }
@@ -4178,6 +4406,7 @@ async fn tokio_main(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         .or_else(|_| std::env::var("SIGIL_HOME"))
         .map(|v| expand_user_path(&v))
         .unwrap_or_else(|_| home.join(".tachi"));
+    let git_root = find_git_root();
 
     let expand_cli_path = |raw: &PathBuf| expand_user_path(raw.to_string_lossy().as_ref());
 
@@ -4187,6 +4416,18 @@ async fn tokio_main(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     // Backward compatibility with old Sigil paths
     let _ = dotenvy::from_path_override(home.join(".sigil/config.env"));
     let _ = dotenvy::from_path_override(PathBuf::from(".sigil/config.env"));
+
+    // Project-local dotenv support (non-overriding):
+    // - current working directory .env
+    // - git root .env (if different from cwd)
+    if let Ok(cwd) = std::env::current_dir() {
+        let _ = dotenvy::from_path(cwd.join(".env"));
+        if let Some(root) = git_root.as_ref() {
+            if root != &cwd {
+                let _ = dotenvy::from_path(root.join(".env"));
+            }
+        }
+    }
 
     let gc_enabled = cli
         .gc_enabled
@@ -4204,8 +4445,6 @@ async fn tokio_main(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         eprintln!("MEMORY_GC_INTERVAL_SECS/--gc-interval-secs must be >= 1; using 1 second");
         gc_interval_secs = 1;
     }
-
-    let git_root = find_git_root();
 
     // Resolve global DB path
     let global_db_path = if let Some(p) = cli.global_db.as_ref() {
@@ -4379,11 +4618,12 @@ async fn tokio_main(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                         serde_json::from_value::<Vec<rmcp::model::Tool>>(tools_json.clone())
                     {
                         let server_name = cap.id.strip_prefix("mcp:").unwrap_or(&cap.id);
+                        let filtered_tools = filter_mcp_tools_by_permissions(&def, tools);
                         server
                             .proxy_tools
                             .lock()
                             .unwrap()
-                            .insert(server_name.to_string(), tools);
+                            .insert(server_name.to_string(), filtered_tools);
                     }
                 }
             }
@@ -4584,6 +4824,18 @@ mod tests {
         }
     }
 
+    fn make_test_tool(name: &str) -> rmcp::model::Tool {
+        serde_json::from_value(json!({
+            "name": name,
+            "description": format!("tool {name}"),
+            "inputSchema": {
+                "type": "object",
+                "additionalProperties": true,
+            }
+        }))
+        .expect("failed to build test tool")
+    }
+
     #[tokio::test]
     async fn proxy_call_blocks_disabled_capability_even_directly() {
         let server = make_server();
@@ -4702,6 +4954,163 @@ mod tests {
 
         assert!(
             err.contains("failed to persist agent state"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn filter_mcp_tools_respects_allow_and_deny_permissions() {
+        let def = json!({
+            "permissions": {
+                "allow": ["echo", "add"],
+                "deny": ["add"],
+            }
+        });
+
+        let filtered = filter_mcp_tools_by_permissions(
+            &def,
+            vec![
+                make_test_tool("echo"),
+                make_test_tool("add"),
+                make_test_tool("secret"),
+            ],
+        );
+
+        let names: Vec<String> = filtered
+            .iter()
+            .map(|tool| tool.name.as_ref().to_string())
+            .collect();
+        assert_eq!(names, vec!["echo"]);
+    }
+
+    #[tokio::test]
+    async fn hub_register_discovery_failure_disables_capability_and_clears_proxy_tools() {
+        let server = make_server();
+        let params = HubRegisterParams {
+            id: "mcp:discovery-fails".to_string(),
+            cap_type: "mcp".to_string(),
+            name: "discovery-fails".to_string(),
+            description: "test discovery failure".to_string(),
+            definition: json!({
+                "transport": "stdio",
+                "command": "/usr/bin/true",
+                "args": [],
+            })
+            .to_string(),
+            version: 1,
+            scope: "global".to_string(),
+        };
+
+        let response = server
+            .hub_register(Parameters(params))
+            .await
+            .expect("hub_register should return response");
+        let data: serde_json::Value =
+            serde_json::from_str(&response).expect("hub_register response should be JSON");
+
+        assert_eq!(data.get("enabled"), Some(&json!(false)));
+        assert!(
+            data.get("discovery_error")
+                .and_then(|v| v.as_str())
+                .is_some(),
+            "expected discovery_error in response: {data}"
+        );
+
+        let cap = server
+            .get_capability("mcp:discovery-fails")
+            .expect("capability should be persisted");
+        assert!(
+            !cap.enabled,
+            "capability should be disabled after discovery failure"
+        );
+
+        let def: serde_json::Value =
+            serde_json::from_str(&cap.definition).expect("stored definition should be valid JSON");
+        assert_eq!(def.get("discovery_status"), Some(&json!("failed")));
+        assert!(
+            def.get("last_discovery_error")
+                .and_then(|v| v.as_str())
+                .is_some(),
+            "stored definition should include last_discovery_error"
+        );
+
+        let proxy_tools = server.proxy_tools.lock().unwrap_or_else(|e| e.into_inner());
+        assert!(
+            !proxy_tools.contains_key("discovery-fails"),
+            "failed capability should not leave proxy tools cached"
+        );
+    }
+
+    #[test]
+    fn resolve_mcp_tool_exposure_supports_definition_overrides() {
+        let flatten = resolve_mcp_tool_exposure(
+            &json!({"tool_exposure": "flatten"}),
+            McpToolExposureMode::Gateway,
+        );
+        let gateway = resolve_mcp_tool_exposure(
+            &json!({"tool_exposure": "gateway"}),
+            McpToolExposureMode::Flatten,
+        );
+        let expose_false = resolve_mcp_tool_exposure(
+            &json!({"expose_tools": false}),
+            McpToolExposureMode::Flatten,
+        );
+        let fallback_default = resolve_mcp_tool_exposure(&json!({}), McpToolExposureMode::Gateway);
+
+        assert_eq!(flatten, McpToolExposureMode::Flatten);
+        assert_eq!(gateway, McpToolExposureMode::Gateway);
+        assert_eq!(expose_false, McpToolExposureMode::Gateway);
+        assert_eq!(fallback_default, McpToolExposureMode::Gateway);
+    }
+
+    #[tokio::test]
+    async fn retry_dispatch_blocks_direct_proxy_tool_when_gateway_mode() {
+        let server = make_server();
+
+        let cap = HubCapability {
+            id: "mcp:gateway-only".to_string(),
+            cap_type: "mcp".to_string(),
+            name: "gateway-only".to_string(),
+            version: 1,
+            description: "gateway mode mcp".to_string(),
+            definition: json!({
+                "transport": "stdio",
+                "command": "npx",
+                "args": ["-y", "dummy-mcp"],
+                "tool_exposure": "gateway",
+            })
+            .to_string(),
+            enabled: true,
+            uses: 0,
+            successes: 0,
+            failures: 0,
+            avg_rating: 0.0,
+            last_used: None,
+            created_at: String::new(),
+            updated_at: String::new(),
+        };
+
+        server
+            .with_global_store(|store| {
+                store
+                    .hub_register(&cap)
+                    .map_err(|e| format!("register failed: {e}"))
+            })
+            .expect("failed to register gateway capability");
+
+        let err = server
+            .retry_dispatch(
+                "gateway-only__echo",
+                Some(serde_json::Map::from_iter([(
+                    "text".to_string(),
+                    json!("hello"),
+                )])),
+            )
+            .await
+            .expect_err("gateway mode should block direct proxy tool names");
+
+        assert!(
+            err.to_string().contains("tool_exposure=gateway"),
             "unexpected error: {err}"
         );
     }

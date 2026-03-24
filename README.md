@@ -126,6 +126,13 @@ Tachi 亦化身为 OpenClaw 气海之元婴法宝。
 1. 安装 Tachi MCP 服务（推荐）：
    brew tap kckylechen1/tachi && brew install tachi
 
+   可选：自动扫描本机常见 Agent 配置并注入 Tachi MCP 入口：
+   python3 scripts/setup_agent_mcp.py --apply
+
+   可选：自动将本地 Skills / MCP 登录万宝楼（Hub）：
+   python3 scripts/load_skills_to_hub.py
+   python3 scripts/register_mcps_to_hub.py
+
 2. 部署 OpenClaw 扩展：
    bash -c "$(curl -fsSL https://raw.githubusercontent.com/kckylechen1/tachi/main/scripts/install_openclaw_ext.sh)"
    此脚本将负责拉取代码、编译扩展并在 extensions 库中建立软链��。
@@ -142,7 +149,7 @@ Tachi 亦化身为 OpenClaw 气海之元婴法宝。
 
 ## ✨ 五、 镇派绝学
 
-- **⚡ 玄铁剑心 (`memory-core`)**：计分、储纳、探囊取物等心法尽为 Rust 纯血铸就。辅以内丹于 Node.js (`NAPI-RS`, 可选) 与 Python (`PyO3`) 以应变千万。OpenClaw 分舵优先经 MCP stdio 通讯管道直连 Tachi 二进制，NAPI 为备降旁路。自 v0.8 、已有**三十四法器** (34 MCP tools) 始得面世。
+- **⚡ 玄铁剑心 (`memory-core`)**：计分、储纳、探囊取物等心法尽为 Rust 纯血铸就。辅以内丹于 Node.js (`NAPI-RS`, 可选) 与 Python (`PyO3`) 以应变千万。OpenClaw 分舵优先经 MCP stdio 通讯管道直连 Tachi 二进制，NAPI 为备降旁路。最终法器数量由内建法器与已登记 MCP/Skill 动态汇成。
 - **🗂️ 藏经阁流**：摒弃散沙。以 `path` 路径（如 `/user/preferences`, `/project/architecture`）作阁楼卷宗之分期，互不沾染走火入魔。
 - **🔍 三分天下（多系搜魂）**：
   - **太阴（语义）**：以 `sqlite-vec` 携 Voyage-4 直嵌玄冥。
@@ -152,8 +159,8 @@ Tachi 亦化身为 OpenClaw 气海之元婴法宝。
 - **🧠 三花聚顶（自适应上下文）**：录入之时即炼为三转：`L0`（浮光掠影）, `L1`（骨肉梗概）, 及 `L2`（大千界体）。由主将择轻重以借之，免费真元。
 - **🔄 两阶演化（记忆去重）**：首创 `HARD_SKIP` 与 `EVOLVE` 双阶去尘，以算数（数学相似度）为矩，免去过妄之弊。
 - **🔌 两界分治（双库阵法）**：天外之识存于全局藏经阁 (`~/.Tachi/global/memory.db`)，门内之学纳于各宗项目密库 (`.Tachi/memory.db`)。以 git 根脉自动辨识，且可将旧阁无痕迁徙。外物数据库概所不需。
-- **🎯 万宝楼（Tachi Hub）**：天下法器、仙诀、灵枢尽纳此中。只需登录一次，各路灵核均可按图索骥。内设功行考核、投名评鉴、双库传承（宗门可覆天下通制）。现存六十七部入门仙诀，开箱即用。
-- **🔀 灵枢转运（MCP 代理）**：只需于万宝楼登入一次子灵枢，诸般法器便可为天下灵核透明调度。共享灵脉连接，闲时自断，熔断护体，并发可控。派发灵气时保殄二十一根系统命脉，输送符箓三别名 (`http`、`streamable-http` 皆可通 `sse`)。僵尸进程，就此绝迹。
+- **🎯 万宝楼（Tachi Hub）**：天下法器、仙诀、灵枢尽纳此中。只需登录一次，各路灵核均可按图索骥。内设功行考核、投名评鉴、双库传承（宗门可覆天下通制）。仙诀与法器总数依本机安装与注册结果动态增减。
+- **🔀 灵枢转运（MCP 代理）**：只需于万宝楼登入一次子灵枢。若设 `tool_exposure=flatten`，则诸般法器展开为 `server__tool`；若设 `tool_exposure=gateway`，则收束于 `hub_call` 一门透传。共享灵脉连接，闲时自断，熔断护体，并发可控。派发灵气时保殄二十一根系统命脉，输送符箓三别名 (`http`、`streamable-http` 皆可通 `sse`)。僵尸进程，就此绝迹。
 - **🗑️ 轮回生灭（记忆生命周期）**：`delete_memory` 可将一段尘缘彻底贫灭，关联遗孤尽皆归尘；`archive_memory` 可封印封存，他日可解；`memory_gc` 可清扫陈年旧事、发霉记录。
 - **🧹 搭脉过滤（降噪）**：录入时静观材料，若为废料则送客，不开炉炼丹 (`is_noise_text`)；检索时先审问口诀，若为废话则不取经文 (`should_skip_query`)。节省灵石（Embedding API），保藏经阁清明。确需强录者，置 `force=true` 可破例。
 - **⏰ 自动扫尘（后台垃圾回收）**：每隔六个时辰，暗卫司自行巡视各大卯册，将过期日志、陈年旧事清却。可置 `MEMORY_GC_INTERVAL_SECS` 调节时辰，完全无需掌师亲临。
