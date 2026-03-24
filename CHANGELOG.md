@@ -5,6 +5,21 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.2] - 2026-03-24
+
+### Added
+- **`hub_disconnect` Tool**: New MCP tool to forcefully drop cached child MCP server processes from the proxy pool, allowing immediate reconnects with refreshed environment variables.
+- **LRU Cursor Eviction**: `ghost_subscribe` now properly implements LRU eviction to limit pub/sub topic cursors (`PUBSUB_MAX_CURSORS=1000`), securely preventing unbounded memory growth.
+
+### Changed
+- **Strict Error Propagation**: `sync_memories` now bubbles up agent state persistence failures instead of silently logging them, ensuring no false-positive state commits.
+- **Consistent Proxy Gates**: Unified capability enabled-state checks inside the internal proxy spawner `connect_child` and `proxy_call_internal`, preventing any bypassed direct `server__tool` calls for disabled child capabilities.
+
+### Fixed
+- **TOCTOU Enrichment Race Condition**: Shifted atomic revision constraints (`WHERE id=? AND revision=?`) to the start of the transaction, effectively neutralizing asynchronous vector overwrite timing bugs.
+- **Deterministic Sandbox Routing**: Path matching for Sandbox semantic validation now scales strictly via mathematical matching specificity (`ORDER BY LENGTH(path_pattern) DESC`).
+- **Retry Dispatch Router**: Centralized dynamic routing via `retry_dispatch` wrapper to consistently retry Native, Proxy, and Skill tool invocations within the Dead Letter Queue.
+
 ## [0.7.0] - 2026-03-23
 
 ### Added
