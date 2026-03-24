@@ -1,6 +1,5 @@
 import fs from "node:fs/promises";
 import path from "node:path";
-import { JsMemoryStore } from "@chaoxlabs/tachi-node";
 import type { MemoryEntry } from "./config.js";
 import { MemoryMcpClient, type HybridScore } from "./mcp-client.js";
 
@@ -14,11 +13,46 @@ function asFiniteNumber(value: unknown): number {
   return Number.isFinite(n) ? n : 0;
 }
 
-class NapiMemoryStore {
-  private readonly store: JsMemoryStore;
+// Dynamically loaded — null when @chaoxlabs/tachi-node is not installed
+interface NapiStoreBinding {
+  upsert(json: string): void;
+  get(id: string): string | null;
+  getAll(limit: number): string | null;
+  search(query: string, optionsJson?: string): string;
+  delete(id: string): boolean;
+  stats(verbose: boolean): string;
+}
 
-  constructor(dbPath: string) {
-    this.store = new JsMemoryStore(dbPath);
+let JsMemoryStoreClass: (new (dbPath: string) => NapiStoreBinding) | null = null;
+
+let napiLoadAttempted = false;
+
+async function loadNapi(): Promise<typeof JsMemoryStoreClass> {
+  if (napiLoadAttempted) return JsMemoryStoreClass;
+  napiLoadAttempted = true;
+  try {
+    const mod = await import("@chaoxlabs/tachi-node");
+    JsMemoryStoreClass = mod.JsMemoryStore;
+  } catch {
+    // Native module not available — MCP-only mode
+  }
+  return JsMemoryStoreClass;
+}
+
+class NapiMemoryStore {
+  private readonly store: NapiStoreBinding;
+
+  constructor(store: NapiStoreBinding) {
+    this.store = store;
+  }
+
+  static create(dbPath: string): NapiMemoryStore | null {
+    if (!JsMemoryStoreClass) return null;
+    try {
+      return new NapiMemoryStore(new JsMemoryStoreClass(dbPath));
+    } catch {
+      return null;
+    }
   }
 
   upsert(entry: MemoryEntry): void {
@@ -123,7 +157,7 @@ class NapiMemoryStore {
 }
 
 export class MemoryStore {
-  private readonly napiStore: NapiMemoryStore;
+  private readonly napiStore: NapiMemoryStore | null;
   private readonly mcpClient: MemoryMcpClient | null;
   private readonly preferredBackend: "mcp" | "napi";
   private mcpFailedAt: number | null = null;
@@ -131,12 +165,17 @@ export class MemoryStore {
 
   constructor(
     dbPath: string,
+    napiStore: NapiMemoryStore | null,
     private readonly logger?: LoggerLike,
   ) {
-    this.napiStore = new NapiMemoryStore(dbPath);
+    this.napiStore = napiStore;
     const backendRaw = (process.env.OPENCLAW_MEMORY_BACKEND || "mcp").trim().toLowerCase();
     this.preferredBackend = backendRaw === "napi" ? "napi" : "mcp";
     this.mcpClient = this.preferredBackend === "mcp" ? new MemoryMcpClient(dbPath, logger) : null;
+    if (!this.napiStore && !this.mcpClient) {
+      // Force MCP when NAPI is absent, regardless of env setting
+      this.mcpClient = new MemoryMcpClient(dbPath, logger);
+    }
   }
 
   private isMcpAvailable(): boolean {
@@ -152,21 +191,32 @@ export class MemoryStore {
   private async withBackend<T>(
     operation: string,
     mcpRun: () => Promise<T>,
-    napiRun: () => T | Promise<T>,
+    napiRun: (() => T | Promise<T>) | null,
   ): Promise<T> {
-    if (this.preferredBackend === "napi" || !this.isMcpAvailable() || !this.mcpClient) {
+    if (this.preferredBackend === "napi" && napiRun) {
       return await napiRun();
     }
 
-    try {
-      return await mcpRun();
-    } catch (error) {
-      this.mcpFailedAt = Date.now();
-      this.logger?.warn?.(
-        `memory-hybrid-bridge: MCP backend failed during ${operation}, falling back to NAPI (retry in ${MemoryStore.MCP_RETRY_AFTER_MS / 1000}s): ${String(error)}`,
-      );
+    if (this.isMcpAvailable() && this.mcpClient) {
+      try {
+        return await mcpRun();
+      } catch (error) {
+        this.mcpFailedAt = Date.now();
+        if (napiRun) {
+          this.logger?.warn?.(
+            `memory-hybrid-bridge: MCP backend failed during ${operation}, falling back to NAPI (retry in ${MemoryStore.MCP_RETRY_AFTER_MS / 1000}s): ${String(error)}`,
+          );
+          return await napiRun();
+        }
+        throw error;
+      }
+    }
+
+    if (napiRun) {
       return await napiRun();
     }
+
+    throw new Error(`memory-hybrid-bridge: no backend available for ${operation} (NAPI absent, MCP unavailable)`);
   }
 
   async close(): Promise<void> {
@@ -179,9 +229,9 @@ export class MemoryStore {
       async () => {
         await this.mcpClient!.saveMemory(entry);
       },
-      () => {
-        this.napiStore.upsert(entry);
-      },
+      this.napiStore
+        ? () => { this.napiStore!.upsert(entry); }
+        : null,
     );
   }
 
@@ -189,7 +239,9 @@ export class MemoryStore {
     return await this.withBackend(
       "get",
       async () => await this.mcpClient!.getMemory(id),
-      () => this.napiStore.get(id),
+      this.napiStore
+        ? () => this.napiStore!.get(id)
+        : null,
     );
   }
 
@@ -197,7 +249,9 @@ export class MemoryStore {
     return await this.withBackend(
       "getAll",
       async () => await this.mcpClient!.listMemories(limit),
-      () => this.napiStore.getAll(limit),
+      this.napiStore
+        ? () => this.napiStore!.getAll(limit)
+        : null,
     );
   }
 
@@ -215,7 +269,9 @@ export class MemoryStore {
     return await this.withBackend(
       "search",
       async () => await this.mcpClient!.searchMemory(query, queryVec, opts),
-      () => this.napiStore.search(query, queryVec, opts),
+      this.napiStore
+        ? () => this.napiStore!.search(query, queryVec, opts)
+        : null,
     );
   }
 
@@ -226,7 +282,9 @@ export class MemoryStore {
     return await this.withBackend(
       "findSimilar",
       async () => await this.mcpClient!.findSimilarMemory(queryVec, topK),
-      () => this.napiStore.findSimilar(queryVec, topK),
+      this.napiStore
+        ? () => this.napiStore!.findSimilar(queryVec, topK)
+        : null,
     );
   }
 
@@ -234,7 +292,9 @@ export class MemoryStore {
     return await this.withBackend(
       "delete",
       async () => await this.mcpClient!.deleteMemory(id),
-      () => this.napiStore.delete(id),
+      this.napiStore
+        ? () => this.napiStore!.delete(id)
+        : null,
     );
   }
 
@@ -242,7 +302,9 @@ export class MemoryStore {
     return await this.withBackend(
       "stats",
       async () => await this.mcpClient!.memoryStats(),
-      () => this.napiStore.stats(),
+      this.napiStore
+        ? () => this.napiStore!.stats()
+        : null,
     );
   }
 }
@@ -253,6 +315,9 @@ export async function getStore(
   legacyShadowPath?: string,
   logger?: any,
 ): Promise<MemoryStore> {
+  // Attempt to load native module (no-op if already tried)
+  await loadNapi();
+
   const needsMigration =
     legacyShadowPath &&
     (await fs
@@ -262,7 +327,11 @@ export async function getStore(
     !(await fs.stat(dbPath).catch(() => false));
 
   await fs.mkdir(path.dirname(dbPath), { recursive: true });
-  const store = new MemoryStore(dbPath, logger);
+  const napiStore = NapiMemoryStore.create(dbPath);
+  if (!napiStore) {
+    logger?.info?.("memory-hybrid-bridge: native module unavailable, running MCP-only");
+  }
+  const store = new MemoryStore(dbPath, napiStore, logger);
 
   if (needsMigration) {
     logger?.info("memory-hybrid-bridge: initiating SQLite migration from JSONL");

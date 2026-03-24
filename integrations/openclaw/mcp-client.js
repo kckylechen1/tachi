@@ -133,7 +133,8 @@ export class MemoryMcpClient {
         this.logger?.warn?.(`memory-hybrid-bridge[mcp]: ${message}`);
     }
     resolveServerCommand() {
-        const fromEnv = process.env.OPENCLAW_MEMORY_SERVER_BIN?.trim();
+        // Priority: TACHI_BIN > OPENCLAW_MEMORY_SERVER_BIN > local build > PATH (tachi, then memory-server)
+        const fromEnv = (process.env.TACHI_BIN || process.env.OPENCLAW_MEMORY_SERVER_BIN)?.trim();
         if (fromEnv) {
             return fromEnv;
         }
@@ -142,7 +143,8 @@ export class MemoryMcpClient {
         if (fs.existsSync(localBinary)) {
             return localBinary;
         }
-        return "memory-server";
+        // Prefer "tachi" (brew install name) over "memory-server" (dev name)
+        return "tachi";
     }
     buildLaunchCandidates() {
         const command = this.resolveServerCommand();
@@ -150,21 +152,32 @@ export class MemoryMcpClient {
             ...process.env,
             MEMORY_DB_PATH: this.dbPath,
         };
-        const cwd = os.tmpdir();
-        return [
+        const candidates = [
+            // First candidate: explicit global-db, no project db (clean isolation)
             {
                 command,
                 args: ["--global-db", this.dbPath, "--no-project-db"],
                 env,
-                cwd,
+                cwd: os.tmpdir(),
             },
+            // Second candidate: plain launch — use actual CWD so git root detection works
             {
                 command,
                 args: [],
                 env,
-                cwd,
+                cwd: process.cwd(),
             },
         ];
+        // If primary command is "tachi", also try "memory-server" as last resort
+        if (command === "tachi") {
+            candidates.push({
+                command: "memory-server",
+                args: ["--global-db", this.dbPath, "--no-project-db"],
+                env,
+                cwd: os.tmpdir(),
+            });
+        }
+        return candidates;
     }
     async connectWith(launch) {
         const transport = new StdioClientTransport({
@@ -236,6 +249,9 @@ export class MemoryMcpClient {
         this.availableTools.clear();
         await client?.close().catch(() => { });
         await transport?.close().catch(() => { });
+    }
+    async close() {
+        await this.resetConnection();
     }
     async callJson(name, args = {}) {
         const client = await this.getClient();

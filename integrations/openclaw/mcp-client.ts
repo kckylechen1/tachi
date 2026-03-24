@@ -195,7 +195,7 @@ export class MemoryMcpClient {
   }
 
   private resolveServerCommand(): string {
-    // Priority: TACHI_BIN > OPENCLAW_MEMORY_SERVER_BIN > local build > PATH
+    // Priority: TACHI_BIN > OPENCLAW_MEMORY_SERVER_BIN > local build > PATH (tachi, then memory-server)
     const fromEnv = (process.env.TACHI_BIN || process.env.OPENCLAW_MEMORY_SERVER_BIN)?.trim();
     if (fromEnv) {
       return fromEnv;
@@ -205,7 +205,8 @@ export class MemoryMcpClient {
     if (fs.existsSync(localBinary)) {
       return localBinary;
     }
-    return "memory-server";
+    // Prefer "tachi" (brew install name) over "memory-server" (dev name)
+    return "tachi";
   }
 
   private buildLaunchCandidates(): LaunchConfig[] {
@@ -214,15 +215,15 @@ export class MemoryMcpClient {
       ...process.env,
       MEMORY_DB_PATH: this.dbPath,
     } as Record<string, string>;
-    // First candidate: explicit global-db, no project db (clean isolation)
-    // Second candidate: plain launch — use actual CWD so git root detection works
-    return [
+    const candidates: LaunchConfig[] = [
+      // First candidate: explicit global-db, no project db (clean isolation)
       {
         command,
         args: ["--global-db", this.dbPath, "--no-project-db"],
         env,
         cwd: os.tmpdir(),
       },
+      // Second candidate: plain launch — use actual CWD so git root detection works
       {
         command,
         args: [],
@@ -230,6 +231,16 @@ export class MemoryMcpClient {
         cwd: process.cwd(),
       },
     ];
+    // If primary command is "tachi", also try "memory-server" as last resort
+    if (command === "tachi") {
+      candidates.push({
+        command: "memory-server",
+        args: ["--global-db", this.dbPath, "--no-project-db"],
+        env,
+        cwd: os.tmpdir(),
+      });
+    }
+    return candidates;
   }
 
   private async connectWith(launch: LaunchConfig): Promise<Client> {

@@ -42,6 +42,7 @@ export declare class MemoryMcpClient {
     private connectWith;
     private getClient;
     private resetConnection;
+    close(): Promise<void>;
     private callJson;
     saveMemory(entry: MemoryEntry): Promise<void>;
     getMemory(id: string): Promise<MemoryEntry | undefined>;

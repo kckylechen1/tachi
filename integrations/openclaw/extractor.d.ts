@@ -1,4 +1,8 @@
 import type { BridgeConfig, MemoryEntry } from "./config.js";
+export declare class SigilError extends Error {
+    code: string;
+    constructor(code: string, message: string);
+}
 export declare function sanitizeForExtractorInput(input: string): string;
 export declare function validateMemoryEntry(obj: unknown): obj is MemoryEntry;
 export declare function loadPromptTemplate(promptPath: string): Promise<string>;
