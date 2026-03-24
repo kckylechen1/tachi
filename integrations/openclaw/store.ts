@@ -126,7 +126,8 @@ export class MemoryStore {
   private readonly napiStore: NapiMemoryStore;
   private readonly mcpClient: MemoryMcpClient | null;
   private readonly preferredBackend: "mcp" | "napi";
-  private mcpFailed = false;
+  private mcpFailedAt: number | null = null;
+  private static readonly MCP_RETRY_AFTER_MS = 30_000;
 
   constructor(
     dbPath: string,
@@ -138,24 +139,38 @@ export class MemoryStore {
     this.mcpClient = this.preferredBackend === "mcp" ? new MemoryMcpClient(dbPath, logger) : null;
   }
 
+  private isMcpAvailable(): boolean {
+    if (this.mcpFailedAt === null) return true;
+    if (Date.now() - this.mcpFailedAt > MemoryStore.MCP_RETRY_AFTER_MS) {
+      this.mcpFailedAt = null;
+      this.logger?.info?.("memory-hybrid-bridge: MCP backend retry window reached, attempting reconnect");
+      return true;
+    }
+    return false;
+  }
+
   private async withBackend<T>(
     operation: string,
     mcpRun: () => Promise<T>,
     napiRun: () => T | Promise<T>,
   ): Promise<T> {
-    if (this.preferredBackend === "napi" || this.mcpFailed || !this.mcpClient) {
+    if (this.preferredBackend === "napi" || !this.isMcpAvailable() || !this.mcpClient) {
       return await napiRun();
     }
 
     try {
       return await mcpRun();
     } catch (error) {
-      this.mcpFailed = true;
+      this.mcpFailedAt = Date.now();
       this.logger?.warn?.(
-        `memory-hybrid-bridge: MCP backend failed during ${operation}, falling back to NAPI: ${String(error)}`,
+        `memory-hybrid-bridge: MCP backend failed during ${operation}, falling back to NAPI (retry in ${MemoryStore.MCP_RETRY_AFTER_MS / 1000}s): ${String(error)}`,
       );
       return await napiRun();
     }
+  }
+
+  async close(): Promise<void> {
+    await this.mcpClient?.close();
   }
 
   async upsert(entry: MemoryEntry): Promise<void> {

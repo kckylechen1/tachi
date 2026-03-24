@@ -195,7 +195,8 @@ export class MemoryMcpClient {
   }
 
   private resolveServerCommand(): string {
-    const fromEnv = process.env.OPENCLAW_MEMORY_SERVER_BIN?.trim();
+    // Priority: TACHI_BIN > OPENCLAW_MEMORY_SERVER_BIN > local build > PATH
+    const fromEnv = (process.env.TACHI_BIN || process.env.OPENCLAW_MEMORY_SERVER_BIN)?.trim();
     if (fromEnv) {
       return fromEnv;
     }
@@ -213,19 +214,20 @@ export class MemoryMcpClient {
       ...process.env,
       MEMORY_DB_PATH: this.dbPath,
     } as Record<string, string>;
-    const cwd = os.tmpdir();
+    // First candidate: explicit global-db, no project db (clean isolation)
+    // Second candidate: plain launch — use actual CWD so git root detection works
     return [
       {
         command,
         args: ["--global-db", this.dbPath, "--no-project-db"],
         env,
-        cwd,
+        cwd: os.tmpdir(),
       },
       {
         command,
         args: [],
         env,
-        cwd,
+        cwd: process.cwd(),
       },
     ];
   }
@@ -308,6 +310,10 @@ export class MemoryMcpClient {
     this.availableTools.clear();
     await client?.close().catch(() => {});
     await transport?.close().catch(() => {});
+  }
+
+  async close(): Promise<void> {
+    await this.resetConnection();
   }
 
   private async callJson<T>(name: string, args: Record<string, unknown> = {}): Promise<T> {
