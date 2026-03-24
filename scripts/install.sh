@@ -9,7 +9,7 @@
 set -euo pipefail
 
 VERSION="${SIGIL_VERSION:-latest}"
-PLUGIN_DIR="${SIGIL_PLUGIN_DIR:-$HOME/.openclaw/local-plugins/extensions/memory-hybrid-bridge}"
+PLUGIN_DIR="${SIGIL_PLUGIN_DIR:-$HOME/.openclaw/extensions/memory-hybrid-bridge}"
 REPO="nicekid1/Sigil"
 
 # ── Parse args ────────────────────────────────────────────────
@@ -20,7 +20,7 @@ while [[ $# -gt 0 ]]; do
     -h|--help)
       echo "Usage: install.sh [--version <ver>] [--dir <path>]"
       echo "  --version  Version to install (default: latest)"
-      echo "  --dir      Plugin install path (default: ~/.openclaw/local-plugins/extensions/memory-hybrid-bridge)"
+      echo "  --dir      Plugin install path (default: ~/.openclaw/extensions/memory-hybrid-bridge)"
       exit 0 ;;
     *) echo "Unknown option: $1"; exit 1 ;;
   esac
@@ -93,21 +93,18 @@ if [ -d "$TMPDIR/data_backup" ]; then
 fi
 mkdir -p "$PLUGIN_DIR/data"
 
-# ── npm install (pulls @memory-core/node from npm) ──────────
+# ── npm install (pulls @chaoxlabs/tachi-node optionally) ─────
 echo ">> Installing dependencies..."
 cd "$PLUGIN_DIR"
 npm install --registry https://registry.npmjs.org 2>&1 | tail -3
 
 # ── Smoke test ───────────────────────────────────────────────
 echo ">> Verifying native module..."
-if node --input-type=module -e "import('@memory-core/node').then(m => { if(!m.JsMemoryStore) throw new Error('missing export'); console.log('   ✅ Native module loaded OK') })" 2>/dev/null; then
+if node --input-type=module -e "import('@chaoxlabs/tachi-node').then(m => { if(!m.JsMemoryStore) throw new Error('missing export'); console.log('   ✅ Native module loaded OK') })" 2>/dev/null; then
   :
 else
-  echo "❌ Native module failed to load."
-  echo "   Your platform may not have a pre-built binary."
-  echo "   Supported: macOS (arm64/x64), Linux (x64/arm64 glibc)"
-  rm -rf "$TMPDIR"
-  exit 1
+  echo "   ⚠ Native module not available — running in MCP-only mode."
+  echo "   Install 'tachi' via: brew tap kckylechen1/tachi && brew install tachi"
 fi
 
 # ── Auto-configure openclaw.json ─────────────────────────────
@@ -165,10 +162,13 @@ echo "🎉 Sigil Memory installed successfully!"
 echo "========================================================="
 echo ""
 echo "Next steps:"
-echo "  1. Configure API keys in openclaw.json → plugins.entries.memory-hybrid-bridge.config:"
-echo "     - extractor.apiKey  → SiliconFlow (https://cloud.siliconflow.cn/)"
-echo "     - embedding.apiKey  → Voyage AI  (https://dash.voyageai.com/)"
-echo "  2. Restart OpenClaw gateway"
+echo "  1. Ensure API keys are set in ~/.secrets/master.env:"
+echo "     - VOYAGE_API_KEY     → Voyage AI  (https://dash.voyageai.com/)"
+echo "     - SILICONFLOW_API_KEY → SiliconFlow (https://cloud.siliconflow.cn/)"
+echo "     See integrations/openclaw/.env.example for all options."
+echo "  2. Install the Tachi MCP server if not already present:"
+echo "     brew tap kckylechen1/tachi && brew install tachi"
+echo "  3. Restart OpenClaw gateway"
 echo ""
 echo "Plugin path: $PLUGIN_DIR"
 echo "Data path:   $PLUGIN_DIR/data"

@@ -8,7 +8,7 @@ mod prompts;
 
 use chrono::Utc;
 use clap::Parser;
-use memory_core::{HubCapability, MemoryEntry, MemoryStore, SearchOptions};
+use memory_core::{HubCapability, HybridWeights, MemoryEntry, MemoryStore, SearchOptions};
 use rmcp::{
     handler::server::{tool::ToolRouter, wrapper::Parameters},
     model::{ServerCapabilities, ServerInfo},
@@ -811,6 +811,28 @@ fn default_scope() -> String {
 
 #[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
+struct HybridWeightsParam {
+    /// Semantic (vector) weight (default: 0.4)
+    #[serde(default = "default_weight_semantic")]
+    semantic: f64,
+    /// Full-text search weight (default: 0.3)
+    #[serde(default = "default_weight_fts")]
+    fts: f64,
+    /// Symbolic weight (default: 0.2)
+    #[serde(default = "default_weight_symbolic")]
+    symbolic: f64,
+    /// Decay weight (default: 0.1)
+    #[serde(default = "default_weight_decay")]
+    decay: f64,
+}
+
+fn default_weight_semantic() -> f64 { 0.40 }
+fn default_weight_fts() -> f64 { 0.30 }
+fn default_weight_symbolic() -> f64 { 0.20 }
+fn default_weight_decay() -> f64 { 0.10 }
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
 struct SearchMemoryParams {
     /// Search query text
     query: String,
@@ -846,11 +868,24 @@ struct SearchMemoryParams {
     /// Optional relation filter for graph expansion
     #[serde(default)]
     graph_relation_filter: Option<String>,
+
+    /// Optional scoring weights override {semantic, fts, symbolic, decay}
+    #[serde(default)]
+    weights: Option<HybridWeightsParam>,
 }
 
 impl SearchMemoryParams {
     /// Build SearchOptions from params, only differing by vec_available per DB.
     fn to_search_options(&self, vec_available: bool) -> SearchOptions {
+        let weights = match &self.weights {
+            Some(w) => HybridWeights {
+                semantic: w.semantic,
+                fts: w.fts,
+                symbolic: w.symbolic,
+                decay: w.decay,
+            },
+            None => HybridWeights::default(),
+        };
         SearchOptions {
             top_k: self.top_k,
             path_prefix: self.path_prefix.clone(),
@@ -861,6 +896,7 @@ impl SearchMemoryParams {
             graph_expand_hops: self.graph_expand_hops,
             graph_relation_filter: self.graph_relation_filter.clone(),
             vec_available,
+            weights,
             ..Default::default()
         }
     }

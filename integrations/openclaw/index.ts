@@ -431,7 +431,18 @@ export const memoryHybridBridgePlugin = {
     api.registerService({
       id: "memory-hybrid-bridge",
       start: () => api.logger.info("memory-hybrid-bridge: service started"),
-      stop: () => api.logger.info("memory-hybrid-bridge: service stopped"),
+      stop: async () => {
+        api.logger.info("memory-hybrid-bridge: shutting down...");
+        const entries = [...initStores.entries()];
+        initStores.clear();
+        for (const [, storePromise] of entries) {
+          try {
+            const store = await storePromise;
+            await store.close();
+          } catch { /* store never initialized successfully */ }
+        }
+        api.logger.info("memory-hybrid-bridge: service stopped");
+      },
     });
   },
 };

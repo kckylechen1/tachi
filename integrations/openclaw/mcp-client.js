@@ -318,6 +318,7 @@ export class MemoryMcpClient {
             graph_expand_hops: 0,
             graph_relation_filter: null,
             ...(queryVec && queryVec.length > 0 ? { query_vec: queryVec } : {}),
+            ...(opts?.weights ? { weights: opts.weights } : {}),
         });
         const docs = [];
         const scores = {};
