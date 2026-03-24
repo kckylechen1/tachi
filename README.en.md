@@ -22,6 +22,7 @@
 ## 📖 Table of Contents
 
 - [Overview](#-overview)
+- [Why Tachi?](#-why-tachi)
 - [Quick Start: Coding Agents (MCP)](#-quick-start-coding-agents-mcp)
 - [Quick Start: Frameworks (OpenClaw)](#-quick-start-frameworks-openclaw)
 - [Key Features](#-key-features)
@@ -43,6 +44,22 @@
 Standard memory models often rely on flat vector stores, leading to bloated context windows and a loss of temporal and causal relationships. Tachi addresses this by utilizing a **hierarchical, file-system-like paradigm** combined with **graph-based causal relations**, powered by a highly optimized Rust core. 
 
 Whether integrated as a [Model Context Protocol (MCP)](https://modelcontextprotocol.io/) server or used as a native extension in frameworks like OpenClaw, Tachi delivers sub-millisecond, multi-modal semantic retrieval with **zero external database dependencies**.
+
+---
+
+## 🎯 Why Tachi?
+
+1. **Solving "Context Bloat" and "Causal Amnesia"**
+Traditional agents dump unstructured fragments into flat vector databases (like Chroma or Pinecone). Over time, this leads to bloated LLM context windows and a complete loss of logical sequencing. Tachi counteracts this with hierarchical namespaces, 3-tier adaptive summarization (L0/L1/L2), and Knowledge Graph Edges — transforming scattered text into a structured, evolving "Digital Hippocampus".
+
+2. **Uncompromising Local Performance & Data Sovereignty**
+An AI's long-term operational memory is its most sensitive asset. Tachi is 100% local, powered by an ultra-fast Rust core (`sqlite-vec` + native FTS5) with zero network database dependencies. Its dual-DB architecture safely isolates global user preferences from project-specific knowledge bases, all while delivering sub-millisecond retrieval vectors out of the box.
+
+3. **Ending the MCP "Process Chaos"**
+In a multi-agent future, having every agent spawn and manage its own fragile MCP child processes leads to massive resource waste, port conflicts, and zombie processes. The Tachi Hub acts as a unified Proxy and Capability Registry. Register a tool once, and every agent magically shares connections, idle-cleanup, circuit breakers, and sanitized resilient network environments.
+
+4. **"Pristine" Memory Lifecycle**
+Long-running autonomous operations require extreme hygiene to prevent hallucination drift. Tachi introduces rigorous lifecycle management: pre-save AI noise filtering (`is_noise_text`), automated background garbage collection (GC), and CASCADE hard deletions (`delete_memory`). This ensures the memory store stays pristine and contextually relevant after months of continuous operations.
 
 ---
 
