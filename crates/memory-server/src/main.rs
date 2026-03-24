@@ -2176,48 +2176,51 @@ impl MemoryServer {
         Parameters(params): Parameters<ExtractFactsParams>,
     ) -> Result<String, String> {
         let (target_db, _warning) = self.resolve_write_scope("project");
-
-        // Spawn LLM extraction in background
-        let server = self.clone();
-        let text = params.text.clone();
         let source = params.source.clone();
-        let response_source = source.clone();
-        tokio::spawn(async move {
-            match server.llm.extract_facts(&text).await {
-                Ok(facts) if facts.is_empty() => {
-                    eprintln!("[extract_facts] no facts extracted");
+
+        // Synchronous extraction — caller sees actual results or errors
+        let facts = self
+            .llm
+            .extract_facts(&params.text)
+            .await
+            .map_err(|e| format!("LLM extraction failed: {e}"))?;
+
+        if facts.is_empty() {
+            return Ok(serde_json::to_string(&serde_json::json!({
+                "status": "completed",
+                "source": source,
+                "facts_extracted": 0,
+                "facts_saved": 0
+            }))
+            .unwrap());
+        }
+
+        let count = facts.len();
+        let saved = self.with_store_for_scope(target_db, |store| {
+            let mut saved = 0;
+            for fact in &facts {
+                let Some(entry) = fact_to_entry(
+                    fact,
+                    "extraction",
+                    serde_json::json!({"source": source}),
+                ) else {
+                    continue;
+                };
+                if store.upsert(&entry).is_ok() {
+                    saved += 1;
                 }
-                Ok(facts) => {
-                    let count = facts.len();
-                    let saved = server.with_store_for_scope(target_db, |store| {
-                        let mut saved = 0;
-                        for fact in &facts {
-                            let Some(entry) = fact_to_entry(
-                                fact,
-                                "extraction",
-                                serde_json::json!({"source": source}),
-                            ) else {
-                                continue;
-                            };
-                            if store.upsert(&entry).is_ok() {
-                                saved += 1;
-                            }
-                        }
-                        Ok(saved)
-                    });
-                    match saved {
-                        Ok(n) => eprintln!("[extract_facts] saved {n}/{count} facts"),
-                        Err(e) => eprintln!("[extract_facts] DB write failed: {e}"),
-                    }
-                }
-                Err(e) => eprintln!("[extract_facts] LLM extraction failed: {e}"),
             }
-        });
+            Ok(saved)
+        })
+        .map_err(|e| format!("DB write failed: {e}"))?;
 
         Ok(serde_json::to_string(&serde_json::json!({
-            "status": "extraction queued",
-            "source": response_source
-        })).unwrap())
+            "status": "completed",
+            "source": source,
+            "facts_extracted": count,
+            "facts_saved": saved
+        }))
+        .unwrap())
     }
 
     #[tool(description = "Ingest a conversation event and extract facts from messages.")]
@@ -2302,6 +2305,28 @@ impl MemoryServer {
                                 store.release_event_claim(&eh, "ingest")
                                     .map_err(|e| format!("{e}"))
                             });
+                            // Push to DLQ so failures are visible via dlq_list
+                            let dl = DeadLetter {
+                                id: uuid::Uuid::new_v4().to_string(),
+                                tool_name: "ingest_event".to_string(),
+                                arguments: Some(serde_json::Map::from_iter([
+                                    ("conversation_id".to_string(), serde_json::json!(conversation_id)),
+                                    ("turn_id".to_string(), serde_json::json!(turn_id)),
+                                ])),
+                                error: format!("DB write failed: {e}"),
+                                error_category: "internal".to_string(),
+                                timestamp: Utc::now().to_rfc3339(),
+                                retry_count: 0,
+                                max_retries: 3,
+                                status: "pending".to_string(),
+                            };
+                            {
+                                let mut dlq = server.dead_letters.lock().unwrap_or_else(|e| e.into_inner());
+                                dlq.push_back(dl);
+                                while dlq.len() > DLQ_MAX_ENTRIES {
+                                    dlq.pop_front();
+                                }
+                            }
                         }
                     }
                 }
@@ -2312,6 +2337,28 @@ impl MemoryServer {
                             .release_event_claim(&eh, "ingest")
                             .map_err(|e| format!("{e}"))
                     });
+                    // Push to DLQ so failures are visible via dlq_list
+                    let dl = DeadLetter {
+                        id: uuid::Uuid::new_v4().to_string(),
+                        tool_name: "ingest_event".to_string(),
+                        arguments: Some(serde_json::Map::from_iter([
+                            ("conversation_id".to_string(), serde_json::json!(conversation_id)),
+                            ("turn_id".to_string(), serde_json::json!(turn_id)),
+                        ])),
+                        error: format!("LLM extraction failed: {e}"),
+                        error_category: "internal".to_string(),
+                        timestamp: Utc::now().to_rfc3339(),
+                        retry_count: 0,
+                        max_retries: 3,
+                        status: "pending".to_string(),
+                    };
+                    {
+                        let mut dlq = server.dead_letters.lock().unwrap_or_else(|e| e.into_inner());
+                        dlq.push_back(dl);
+                        while dlq.len() > DLQ_MAX_ENTRIES {
+                            dlq.pop_front();
+                        }
+                    }
                 }
             }
         });
