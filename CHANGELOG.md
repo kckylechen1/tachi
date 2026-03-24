@@ -5,6 +5,37 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.0] - 2026-03-24
+
+### Added
+
+#### Wave 4 — Memory Infrastructure
+- **`delete_memory` Tool**: Permanently removes a memory entry along with its FTS index, vector embeddings, graph edges, access history, and agent known-state records. Full CASCADE cleanup prevents orphaned data.
+- **`archive_memory` Tool**: Soft-deletes a memory entry (sets `archived=1`). Archived entries are hidden from default searches but can be recovered via `include_archived=true`.
+- **`memory_gc` Tool**: On-demand garbage collection for growing tables. Prunes old `access_history` (keeps latest 256 per memory), `processed_events` (30-day TTL), `audit_log` (30-day + 100K row cap), and `agent_known_state` (90-day TTL).
+- **Background GC Timer**: Automatic periodic garbage collection every 6 hours (configurable via `MEMORY_GC_INTERVAL_SECS` env var or `--gc-interval-secs` CLI flag). Runs the same logic as the `memory_gc` tool.
+- **Noise Filtering on Save**: `save_memory` now rejects junk text via `is_noise_text()` — catches content that is too short, repetitive, or lacking semantic value. Bypassable with `force=true`.
+- **Query Noise Guard**: `search_memory` skips trivially meaningless queries via `should_skip_query()`, returning an early advisory instead of wasting embedding API calls.
+
+#### Wave 5 — MCP Proxy Hardening
+- **`hub_set_enabled` Tool**: Enable or disable a Hub capability by ID at runtime, without requiring re-registration.
+- **Environment Variable Whitelist**: `env_clear()` for child MCP server processes now preserves 21 critical system variables: `PATH`, `HOME`, `USER`, `LANG`, `LC_ALL`, `SSL_CERT_FILE`, `SSL_CERT_DIR`, `TMPDIR`, `TMP`, `TEMP`, `XDG_RUNTIME_DIR`, `XDG_CACHE_HOME`, `XDG_CONFIG_HOME`, `XDG_DATA_HOME`, and all proxy vars (`HTTP_PROXY`, `HTTPS_PROXY`, `NO_PROXY`, `ALL_PROXY` in both cases). Prevents child processes from failing due to missing SSL certificates or PATH.
+- **Transport Aliases**: MCP proxy now accepts `"http"` and `"streamable-http"` as transport type aliases for `"sse"`, reducing misconfiguration errors.
+
+#### Wave 6 — Graph Activation
+- **`add_edge` Tool**: Create or update directed edges in the memory graph. Supports causal, temporal, and entity relationship types with optional metadata and weight.
+- **`get_edges` Tool**: Query edges connected to a memory entry. Returns all causal, temporal, and entity relationship edges for graph traversal and visualization.
+- **Auto-Link on Save**: `save_memory` now automatically creates `entity` graph edges between the new memory and existing memories that share the same entities. Enabled by default (`auto_link=true`), runs asynchronously in background to avoid blocking the save response.
+
+### Changed
+- **34 MCP Tools**: Server now exposes 34 tools total (17 memory + 6 hub + 5 proxy + 3 pubsub + 2 DLQ + 1 sandbox).
+- **FTS Sanitizer**: Preserve dots in version strings (e.g., `v0.7.2`) during FTS tokenization, improving search accuracy for version-related queries.
+- **Graph Expand Default**: `search_memory` now defaults to `graph_expand_hops=1` (previously 0), enabling single-hop graph expansion for richer context retrieval out of the box.
+
+### Fixed
+- **DELETE CASCADE**: `delete()` now properly cascades to `access_history` and `agent_known_state` tables, preventing orphaned rows after memory deletion.
+- **Scoped Graph Persistence**: Graph edges are now correctly persisted within the appropriate database scope (project vs. global).
+
 ## [0.7.2] - 2026-03-24
 
 ### Added

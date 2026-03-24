@@ -115,7 +115,7 @@ Tachi 支持以外部扩展插件的形式桥接运行于 OpenClaw 内核。
 
 ## ✨ 核心特性
 
-- **⚡ 高性能 Rust 内核 (`memory-core`)**：计分、存储、实体提取与检索等底层引擎完全由 Rust 实现，并为 Node.js (`NAPI-RS`) 和 Python (`PyO3`) 提供原生高性能绑定。
+- **⚡ 高性能 Rust 内核 (`memory-core`)**：计分、存储、实体提取与检索等底层引擎完全由 Rust 实现，并为 Node.js (`NAPI-RS`) 和 Python (`PyO3`) 提供原生高性能绑定。截至 v0.8 共暴露 **34 个 MCP 工具**。
 - **🗂️ 文件系统命名空间**：记忆信息摒弃扁平存储，采用 `path` 路径参数（如 `/user/preferences`, `/project/architecture`）进行拓扑层级管理，有效实现业务数据的隔离与精准定向。
 - **🔍 三通道分流检索引擎**：
   - **语义级（Semantic）**：内建基于 `sqlite-vec` 的 Voyage-4 向量聚类查询（KNN）。
@@ -126,7 +126,12 @@ Tachi 支持以外部扩展插件的形式桥接运行于 OpenClaw 内核。
 - **🔄 两阶演化（记忆去重）**：首创基于数学相似度阈值的 `HARD_SKIP` 与 `EVOLVE` 两阶段查重去重算法。
 - **🔌 双库架构**：全局记忆 (`~/.Tachi/global/memory.db`) 跨项目共享（用户偏好、通用知识），每个项目独立数据库 (`.Tachi/memory.db` 位于 git 仓库根目录) 存储项目级上下文。自动检测 git 根目录，自动迁移旧版数据库。无需任何外部独立数据库依赖。
 - **🎯 Tachi Hub 能力中心**：统一的 Skill / Plugin / MCP Server 注册与发现中心。注册一次，所有 Agent 均可发现并使用。内置使用追踪、反馈评分、双库继承（项目级覆盖全局）。开箱即用 67 个预置 Skill。
-- **🔀 MCP 代理**：在 Tachi 中注册子 MCP Server，其工具将透明地展示给所有 Agent。共享连接池，按需连接，空闲自动清理，熔断器保护，并发控制。告别僵尸进程。
+- **🔀 MCP 代理**：在 Tachi 中注册子 MCP Server，其工具将透明地展示给所有 Agent。共享连接池，按需连接，空闲自动清理，熔断器保护，并发控制。环境变量清洗保留 21 个系统关键变量。传输协议别名 (`http`、`streamable-http` → `sse`)。告别僵尸进程。
+- **🗑️ 记忆生命周期管理**：完整的生命周期控制——`delete_memory`（永久删除，CASCADE 清理关联数据）、`archive_memory`（软删除，可恢复）、`memory_gc`（清理过期访问历史、事件日志、审计记录）。
+- **🧹 噎声过滤**：保存时自动拦截无价值内容 (`is_noise_text`)，检索时自动跳过无意义查询 (`should_skip_query`)。节省 Embedding API 调用成本，保持记忆库清洁。可通过 `force=true` 绕过。
+- **⏰ 后台自动垃圾回收**：周期性后台 GC 定时器（默认每 6 小时，通过 `MEMORY_GC_INTERVAL_SECS` 可配置）。无需手动干预即可保持增长表有界。
+- **🕸️ 知识图谱操作**：通过 `add_edge` 和 `get_edges` MCP 工具直接操作记忆图谱。支持创建因果、时序和实体关联边，可附带元数据和权重。
+- **🔗 保存时自动链接**：`save_memory` 自动发现共享相同实体的已有记忆，并在它们之间创建图谱边（异步、非阻塞）。默认开启，通过 `auto_link=false` 可禁用。
 
 ---
 
