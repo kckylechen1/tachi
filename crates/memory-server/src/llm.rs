@@ -1,18 +1,14 @@
 // llm.rs — LLM & Embedding client for memory server
+//
+// Uses raw reqwest for SiliconFlow (OpenAI-compatible) chat completions
+// to support `enable_thinking: false` for Qwen3 models.
 
-use async_openai::{
-    config::OpenAIConfig,
-    types::{
-        ChatCompletionRequestMessage, ChatCompletionRequestSystemMessage,
-        ChatCompletionRequestSystemMessageContent, ChatCompletionRequestUserMessage,
-        ChatCompletionRequestUserMessageContent, CreateChatCompletionRequestArgs,
-    },
-};
 use reqwest::header::{AUTHORIZATION, CONTENT_TYPE};
 use serde_json::Value;
+use std::time::Duration;
 
-// LLM and embedding client using Voyage API for embeddings
-// and SiliconFlow (OpenAI-compatible) for chat completions
+/// LLM and embedding client using Voyage API for embeddings
+/// and SiliconFlow (OpenAI-compatible) for chat completions.
 #[derive(Clone)]
 pub struct LlmClient {
     http: reqwest::Client,
@@ -23,6 +19,9 @@ pub struct LlmClient {
 }
 
 impl LlmClient {
+    const MAX_ATTEMPTS: usize = 3;
+    const BASE_RETRY_DELAY_MS: u64 = 500;
+
     pub fn new() -> Result<Self, String> {
         let voyage_api_key = std::env::var("VOYAGE_API_KEY")
             .map_err(|_| "VOYAGE_API_KEY environment variable not set".to_string())?;
@@ -33,10 +32,13 @@ impl LlmClient {
         let siliconflow_model = std::env::var("SILICONFLOW_MODEL")
             .unwrap_or_else(|_| "Qwen/Qwen3.5-27B".to_string());
 
-        let summary_model = std::env::var("SUMMARY_MODEL")
-            .unwrap_or_else(|_| siliconflow_model.clone());
+        let summary_model =
+            std::env::var("SUMMARY_MODEL").unwrap_or_else(|_| siliconflow_model.clone());
 
-        let http = reqwest::Client::new();
+        let http = reqwest::Client::builder()
+            .timeout(Duration::from_secs(60))
+            .build()
+            .map_err(|e| format!("Failed to build HTTP client: {e}"))?;
 
         Ok(Self {
             http,
@@ -80,7 +82,6 @@ impl LlmClient {
             .as_array()
             .ok_or("Invalid Voyage response: missing embedding")?;
 
-        // Convert Vec<f64> to Vec<f32>
         let vec: Vec<f32> = embedding
             .iter()
             .filter_map(|v| v.as_f64().map(|f| f as f32))
@@ -93,7 +94,9 @@ impl LlmClient {
         Ok(vec)
     }
 
-    /// Call SiliconFlow chat API (OpenAI-compatible)
+    /// Call SiliconFlow chat API via raw reqwest.
+    /// Includes `enable_thinking: false` for Qwen3 models to prevent
+    /// empty `content` when the model puts output in `reasoning_content`.
     pub async fn call_llm(
         &self,
         system: &str,
@@ -104,49 +107,123 @@ impl LlmClient {
     ) -> Result<String, String> {
         let model = model.unwrap_or(&self.siliconflow_model);
 
-        // Create messages in the correct format for async-openai 0.27
-        let system_message = ChatCompletionRequestSystemMessage {
-            content: ChatCompletionRequestSystemMessageContent::Text(system.to_string()),
-            name: None,
-        };
-        let user_message = ChatCompletionRequestUserMessage {
-            content: ChatCompletionRequestUserMessageContent::Text(user.to_string()),
-            name: None,
-        };
+        let body = serde_json::json!({
+            "model": model,
+            "messages": [
+                {"role": "system", "content": system},
+                {"role": "user", "content": user}
+            ],
+            "temperature": temperature,
+            "max_tokens": max_tokens,
+            "enable_thinking": false
+        });
 
-        let request = CreateChatCompletionRequestArgs::default()
-            .model(model)
-            .messages([
-                ChatCompletionRequestMessage::System(system_message),
-                ChatCompletionRequestMessage::User(user_message),
-            ])
-            .temperature(temperature)
-            .max_tokens(max_tokens)
-            .build()
-            .map_err(|e| format!("Failed to build chat request: {}", e))?;
+        let mut last_err = String::new();
 
-        // Create a config with custom base URL
-        let config = OpenAIConfig::new()
-            .with_api_key(&self.siliconflow_api_key)
-            .with_api_base("https://api.siliconflow.cn/v1");
+        for attempt in 1..=Self::MAX_ATTEMPTS {
+            let resp = self
+                .http
+                .post("https://api.siliconflow.cn/v1/chat/completions")
+                .header(CONTENT_TYPE, "application/json")
+                .header(
+                    AUTHORIZATION,
+                    format!("Bearer {}", self.siliconflow_api_key),
+                )
+                .json(&body)
+                .send()
+                .await;
 
-        // Use the Client::with_config method
-        let client = async_openai::Client::with_config(config);
+            let resp = match resp {
+                Ok(r) => r,
+                Err(e) => {
+                    last_err = format!("HTTP request failed: {e}");
+                    if attempt < Self::MAX_ATTEMPTS
+                        && (e.is_timeout() || e.is_connect() || e.is_request())
+                    {
+                        eprintln!(
+                            "[llm] transient error (attempt {}/{}): {e}; retrying",
+                            attempt,
+                            Self::MAX_ATTEMPTS
+                        );
+                        tokio::time::sleep(Self::retry_delay(attempt)).await;
+                        continue;
+                    }
+                    return Err(last_err);
+                }
+            };
 
-        let response = client
-            .chat()
-            .create(request)
-            .await
-            .map_err(|e| format!("Chat API call failed: {}", e))?;
+            let status = resp.status();
+            let resp_text = resp
+                .text()
+                .await
+                .unwrap_or_else(|e| format!("<read error: {e}>"));
 
-        let content = response
-            .choices
-            .first()
-            .and_then(|c| c.message.content.as_ref())
-            .ok_or("Empty response from chat API")?
-            .trim();
+            // Retry on 429 rate-limit or 5xx server errors
+            if status.as_u16() == 429 || status.is_server_error() {
+                last_err = format!("API error {status}: {resp_text}");
+                if attempt < Self::MAX_ATTEMPTS {
+                    eprintln!(
+                        "[llm] API error {status} (attempt {}/{}); retrying",
+                        attempt,
+                        Self::MAX_ATTEMPTS
+                    );
+                    tokio::time::sleep(Self::retry_delay(attempt)).await;
+                    continue;
+                }
+                return Err(last_err);
+            }
 
-        Ok(content.to_string())
+            if !status.is_success() {
+                return Err(format!("Chat API error {status}: {resp_text}"));
+            }
+
+            // Parse JSON response
+            let json: Value = serde_json::from_str(&resp_text).map_err(|e| {
+                format!("Failed to parse chat response JSON: {e} — raw: {resp_text}")
+            })?;
+
+            // Extract content from first choice
+            let content = json["choices"]
+                .as_array()
+                .and_then(|choices| {
+                    choices.iter().find_map(|choice| {
+                        choice["message"]["content"]
+                            .as_str()
+                            .map(str::trim)
+                            .filter(|s| !s.is_empty())
+                            .map(String::from)
+                    })
+                });
+
+            if let Some(text) = content {
+                return Ok(text);
+            }
+
+            // Content was empty — build diagnostic info
+            let finish_reason = json["choices"][0]["finish_reason"]
+                .as_str()
+                .unwrap_or("null");
+            let usage = json
+                .get("usage")
+                .map(|u| u.to_string())
+                .unwrap_or_else(|| "unknown".to_string());
+
+            last_err = format!(
+                "Empty assistant content (finish_reason={finish_reason}, usage={usage}, model={model})"
+            );
+
+            if attempt < Self::MAX_ATTEMPTS {
+                eprintln!(
+                    "[llm] empty content (attempt {}/{}): {last_err}; retrying",
+                    attempt,
+                    Self::MAX_ATTEMPTS
+                );
+                tokio::time::sleep(Self::retry_delay(attempt)).await;
+                continue;
+            }
+        }
+
+        Err(last_err)
     }
 
     /// Generate L0 summary using SUMMARY_PROMPT
@@ -171,11 +248,22 @@ impl LlmClient {
 
     /// Extract structured facts from text using EXTRACTION_PROMPT
     pub async fn extract_facts(&self, text: &str) -> Result<Vec<Value>, String> {
-        let response = self.call_llm(crate::prompts::EXTRACTION_PROMPT, text, None, 0.3, 2000).await?;
+        let response = self
+            .call_llm(crate::prompts::EXTRACTION_PROMPT, text, None, 0.3, 2000)
+            .await?;
         let json_str = Self::strip_code_fence(&response);
+
+        if json_str.trim().is_empty() {
+            return Err("LLM returned empty facts payload after stripping fences".to_string());
+        }
 
         serde_json::from_str(json_str)
             .map_err(|e| format!("Failed to parse facts JSON: {} - response was: {}", e, json_str))
+    }
+
+    fn retry_delay(attempt: usize) -> Duration {
+        let multiplier = 1u64 << attempt.saturating_sub(1).min(4);
+        Duration::from_millis(Self::BASE_RETRY_DELAY_MS * multiplier)
     }
 
     /// Remove ```json markdown code fences from response
