@@ -988,6 +988,58 @@ struct HubDisconnectParams {
     server_id: String,
 }
 
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+struct DeleteMemoryParams {
+    /// Memory entry ID to delete
+    id: String,
+}
+
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+struct ArchiveMemoryParams {
+    /// Memory entry ID to archive
+    id: String,
+}
+
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+struct HubSetEnabledParams {
+    /// Capability ID
+    id: String,
+    /// Whether to enable (true) or disable (false)
+    enabled: bool,
+}
+
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+struct AddEdgeParams {
+    /// Source memory ID
+    source_id: String,
+    /// Target memory ID
+    target_id: String,
+    /// Relation type (e.g. "causes", "follows", "related_to")
+    relation: String,
+    /// Edge weight (default: 1.0)
+    #[serde(default = "default_edge_weight")]
+    weight: f64,
+    /// Optional JSON metadata for the edge
+    #[serde(default)]
+    metadata: Option<serde_json::Value>,
+}
+
+fn default_edge_weight() -> f64 { 1.0 }
+
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+struct GetEdgesParams {
+    /// Memory entry ID
+    memory_id: String,
+    /// Direction: "outgoing", "incoming", or "both" (default: "both")
+    #[serde(default = "default_edge_direction")]
+    direction: String,
+    /// Optional relation type filter
+    #[serde(default)]
+    relation_filter: Option<String>,
+}
+
+fn default_edge_direction() -> String { "both".to_string() }
+
 #[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 struct AuditLogParams {
@@ -1190,6 +1242,14 @@ impl MemoryServer {
         &self,
         Parameters(params): Parameters<SaveMemoryParams>,
     ) -> Result<String, String> {
+        // Noise filter: reject junk text before persisting
+        if memory_core::is_noise_text(&params.text) {
+            return serde_json::to_string(&json!({
+                "warning": "Text detected as noise (greeting, denial, or meta-question). Not saved.",
+                "noise": true,
+            })).map_err(|e| format!("Failed to serialize: {}", e));
+        }
+
         let id = params.id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
         let timestamp = Utc::now().to_rfc3339();
         let requested_scope = params.scope.clone();
@@ -1290,6 +1350,12 @@ impl MemoryServer {
         &self,
         Parameters(params): Parameters<SearchMemoryParams>,
     ) -> Result<String, String> {
+        // Adaptive retrieval: skip noise queries
+        if memory_core::should_skip_query(&params.query) {
+            return serde_json::to_string(&json!([]))
+                .map_err(|e| format!("Failed to serialize: {}", e));
+        }
+
         let pipeline_enabled = self.pipeline_enabled;
 
         let mut combined_results: Vec<(memory_core::SearchResult, DbScope)> = Vec::new();
@@ -1509,6 +1575,173 @@ impl MemoryServer {
             "databases": databases,
         }))
         .map_err(|e| format!("Failed to serialize: {}", e))
+    }
+
+    #[tool(description = "Delete a memory entry permanently. Removes from main table, FTS, vectors, graph edges, and access history.")]
+    async fn delete_memory(
+        &self,
+        Parameters(params): Parameters<DeleteMemoryParams>,
+    ) -> Result<String, String> {
+        // Try project DB first, then global
+        if self.project_db_path.is_some() {
+            let deleted = self.with_project_store(|store| {
+                store.delete(&params.id).map_err(|e| format!("Delete failed: {}", e))
+            })?;
+            if deleted {
+                return serde_json::to_string(&json!({ "deleted": true, "db": "project", "id": params.id }))
+                    .map_err(|e| format!("Failed to serialize: {}", e));
+            }
+        }
+
+        let deleted = self.with_global_store(|store| {
+            store.delete(&params.id).map_err(|e| format!("Delete failed: {}", e))
+        })?;
+
+        serde_json::to_string(&json!({
+            "deleted": deleted,
+            "db": if deleted { "global" } else { "not_found" },
+            "id": params.id,
+        }))
+        .map_err(|e| format!("Failed to serialize: {}", e))
+    }
+
+    #[tool(description = "Archive a memory entry (soft-delete, set archived=1). Entry is hidden from default searches but can be retrieved with include_archived=true.")]
+    async fn archive_memory(
+        &self,
+        Parameters(params): Parameters<ArchiveMemoryParams>,
+    ) -> Result<String, String> {
+        // Try project DB first, then global
+        if self.project_db_path.is_some() {
+            let archived = self.with_project_store(|store| {
+                store.archive_memory(&params.id).map_err(|e| format!("Archive failed: {}", e))
+            })?;
+            if archived {
+                return serde_json::to_string(&json!({ "archived": true, "db": "project", "id": params.id }))
+                    .map_err(|e| format!("Failed to serialize: {}", e));
+            }
+        }
+
+        let archived = self.with_global_store(|store| {
+            store.archive_memory(&params.id).map_err(|e| format!("Archive failed: {}", e))
+        })?;
+
+        serde_json::to_string(&json!({
+            "archived": archived,
+            "db": if archived { "global" } else { "not_found" },
+            "id": params.id,
+        }))
+        .map_err(|e| format!("Failed to serialize: {}", e))
+    }
+
+    #[tool(description = "Run garbage collection on growing tables. Prunes old access_history (keep latest 256 per memory), processed_events (30d), audit_log (30d + 100k cap), and agent_known_state (90d).")]
+    async fn memory_gc(&self) -> Result<String, String> {
+        let mut results = serde_json::Map::new();
+
+        let global_gc = self.with_global_store(|store| {
+            store.gc_tables().map_err(|e| format!("GC failed on global DB: {}", e))
+        })?;
+        results.insert("global".into(), global_gc);
+
+        if self.project_db_path.is_some() {
+            let project_gc = self.with_project_store(|store| {
+                store.gc_tables().map_err(|e| format!("GC failed on project DB: {}", e))
+            })?;
+            results.insert("project".into(), project_gc);
+        }
+
+        serde_json::to_string(&results).map_err(|e| format!("Failed to serialize: {}", e))
+    }
+
+    #[tool(description = "Enable or disable a Hub capability by ID.")]
+    async fn hub_set_enabled(
+        &self,
+        Parameters(params): Parameters<HubSetEnabledParams>,
+    ) -> Result<String, String> {
+        // Try both DBs — project first
+        let mut updated = false;
+        let mut target_db = "not_found";
+
+        if self.project_db_path.is_some() {
+            let result = self.with_project_store(|store| {
+                store.hub_set_enabled(&params.id, params.enabled)
+                    .map_err(|e| format!("Failed: {}", e))
+            })?;
+            if result {
+                updated = true;
+                target_db = "project";
+            }
+        }
+
+        if !updated {
+            let result = self.with_global_store(|store| {
+                store.hub_set_enabled(&params.id, params.enabled)
+                    .map_err(|e| format!("Failed: {}", e))
+            })?;
+            if result {
+                updated = true;
+                target_db = "global";
+            }
+        }
+
+        serde_json::to_string(&json!({
+            "updated": updated,
+            "db": target_db,
+            "id": params.id,
+            "enabled": params.enabled,
+        }))
+        .map_err(|e| format!("Failed to serialize: {}", e))
+    }
+
+    #[tool(description = "Add or update an edge in the memory graph. Edges represent causal, temporal, or entity relationships between memories.")]
+    async fn add_edge(
+        &self,
+        Parameters(params): Parameters<AddEdgeParams>,
+    ) -> Result<String, String> {
+        let edge = memory_core::MemoryEdge {
+            source_id: params.source_id.clone(),
+            target_id: params.target_id.clone(),
+            relation: params.relation.clone(),
+            weight: params.weight,
+            metadata: params.metadata.unwrap_or(json!({})),
+            created_at: Utc::now().to_rfc3339(),
+            valid_from: String::new(),
+            valid_to: None,
+        };
+
+        // Write to global DB (graph is global by default)
+        self.with_global_store(|store| {
+            store.add_edge(&edge).map_err(|e| format!("Failed to add edge: {}", e))
+        })?;
+
+        serde_json::to_string(&json!({
+            "ok": true,
+            "source_id": params.source_id,
+            "target_id": params.target_id,
+            "relation": params.relation,
+        }))
+        .map_err(|e| format!("Failed to serialize: {}", e))
+    }
+
+    #[tool(description = "Get edges connected to a memory entry. Returns causal, temporal, and entity relationship edges.")]
+    async fn get_edges(
+        &self,
+        Parameters(params): Parameters<GetEdgesParams>,
+    ) -> Result<String, String> {
+        let edges = self.with_global_store(|store| {
+            store.get_edges(&params.memory_id, &params.direction, params.relation_filter.as_deref())
+                .map_err(|e| format!("Failed to get edges: {}", e))
+        })?;
+
+        let output: Vec<serde_json::Value> = edges.iter().map(|e| json!({
+            "source_id": e.source_id,
+            "target_id": e.target_id,
+            "relation": e.relation,
+            "weight": e.weight,
+            "metadata": e.metadata,
+            "created_at": e.created_at,
+        })).collect();
+
+        serde_json::to_string(&output).map_err(|e| format!("Failed to serialize: {}", e))
     }
 
     #[tool(description = "Set a key-value pair in server state (stored in hard_state table).")]
@@ -2017,11 +2250,11 @@ impl MemoryServer {
 
                         let mut cmd = tokio::process::Command::new(command);
                         cmd.args(&args).env_clear();
-                        if let Ok(path) = std::env::var("PATH") {
-                            cmd.env("PATH", &path);
-                        }
-                        if let Ok(home) = std::env::var("HOME") {
-                            cmd.env("HOME", &home);
+                        // Preserve essential system variables
+                        for var in &["PATH", "HOME", "USER", "LANG", "LC_ALL", "SSL_CERT_FILE", "SSL_CERT_DIR", "TMPDIR"] {
+                            if let Ok(val) = std::env::var(var) {
+                                cmd.env(var, &val);
+                            }
                         }
                         for (k, v) in &env_map {
                             cmd.env(k, v);
@@ -2083,7 +2316,7 @@ impl MemoryServer {
                         }
                     }
                 }
-                "sse" => {
+                "sse" | "http" | "streamable-http" => {
                     if let Some(url) = def["url"].as_str() {
                         let transport = StreamableHttpClientTransport::from_uri(url);
                         match rmcp::ServiceExt::serve((), transport).await {
@@ -2916,11 +3149,11 @@ impl MemoryServer {
 
                 let mut cmd = tokio::process::Command::new(command);
                 cmd.args(&args).env_clear();
-                if let Ok(path) = std::env::var("PATH") {
-                    cmd.env("PATH", &path);
-                }
-                if let Ok(home) = std::env::var("HOME") {
-                    cmd.env("HOME", &home);
+                // Preserve essential system variables
+                for var in &["PATH", "HOME", "USER", "LANG", "LC_ALL", "SSL_CERT_FILE", "SSL_CERT_DIR", "TMPDIR"] {
+                    if let Ok(val) = std::env::var(var) {
+                        cmd.env(var, &val);
+                    }
                 }
                 for (k, v) in &env_map {
                     cmd.env(k, v);
@@ -2932,7 +3165,7 @@ impl MemoryServer {
                     .await
                     .map_err(|e| rmcp::ErrorData::internal_error(format!("handshake: {e}"), None))?
             }
-            "sse" => {
+            "sse" | "http" | "streamable-http" => {
                 let url = def["url"]
                     .as_str()
                     .ok_or_else(|| rmcp::ErrorData::internal_error("missing url for SSE", None))?;
@@ -3455,6 +3688,34 @@ async fn tokio_main(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                     if let Some(conn) = conns.remove(&key) {
                         eprintln!("Idle cleanup: disconnecting '{}'", key);
                         drop(conn);
+                    }
+                }
+            }
+        });
+    }
+
+    // Spawn background GC task (every 6 hours)
+    {
+        let gc_server = server.clone();
+        tokio::spawn(async move {
+            // Initial delay: wait 5 minutes after startup before first GC
+            tokio::time::sleep(Duration::from_secs(300)).await;
+            let mut interval = tokio::time::interval(Duration::from_secs(6 * 3600));
+            loop {
+                interval.tick().await;
+                eprintln!("[gc] Running scheduled garbage collection...");
+                match gc_server.with_global_store(|store| {
+                    store.gc_tables().map_err(|e| format!("{}", e))
+                }) {
+                    Ok(result) => eprintln!("[gc] Global DB: {}", result),
+                    Err(e) => eprintln!("[gc] Global DB error: {}", e),
+                }
+                if gc_server.project_db_path.is_some() {
+                    match gc_server.with_project_store(|store| {
+                        store.gc_tables().map_err(|e| format!("{}", e))
+                    }) {
+                        Ok(result) => eprintln!("[gc] Project DB: {}", result),
+                        Err(e) => eprintln!("[gc] Project DB error: {}", e),
                     }
                 }
             }

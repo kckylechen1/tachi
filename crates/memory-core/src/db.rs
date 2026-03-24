@@ -751,7 +751,7 @@ pub fn search_fts(
     // Sanitise query: remove potentially dangerous characters
     let safe_query: String = query
         .chars()
-        .filter(|c| c.is_alphanumeric() || c.is_whitespace() || matches!(c, '"' | '\'' | '-' | '_'))
+        .filter(|c| c.is_alphanumeric() || c.is_whitespace() || matches!(c, '"' | '\'' | '-' | '_' | '.'))
         .collect();
 
     if safe_query.trim().is_empty() {
@@ -1009,10 +1009,77 @@ pub fn delete(conn: &mut Connection, id: &str, vec_available: bool) -> Result<bo
 
         // Clean up graph edges
         tx.execute("DELETE FROM memory_edges WHERE source_id = ?1 OR target_id = ?1", params![trimmed])?;
+
+        // Clean up access history (CASCADE)
+        tx.execute("DELETE FROM access_history WHERE memory_id = ?1", params![trimmed])?;
+
+        // Clean up agent known state (CASCADE)
+        tx.execute("DELETE FROM agent_known_state WHERE memory_id = ?1", params![trimmed])?;
     }
 
     tx.commit()?;
     Ok(deleted)
+}
+
+// ─── GC (Garbage Collection) ──────────────────────────────────────────────────
+
+/// Retention-based cleanup of growing tables.
+/// Returns a summary of how many rows were deleted from each table.
+pub fn gc_tables(conn: &mut Connection) -> Result<serde_json::Value, MemoryError> {
+    let tx = conn.transaction()?;
+    let now = now_utc_iso();
+
+    // 1. access_history: retain latest 256 entries per memory_id, delete rest
+    let ah_deleted: usize = tx.execute(
+        "DELETE FROM access_history WHERE rowid NOT IN (
+            SELECT rowid FROM access_history AS sub
+            WHERE sub.memory_id = access_history.memory_id
+            ORDER BY sub.accessed_at DESC
+            LIMIT 256
+        )",
+        [],
+    )?;
+
+    // 2. processed_events: delete older than 30 days
+    let pe_deleted: usize = tx.execute(
+        "DELETE FROM processed_events WHERE created_at < DATETIME(?1, '-30 days')",
+        params![now],
+    )?;
+
+    // 3. audit_log: delete older than 30 days OR keep only latest 100k
+    let al_deleted: usize = tx.execute(
+        "DELETE FROM audit_log WHERE created_at < DATETIME(?1, '-30 days')",
+        params![now],
+    )?;
+    // Also cap at 100k total
+    let al_cap_deleted: usize = tx.execute(
+        "DELETE FROM audit_log WHERE id NOT IN (
+            SELECT id FROM audit_log ORDER BY id DESC LIMIT 100000
+        )",
+        [],
+    )?;
+
+    // 4. agent_known_state: delete older than 90 days
+    let aks_deleted: usize = tx.execute(
+        "DELETE FROM agent_known_state WHERE synced_at < DATETIME(?1, '-90 days')",
+        params![now],
+    )?;
+
+    // 5. Orphaned access_history (memory was deleted but history remained)
+    let orphan_deleted: usize = tx.execute(
+        "DELETE FROM access_history WHERE memory_id NOT IN (SELECT id FROM memories)",
+        [],
+    )?;
+
+    tx.commit()?;
+
+    Ok(serde_json::json!({
+        "access_history_pruned": ah_deleted,
+        "processed_events_pruned": pe_deleted,
+        "audit_log_pruned": al_deleted + al_cap_deleted,
+        "agent_known_state_pruned": aks_deleted,
+        "orphaned_access_history": orphan_deleted,
+    }))
 }
 
 // ─── STATS ────────────────────────────────────────────────────────────────────
