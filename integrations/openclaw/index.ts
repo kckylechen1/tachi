@@ -98,7 +98,7 @@ export const memoryHybridBridgePlugin = {
       // Pull more candidates for reranking (3× topK), then rerank down to topK
       const candidates = topK * 3;
       try {
-        const { docs, scores } = store.search(
+        const { docs, scores } = await store.search(
           query,
           queryVector ?? undefined,
           {
@@ -114,7 +114,7 @@ export const memoryHybridBridgePlugin = {
       } catch (err) {
         // Fallback path: keep memory search available if vector channel fails.
         api.logger.warn(`memory-hybrid-bridge: hybrid search failed, fallback to FTS: ${String(err)}`);
-        const { docs, scores } = store.search(
+        const { docs, scores } = await store.search(
           query,
           undefined,
           {
@@ -133,7 +133,7 @@ export const memoryHybridBridgePlugin = {
       const store = await ensureStore(agentId);
       const topK = searchTopK ?? config.topK;
 
-      const { docs, scores } = store.search(
+      const { docs, scores } = await store.search(
         query,
         undefined,
         {
@@ -244,7 +244,7 @@ export const memoryHybridBridgePlugin = {
         const entryId = rawPath.replace(/^shadow-store\//, "");
         const agentId = (_context as any)?.agentId || "main";
         const store = await ensureStore(agentId);
-        const found = store.get(entryId);
+        const found = await store.get(entryId);
 
         if (!found) {
           return {
@@ -366,7 +366,7 @@ export const memoryHybridBridgePlugin = {
         if (extracted.vector && extracted.vector.length > 0) {
           let similar: Array<{ entry: MemoryEntry; similarity: number }> = [];
           try {
-            similar = store.findSimilar(extracted.vector, 1);
+            similar = await store.findSimilar(extracted.vector, 1);
           } catch (similarErr) {
             // sqlite-vec KNN can fail across vec0 versions.
             // Dedup is best-effort; don't block memory writes.
@@ -386,7 +386,7 @@ export const memoryHybridBridgePlugin = {
               if (merged) {
                 const mergedVec = await getEmbedding({ config, text: merged.text, logger: api.logger });
                 if (mergedVec) merged.vector = mergedVec;
-                store.upsert(merged);
+                await store.upsert(merged);
                 // W5 fix: audit-log in separate try/catch
                 try {
                   await appendAuditLog(audit, {
@@ -407,7 +407,7 @@ export const memoryHybridBridgePlugin = {
           }
         }
 
-        store.upsert(extracted);
+        await store.upsert(extracted);
         // W5 fix: audit-log in separate try/catch
         try {
           await appendAuditLog(audit, {

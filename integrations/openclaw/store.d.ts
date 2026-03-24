@@ -1,16 +1,20 @@
 import type { MemoryEntry } from "./config.js";
+import { type HybridScore } from "./mcp-client.js";
+type LoggerLike = {
+    info?: (message: string) => void;
+    warn?: (message: string) => void;
+};
 export declare class MemoryStore {
-    private store;
-    constructor(dbPath: string);
-    upsert(entry: MemoryEntry): void;
-    get(id: string): MemoryEntry | undefined;
-    getAll(limit: number): MemoryEntry[];
-    /**
-     * Delegates hybrid search to the Rust core.
-     * `queryVec` is passed to Rust, which merges FTS + Vec + Symbolic scores.
-     * Note: The Rust core expects the topK, pathPrefix, weights, etc. options
-     * to be passed as a JSON string to keep the NAPI boundary simple.
-     */
+    private readonly logger?;
+    private readonly napiStore;
+    private readonly mcpClient;
+    private readonly preferredBackend;
+    private mcpFailed;
+    constructor(dbPath: string, logger?: LoggerLike | undefined);
+    private withBackend;
+    upsert(entry: MemoryEntry): Promise<void>;
+    get(id: string): Promise<MemoryEntry | undefined>;
+    getAll(limit: number): Promise<MemoryEntry[]>;
     search(query: string, queryVec?: number[], opts?: {
         top_k?: number;
         candidates?: number;
@@ -22,24 +26,18 @@ export declare class MemoryStore {
             symbolic: number;
             decay: number;
         };
-    }): {
+    }): Promise<{
         docs: MemoryEntry[];
         scores: Record<string, number>;
-    };
-    /**
-     * Find entries similar to the given vector using Rust's sqlite-vec KNN.
-     * Returns entries with their raw cosine similarity (from the vector channel).
-     * Used for dedup/merge decisions — no FTS or symbolic scoring involved.
-     */
-    findSimilar(queryVec: number[], topK?: number): Array<{
+        scoreBreakdowns: Record<string, HybridScore>;
+    }>;
+    findSimilar(queryVec: number[], topK?: number): Promise<Array<{
         entry: MemoryEntry;
         similarity: number;
-    }>;
-    /**
-     * Delete a memory entry by ID (used after merge to remove the old entry).
-     * Falls back silently if the entry doesn't exist.
-     */
-    delete(id: string): void;
+    }>>;
+    delete(id: string): Promise<boolean>;
+    stats(): Promise<unknown>;
 }
 export declare function getStore(dbPath: string, legacyShadowPath?: string, logger?: any): Promise<MemoryStore>;
+export {};
 //# sourceMappingURL=store.d.ts.map
