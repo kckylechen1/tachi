@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.0] - Unreleased
+
+### Added
+
+#### Wave 7 — Agent Kanban Communication Board
+- **`post_card` Tool**: Create inter-agent kanban cards as first-class memory entries (`category="kanban"`, `path="/kanban/{from}/{to}"`) with normalized metadata (`from_agent`, `to_agent`, `status`, `priority`, `card_type`, `thread_id`).
+- **`check_inbox` Tool**: Query per-agent inbox with status/since filters, optional broadcast fan-in (`to_agent="*"`), and deterministic ordering by priority then recency.
+- **`update_card` Tool**: Update card status via revision-checked optimistic locking and append threaded replies (`metadata.replies`) without introducing new tables.
+- **Optional local classification pipeline**: Background kanban enrichment hook (`KANBAN_CLASSIFY_ENABLED`, `KANBAN_MODEL_URL`, `KANBAN_MODEL_NAME`) to tag cards with `topic`, `keywords`, and `priority_suggestion`.
+
 ## [0.8.0] - 2026-03-24
 
 ### Added
