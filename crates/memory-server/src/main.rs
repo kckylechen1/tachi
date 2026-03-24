@@ -186,6 +186,8 @@ struct MemoryServer {
     cache_misses: Arc<std::sync::atomic::AtomicU64>,
     // ─── Ghost Whispers (pub/sub) ───────────────────────────────────────────
     pubsub: Arc<StdMutex<PubSubState>>,
+    // ─── Dead Letter Queue (failed tool call auto-retry) ─────────────────
+    dead_letters: Arc<StdMutex<VecDeque<DeadLetter>>>,
 }
 
 // ─── MCP Client Connection Pool ──────────────────────────────────────────────
@@ -272,6 +274,7 @@ impl MemoryServer {
             cache_hits: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             cache_misses: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             pubsub: Arc::new(StdMutex::new(PubSubState::new())),
+            dead_letters: Arc::new(StdMutex::new(VecDeque::new())),
         })
     }
 
@@ -1033,6 +1036,87 @@ struct GhostSubscribeParams {
     topics: Vec<String>,
 }
 
+// ─── Dead Letter Queue (Failed Tool Call Auto-Retry) ─────────────────────────
+
+const DLQ_MAX_ENTRIES: usize = 200;
+const DLQ_TTL_SECS: u64 = 3600; // 1 hour
+
+#[derive(Clone)]
+struct DeadLetter {
+    id: String,
+    tool_name: String,
+    arguments: Option<serde_json::Map<String, serde_json::Value>>,
+    error: String,
+    error_category: String, // "invalid_params", "timeout", "internal", "not_found"
+    timestamp: String,
+    retry_count: u32,
+    max_retries: u32,
+    status: String, // "pending", "retrying", "resolved", "abandoned"
+}
+
+fn categorize_error(error: &str) -> String {
+    let lower = error.to_lowercase();
+    if lower.contains("not found") || lower.contains("not_found") {
+        "not_found".to_string()
+    } else if lower.contains("timeout") || lower.contains("timed out") {
+        "timeout".to_string()
+    } else if lower.contains("invalid") || lower.contains("param") {
+        "invalid_params".to_string()
+    } else {
+        "internal".to_string()
+    }
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+struct DlqListParams {
+    /// Filter by status: "pending", "retrying", "resolved", "abandoned"
+    #[serde(default)]
+    status_filter: Option<String>,
+    /// Max entries to return (default: 50)
+    #[serde(default)]
+    limit: Option<usize>,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+struct DlqRetryParams {
+    /// ID of the dead letter entry to retry
+    dead_letter_id: String,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+struct SandboxSetRuleParams {
+    /// Agent role (e.g. "code-review", "finance", "admin")
+    agent_role: String,
+    /// Path pattern to match (e.g. "/finance/*", "/project/secrets")
+    path_pattern: String,
+    /// Access level: "read", "write", or "deny"
+    #[serde(default = "default_access_level")]
+    access_level: String,
+}
+
+fn default_access_level() -> String {
+    "read".to_string()
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+struct SandboxCheckParams {
+    /// Agent role to check access for
+    agent_role: String,
+    /// Memory path to check
+    path: String,
+    /// Operation type: "read" or "write"
+    #[serde(default = "default_sandbox_operation")]
+    operation: String,
+}
+
+fn default_sandbox_operation() -> String {
+    "read".to_string()
+}
+
 #[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 struct ChainStep {
@@ -1570,6 +1654,16 @@ impl MemoryServer {
         let hits = self.cache_hits.load(std::sync::atomic::Ordering::Relaxed);
         let misses = self.cache_misses.load(std::sync::atomic::Ordering::Relaxed);
 
+        // DLQ stats
+        let (dlq_total, dlq_pending, dlq_resolved, dlq_abandoned) = {
+            let dlq = self.dead_letters.lock().unwrap_or_else(|e| e.into_inner());
+            let total = dlq.len();
+            let pending = dlq.iter().filter(|d| d.status == "pending").count();
+            let resolved = dlq.iter().filter(|d| d.status == "resolved").count();
+            let abandoned = dlq.iter().filter(|d| d.status == "abandoned").count();
+            (total, pending, resolved, abandoned)
+        };
+
         serde_json::to_string(&json!({
             "status": "running",
             "workers": if self.pipeline_enabled { "rust_async" } else { "disabled" },
@@ -1586,6 +1680,14 @@ impl MemoryServer {
                 "cache_hits": hits,
                 "cache_misses": misses,
                 "ttl_seconds": TOOL_CACHE_TTL.as_secs(),
+            },
+            "dead_letter_queue": {
+                "total": dlq_total,
+                "pending": dlq_pending,
+                "resolved": dlq_resolved,
+                "abandoned": dlq_abandoned,
+                "max_entries": DLQ_MAX_ENTRIES,
+                "ttl_seconds": DLQ_TTL_SECS,
             },
         }))
         .map_err(|e| format!("Failed to serialize response: {}", e))
@@ -2418,6 +2520,226 @@ impl MemoryServer {
         }))
         .map_err(|e| format!("serialize: {e}"))
     }
+
+    // ─── Dead Letter Queue Tools ──────────────────────────────────────────────
+
+    #[tool(description = "List dead letter queue entries (failed tool calls). Filter by status: pending, retrying, resolved, abandoned.")]
+    async fn dlq_list(
+        &self,
+        Parameters(params): Parameters<DlqListParams>,
+    ) -> Result<String, String> {
+        let limit = params.limit.unwrap_or(50).min(200);
+        let now = Utc::now();
+
+        let mut dlq = self.dead_letters.lock().unwrap_or_else(|e| e.into_inner());
+
+        // Expire old entries (> 1 hour)
+        dlq.retain(|dl| {
+            if let Ok(ts) = chrono::DateTime::parse_from_rfc3339(&dl.timestamp) {
+                (now - ts.with_timezone(&Utc)).num_seconds() < DLQ_TTL_SECS as i64
+            } else {
+                false
+            }
+        });
+
+        let entries: Vec<serde_json::Value> = dlq
+            .iter()
+            .filter(|dl| {
+                if let Some(ref filter) = params.status_filter {
+                    dl.status == *filter
+                } else {
+                    true
+                }
+            })
+            .rev() // newest first
+            .take(limit)
+            .map(|dl| {
+                json!({
+                    "id": dl.id,
+                    "tool_name": dl.tool_name,
+                    "error": dl.error,
+                    "error_category": dl.error_category,
+                    "timestamp": dl.timestamp,
+                    "retry_count": dl.retry_count,
+                    "max_retries": dl.max_retries,
+                    "status": dl.status,
+                })
+            })
+            .collect();
+
+        let total = dlq.len();
+        drop(dlq);
+
+        serde_json::to_string(&json!({
+            "total": total,
+            "returned": entries.len(),
+            "entries": entries,
+        }))
+        .map_err(|e| format!("serialize: {e}"))
+    }
+
+    #[tool(description = "Manually retry a dead letter queue entry by its ID. Re-dispatches the failed tool call.")]
+    async fn dlq_retry(
+        &self,
+        Parameters(params): Parameters<DlqRetryParams>,
+    ) -> Result<String, String> {
+        // Find and extract the dead letter entry
+        let dead_letter = {
+            let mut dlq = self.dead_letters.lock().unwrap_or_else(|e| e.into_inner());
+            let pos = dlq.iter().position(|dl| dl.id == params.dead_letter_id);
+            match pos {
+                Some(idx) => {
+                    let mut dl = dlq[idx].clone();
+                    dl.retry_count += 1;
+                    dl.status = "retrying".to_string();
+                    dlq[idx] = dl.clone();
+                    dl
+                }
+                None => {
+                    return Err(format!(
+                        "Dead letter entry '{}' not found",
+                        params.dead_letter_id
+                    ))
+                }
+            }
+        };
+
+        // Re-dispatch the tool call via tool_router
+        if !self.tool_router.has_route(&dead_letter.tool_name) {
+            // Update status to abandoned
+            let mut dlq = self.dead_letters.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(dl) = dlq.iter_mut().find(|dl| dl.id == params.dead_letter_id) {
+                dl.status = "abandoned".to_string();
+            }
+            return Err(format!(
+                "Tool '{}' not found in router, entry abandoned",
+                dead_letter.tool_name
+            ));
+        }
+
+        // Simple retry: call the tool directly using the existing internal dispatch
+        let retry_result = if self.skill_tools.lock().map(|s| s.contains_key(&dead_letter.tool_name)).unwrap_or(false) {
+            self.call_skill_tool(&dead_letter.tool_name, dead_letter.arguments.clone().map(|m| {
+                m.into_iter().collect::<rmcp::model::JsonObject>()
+            })).await
+        } else if let Some((server_name, tool_name)) = dead_letter.tool_name.split_once("__") {
+            self.proxy_call_internal(server_name, tool_name, dead_letter.arguments.clone().map(|m| {
+                m.into_iter().collect::<rmcp::model::JsonObject>()
+            })).await
+        } else {
+            Err(rmcp::ErrorData::invalid_params("Cannot retry native tools via DLQ", None))
+        };
+
+        match retry_result {
+            Ok(res) => {
+                // Mark as resolved
+                let mut dlq = self.dead_letters.lock().unwrap_or_else(|e| e.into_inner());
+                if let Some(dl) = dlq.iter_mut().find(|dl| dl.id == params.dead_letter_id) {
+                    dl.status = "resolved".to_string();
+                }
+                let text = res
+                    .content
+                    .first()
+                    .and_then(|c| {
+                        if let rmcp::model::RawContent::Text(t) = &c.raw {
+                            Some(t.text.clone())
+                        } else {
+                            None
+                        }
+                    })
+                    .unwrap_or_else(|| "ok".to_string());
+                serde_json::to_string(&json!({
+                    "status": "resolved",
+                    "dead_letter_id": params.dead_letter_id,
+                    "result": text,
+                }))
+                .map_err(|e| format!("serialize: {e}"))
+            }
+            Err(e) => {
+                // Update retry count, abandon if exhausted
+                let mut dlq = self.dead_letters.lock().unwrap_or_else(|e| e.into_inner());
+                if let Some(dl) = dlq.iter_mut().find(|dl| dl.id == params.dead_letter_id) {
+                    if dl.retry_count >= dl.max_retries {
+                        dl.status = "abandoned".to_string();
+                    } else {
+                        dl.status = "pending".to_string();
+                    }
+                    dl.error = format!("{e}");
+                }
+                Err(format!(
+                    "Retry failed for '{}': {e}",
+                    params.dead_letter_id
+                ))
+            }
+        }
+    }
+
+    // ─── Semantic Sandboxing Tools ───────────────────────────────────────────
+
+    #[tool(description = "Set a sandbox access rule for an agent role + path pattern. Controls which memories a role can access. Access levels: read, write, deny.")]
+    async fn sandbox_set_rule(
+        &self,
+        Parameters(params): Parameters<SandboxSetRuleParams>,
+    ) -> Result<String, String> {
+        // Validate access_level
+        if !["read", "write", "deny"].contains(&params.access_level.as_str()) {
+            return Err(format!(
+                "Invalid access_level '{}'. Must be: read, write, deny",
+                params.access_level
+            ));
+        }
+
+        // Write to global DB (sandbox rules are global)
+        self.with_global_store(|store| {
+            memory_core::db::set_sandbox_rule(
+                store.connection(),
+                &params.agent_role,
+                &params.path_pattern,
+                &params.access_level,
+            )
+            .map_err(|e| format!("Failed to set sandbox rule: {e}"))
+        })?;
+
+        serde_json::to_string(&json!({
+            "status": "ok",
+            "agent_role": params.agent_role,
+            "path_pattern": params.path_pattern,
+            "access_level": params.access_level,
+        }))
+        .map_err(|e| format!("serialize: {e}"))
+    }
+
+    #[tool(description = "Check if an agent role can access a given path for a specific operation. Advisory mode — not enforced in search_memory yet (TODO: future enforcement integration).")]
+    async fn sandbox_check(
+        &self,
+        Parameters(params): Parameters<SandboxCheckParams>,
+    ) -> Result<String, String> {
+        if !["read", "write"].contains(&params.operation.as_str()) {
+            return Err(format!(
+                "Invalid operation '{}'. Must be: read, write",
+                params.operation
+            ));
+        }
+
+        let (allowed, matching_rule) = self.with_global_store(|store| {
+            memory_core::db::check_sandbox_access(
+                store.connection(),
+                &params.agent_role,
+                &params.path,
+                &params.operation,
+            )
+            .map_err(|e| format!("Failed to check sandbox access: {e}"))
+        })?;
+
+        serde_json::to_string(&json!({
+            "agent_role": params.agent_role,
+            "path": params.path,
+            "operation": params.operation,
+            "allowed": allowed,
+            "matching_rule": matching_rule,
+        }))
+        .map_err(|e| format!("serialize: {e}"))
+    }
 }
 
 impl MemoryServer {
@@ -2774,6 +3096,10 @@ impl ServerHandler for MemoryServer {
             };
 
             // ─── Dispatch to handler ─────────────────────────────────────
+            // Save tool name and arguments for DLQ capture on failure
+            let tool_name_owned = name.to_string();
+            let tool_args_for_dlq = params.arguments.clone();
+
             let result = {
                 // 1. Native tools first (highest priority)
                 if self.tool_router.has_route(name) {
@@ -2798,6 +3124,99 @@ impl ServerHandler for MemoryServer {
                     Err(rmcp::ErrorData::invalid_params("tool not found", None))
                 }
             };
+
+            // ─── Dead Letter Queue: capture failures ─────────────────────
+            // Skip DLQ for DLQ tools themselves and ghost_* tools
+            let is_dlq_exempt = tool_name_owned.starts_with("dlq_")
+                || tool_name_owned.starts_with("ghost_")
+                || tool_name_owned == "get_pipeline_status";
+
+            if let Err(ref err) = result {
+                if !is_dlq_exempt {
+                    let error_str = format!("{}", err);
+                    let category = categorize_error(&error_str);
+                    let should_auto_retry =
+                        category == "timeout" || category == "internal";
+
+                    let dl = DeadLetter {
+                        id: uuid::Uuid::new_v4().to_string(),
+                        tool_name: tool_name_owned.clone(),
+                        arguments: tool_args_for_dlq.clone(),
+                        error: error_str.clone(),
+                        error_category: category.clone(),
+                        timestamp: Utc::now().to_rfc3339(),
+                        retry_count: 0,
+                        max_retries: if should_auto_retry { 1 } else { 3 },
+                        status: "pending".to_string(),
+                    };
+
+                    let dl_id = dl.id.clone();
+                    {
+                        let mut dlq =
+                            self.dead_letters.lock().unwrap_or_else(|e| e.into_inner());
+                        dlq.push_back(dl);
+                        // Enforce ring buffer max
+                        while dlq.len() > DLQ_MAX_ENTRIES {
+                            dlq.pop_front();
+                        }
+                    }
+
+                    // Auto-retry once for timeout/internal errors
+                    if should_auto_retry {
+                        // Brief delay before retry
+                        tokio::time::sleep(Duration::from_millis(100)).await;
+
+                        // Simple retry via internal dispatch (avoid non-exhaustive struct construction)
+                        let retry_result: Result<rmcp::model::CallToolResult, rmcp::ErrorData> = if self.skill_tools.lock().map(|s| s.contains_key(&tool_name_owned)).unwrap_or(false) {
+                            let args_obj = tool_args_for_dlq.map(|m| m.into_iter().collect::<rmcp::model::JsonObject>());
+                            self.call_skill_tool(&tool_name_owned, args_obj).await
+                        } else if let Some((sn, tn)) = tool_name_owned.split_once("__") {
+                            let args_obj = tool_args_for_dlq.map(|m| m.into_iter().collect::<rmcp::model::JsonObject>());
+                            self.proxy_call_internal(sn, tn, args_obj).await
+                        } else {
+                            Err(rmcp::ErrorData { code: rmcp::model::ErrorCode(0), message: "no retry path".into(), data: None })
+                        };
+
+                        {
+                            let mut dlq = self
+                                .dead_letters
+                                .lock()
+                                .unwrap_or_else(|e| e.into_inner());
+                            if let Some(dl) =
+                                dlq.iter_mut().find(|dl| dl.id == dl_id)
+                            {
+                                dl.retry_count = 1;
+                                if retry_result.is_ok() {
+                                    dl.status = "resolved".to_string();
+                                } else {
+                                    dl.status = "abandoned".to_string();
+                                    if let Err(ref e) = retry_result {
+                                        dl.error = format!("{e}");
+                                    }
+                                }
+                            }
+                        }
+
+                        if retry_result.is_ok() {
+                            // Cache the retry result if applicable
+                            if let (Some(key), Ok(ref res)) =
+                                (&cache_key, &retry_result)
+                            {
+                                if let Ok(mut cache) = self.tool_cache.lock() {
+                                    cache.insert(
+                                        key.clone(),
+                                        CachedResult {
+                                            result: res.clone(),
+                                            created_at: Instant::now(),
+                                        },
+                                    );
+                                }
+                            }
+                            return retry_result;
+                        }
+                    }
+                }
+            }
 
             // ─── Phantom Tools: store result in cache ────────────────────
             if let (Some(key), Ok(ref res)) = (&cache_key, &result) {

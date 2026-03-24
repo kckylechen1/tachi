@@ -169,6 +169,16 @@ pub fn init_schema(conn: &Connection) -> Result<(), MemoryError> {
             PRIMARY KEY (agent_id, memory_id)
         );
         CREATE INDEX IF NOT EXISTS idx_agent_known_agent ON agent_known_state(agent_id);
+
+        -- Sandbox rules for role-based memory isolation (Semantic Sandboxing)
+        CREATE TABLE IF NOT EXISTS sandbox_rules (
+            agent_role   TEXT NOT NULL,
+            path_pattern TEXT NOT NULL,
+            access_level TEXT NOT NULL DEFAULT 'read',
+            created_at   TEXT NOT NULL,
+            PRIMARY KEY (agent_role, path_pattern)
+        );
+        CREATE INDEX IF NOT EXISTS idx_sandbox_role ON sandbox_rules(agent_role);
     "#)?;
 
     // Forward-compatible migrations for existing DB files created before
@@ -1705,6 +1715,103 @@ pub fn update_agent_known_state(
     }
     tx.commit()?;
     Ok(())
+}
+
+// ─── Semantic Sandboxing (Role-Based Memory Isolation) ───────────────────────
+
+/// Set (upsert) a sandbox access rule for a given agent role and path pattern.
+pub fn set_sandbox_rule(
+    conn: &Connection,
+    agent_role: &str,
+    path_pattern: &str,
+    access_level: &str,
+) -> Result<(), MemoryError> {
+    let now = now_utc_iso();
+    conn.execute(
+        "INSERT INTO sandbox_rules (agent_role, path_pattern, access_level, created_at)
+         VALUES (?1, ?2, ?3, ?4)
+         ON CONFLICT(agent_role, path_pattern) DO UPDATE SET
+             access_level = excluded.access_level,
+             created_at = excluded.created_at",
+        params![agent_role, path_pattern, access_level, &now],
+    )?;
+    Ok(())
+}
+
+/// Check if an agent role can access a given path for a specific operation.
+/// Returns (allowed, matching_rule_description).
+/// Logic: find the most specific path_pattern matching the given path.
+/// "deny" overrides everything. Default = allow if no rule matches.
+pub fn check_sandbox_access(
+    conn: &Connection,
+    agent_role: &str,
+    path: &str,
+    operation: &str,
+) -> Result<(bool, Option<String>), MemoryError> {
+    // Fetch all rules for this role
+    let mut stmt = conn.prepare(
+        "SELECT path_pattern, access_level FROM sandbox_rules WHERE agent_role = ?1"
+    )?;
+    let rows = stmt.query_map(params![agent_role], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+    })?;
+
+    let mut best_match: Option<(String, String, usize)> = None; // (pattern, access_level, specificity)
+
+    for row in rows {
+        let (pattern, access_level) = row?;
+        if path_matches_pattern(path, &pattern) {
+            let specificity = pattern.len();
+            let is_better = match &best_match {
+                None => true,
+                Some((_, _, best_spec)) => specificity > *best_spec,
+            };
+            if is_better {
+                best_match = Some((pattern, access_level, specificity));
+            }
+        }
+    }
+
+    match best_match {
+        None => {
+            // No rule matches — default: allow
+            Ok((true, None))
+        }
+        Some((pattern, access_level, _)) => {
+            let rule_desc = format!("{}:{} -> {}", agent_role, pattern, access_level);
+            if access_level == "deny" {
+                Ok((false, Some(rule_desc)))
+            } else if operation == "write" && access_level == "read" {
+                // Read-only rule blocks writes
+                Ok((false, Some(rule_desc)))
+            } else {
+                // "read" allows read, "write" allows both read and write
+                Ok((true, Some(rule_desc)))
+            }
+        }
+    }
+}
+
+/// Simple path pattern matching.
+/// Supports:
+/// - Exact match: "/finance/reports" matches "/finance/reports"
+/// - Wildcard suffix: "/finance/*" matches "/finance/anything"
+/// - Prefix match: "/finance" matches "/finance" and "/finance/sub"
+fn path_matches_pattern(path: &str, pattern: &str) -> bool {
+    if pattern == "*" || pattern == "/*" {
+        return true;
+    }
+    if let Some(prefix) = pattern.strip_suffix("/*") {
+        // Wildcard: matches prefix and any sub-paths
+        path == prefix || path.starts_with(&format!("{}/", prefix))
+    } else if pattern.ends_with('*') {
+        // Glob-style: "/foo*" matches anything starting with "/foo"
+        let prefix = &pattern[..pattern.len() - 1];
+        path.starts_with(prefix)
+    } else {
+        // Exact match or prefix match
+        path == pattern || path.starts_with(&format!("{}/", pattern))
+    }
 }
 
 #[cfg(test)]
