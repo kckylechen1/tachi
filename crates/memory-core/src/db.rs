@@ -518,6 +518,25 @@ pub fn mark_event_processed(
     Ok(())
 }
 
+/// Atomically try to claim an event for processing.
+/// Uses INSERT OR IGNORE: if the row didn't exist, it's inserted and we return true (claimed).
+/// If the row already existed, nothing happens and we return false (already processed).
+/// This fixes the TOCTOU race in the old check-then-mark pattern.
+pub fn try_claim_event(
+    conn: &Connection,
+    event_hash: &str,
+    event_id: &str,
+    worker: &str,
+) -> Result<bool, MemoryError> {
+    let now = now_utc_iso();
+    let rows_changed = conn.execute(
+        "INSERT OR IGNORE INTO processed_events (event_hash, event_id, worker, created_at) VALUES (?1, ?2, ?3, ?4)",
+        params![event_hash, event_id, worker, now],
+    )?;
+    Ok(rows_changed > 0)
+}
+
+
 /// Update a memory row only when its revision matches `expected_revision`.
 /// Returns `Ok(true)` when updated, `Ok(false)` on revision mismatch.
 pub fn update_with_revision(

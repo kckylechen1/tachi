@@ -7,6 +7,7 @@ mod llm;
 mod prompts;
 
 use chrono::Utc;
+use clap::Parser;
 use memory_core::{HubCapability, MemoryEntry, MemoryStore, SearchOptions};
 use rmcp::{
     model::{ServerCapabilities, ServerInfo},
@@ -19,15 +20,27 @@ use rmcp::{
 };
 use serde::Deserialize;
 use serde_json::{json, Value};
-use std::collections::hash_map::DefaultHasher;
 use std::collections::{HashMap, HashSet};
 use std::future::Future;
-use std::hash::{Hash, Hasher};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
 use std::time::{Duration, Instant};
 use tokio::io::{stdin, stdout};
+
+// ─── CLI Arguments ────────────────────────────────────────────────────────────
+
+#[derive(Parser, Debug)]
+#[command(name = "tachi", version, about = "Tachi — memory + Hub MCP server")]
+struct Cli {
+    /// Run as HTTP daemon instead of stdio transport
+    #[arg(long)]
+    daemon: bool,
+
+    /// Port for HTTP daemon (default: 6919)
+    #[arg(long, default_value_t = 6919)]
+    port: u16,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DbScope {
@@ -914,15 +927,9 @@ impl MemoryServer {
         let requested_scope = params.scope.clone();
         let (target_db, warning) = self.resolve_write_scope(&requested_scope);
 
-        // Generate L0 summary if not provided (async LLM work before DB open)
-        let summary = if params.summary.is_empty() {
-            self.llm.generate_summary(&params.text).await?
-        } else {
-            params.summary
-        };
-
-        // Generate embedding (async LLM work before DB open)
-        let vector = self.llm.embed_voyage(&params.text, "document").await.ok();
+        // Use caller-provided summary or leave empty for background enrichment
+        let summary = params.summary;
+        let needs_summary = summary.is_empty();
 
         let entry = MemoryEntry {
             id: id.clone(),
@@ -930,7 +937,7 @@ impl MemoryServer {
             summary,
             text: params.text,
             importance: params.importance,
-            timestamp,
+            timestamp: timestamp.clone(),
             category: params.category,
             topic: params.topic,
             keywords: params.keywords,
@@ -944,19 +951,54 @@ impl MemoryServer {
             last_access: None,
             revision: 1,
             metadata: serde_json::json!({}),
-            vector,
+            vector: None,
         };
 
+        // Write immediately with empty summary/vector
         self.with_store_for_scope(target_db, |store| {
             store
                 .upsert(&entry)
                 .map_err(|e| format!("Failed to save memory: {}", e))
         })?;
 
+        // Spawn background enrichment (embedding + summary)
+        let server = self.clone();
+        let enrich_id = id.clone();
+        let enrich_text = entry.text.clone();
+        tokio::spawn(async move {
+            let mut enriched_entry = entry;
+
+            // Generate embedding
+            match server.llm.embed_voyage(&enrich_text, "document").await {
+                Ok(vec) => enriched_entry.vector = Some(vec),
+                Err(e) => eprintln!("[enrichment] embedding failed for {enrich_id}: {e}"),
+            }
+
+            // Generate summary if not provided
+            if needs_summary {
+                match server.llm.generate_summary(&enrich_text).await {
+                    Ok(s) => enriched_entry.summary = s,
+                    Err(e) => eprintln!("[enrichment] summary failed for {enrich_id}: {e}"),
+                }
+            }
+
+            // Update entry with enriched data
+            if let Err(e) = server.with_store_for_scope(target_db, |store| {
+                store
+                    .upsert(&enriched_entry)
+                    .map_err(|e| format!("Failed to update enriched entry: {e}"))
+            }) {
+                eprintln!("[enrichment] DB update failed for {enrich_id}: {e}");
+            } else {
+                eprintln!("[enrichment] completed for {enrich_id}");
+            }
+        });
+
         let mut response = serde_json::Map::new();
         response.insert("id".into(), json!(id));
-        response.insert("timestamp".into(), json!(entry.timestamp));
+        response.insert("timestamp".into(), json!(timestamp));
         response.insert("db".into(), json!(target_db.as_str()));
+        response.insert("status".into(), json!("saved (enrichment pending)"));
         if let Some(warning) = warning {
             response.insert("warning".into(), json!(warning));
         }
@@ -1241,41 +1283,51 @@ impl MemoryServer {
 
     #[tool(description = "Extract structured facts from text using LLM and save to memory.")]
     async fn extract_facts(&self, Parameters(params): Parameters<ExtractFactsParams>) -> Result<String, String> {
-        // Do async LLM work before opening DB
-        let facts = self.llm.extract_facts(&params.text).await?;
-        if facts.is_empty() {
-            return Ok("No facts extracted.".to_string());
-        }
-
         let (target_db, _warning) = self.resolve_write_scope("project");
 
-        self.with_store_for_scope(target_db, |store| {
-            let mut saved = 0;
-
-            for fact in &facts {
-                let Some(entry) = fact_to_entry(
-                    fact,
-                    "extraction",
-                    serde_json::json!({"source": params.source}),
-                ) else {
-                    continue;
-                };
-
-                if store.upsert(&entry).is_ok() {
-                    saved += 1;
+        // Spawn LLM extraction in background
+        let server = self.clone();
+        let text = params.text.clone();
+        let source = params.source.clone();
+        tokio::spawn(async move {
+            match server.llm.extract_facts(&text).await {
+                Ok(facts) if facts.is_empty() => {
+                    eprintln!("[extract_facts] no facts extracted");
                 }
+                Ok(facts) => {
+                    let count = facts.len();
+                    let saved = server.with_store_for_scope(target_db, |store| {
+                        let mut saved = 0;
+                        for fact in &facts {
+                            let Some(entry) = fact_to_entry(
+                                fact,
+                                "extraction",
+                                serde_json::json!({"source": source}),
+                            ) else {
+                                continue;
+                            };
+                            if store.upsert(&entry).is_ok() {
+                                saved += 1;
+                            }
+                        }
+                        Ok(saved)
+                    });
+                    match saved {
+                        Ok(n) => eprintln!("[extract_facts] saved {n}/{count} facts"),
+                        Err(e) => eprintln!("[extract_facts] DB write failed: {e}"),
+                    }
+                }
+                Err(e) => eprintln!("[extract_facts] LLM extraction failed: {e}"),
             }
+        });
 
-            Ok(format!("Extracted and saved {} facts from text.", saved))
-        })
+        Ok("extraction queued".to_string())
     }
 
     #[tool(description = "Ingest a conversation event and extract facts from messages.")]
     async fn ingest_event(&self, Parameters(params): Parameters<IngestEventParams>) -> Result<String, String> {
-        let mut hasher = DefaultHasher::new();
-        params.conversation_id.hash(&mut hasher);
-        params.turn_id.hash(&mut hasher);
-        let event_hash = format!("{:x}", hasher.finish());
+        // Stable hash: deterministic key from conversation+turn IDs (no DefaultHasher)
+        let event_hash = stable_hash(&format!("{}:{}", params.conversation_id, params.turn_id));
         let (target_db, _warning) = self.resolve_write_scope("project");
 
         // Concatenate message contents for fact extraction
@@ -1290,56 +1342,57 @@ impl MemoryServer {
             return Ok("No content to process.".to_string());
         }
 
-        // Check dedup with per-request DB open
-        let already_processed = self.with_store_for_scope(target_db, |store| {
+        // Atomic dedup: try to claim the event first via INSERT OR IGNORE.
+        // If another concurrent call already claimed it, we skip.
+        let claimed = self.with_store_for_scope(target_db, |store| {
             store
-                .is_event_processed(&event_hash, "ingest")
-                .map_err(|e| format!("Failed to check event dedup: {e}"))
+                .try_claim_event(&event_hash, &format!("{}:{}", params.conversation_id, params.turn_id), "ingest")
+                .map_err(|e| format!("Failed to claim event: {e}"))
         })?;
-        if already_processed {
+        if !claimed {
             return Ok(format!("Event already processed (hash: {})", event_hash));
         }
 
-        // Do async LLM work before opening DB for writes
-        let facts = self.llm.extract_facts(&combined_text).await?;
-        let mut saved = 0;
-
-        self.with_store_for_scope(target_db, |store| {
-            if !facts.is_empty() {
-                for fact in &facts {
-                    let Some(entry) = fact_to_entry(
-                        fact,
-                        &format!("conversation:{}", params.conversation_id),
-                        serde_json::json!({
-                            "conversation_id": params.conversation_id,
-                            "turn_id": params.turn_id,
-                        }),
-                    ) else {
-                        continue;
-                    };
-
-                    if store.upsert(&entry).is_ok() {
-                        saved += 1;
+        // Spawn LLM fact extraction in background
+        let server = self.clone();
+        let conversation_id = params.conversation_id.clone();
+        let turn_id = params.turn_id.clone();
+        tokio::spawn(async move {
+            match server.llm.extract_facts(&combined_text).await {
+                Ok(facts) if facts.is_empty() => {
+                    eprintln!("[ingest_event] no facts extracted from {conversation_id}:{turn_id}");
+                }
+                Ok(facts) => {
+                    let count = facts.len();
+                    let saved = server.with_store_for_scope(target_db, |store| {
+                        let mut saved = 0;
+                        for fact in &facts {
+                            let Some(entry) = fact_to_entry(
+                                fact,
+                                &format!("conversation:{conversation_id}"),
+                                serde_json::json!({
+                                    "conversation_id": conversation_id,
+                                    "turn_id": turn_id,
+                                }),
+                            ) else {
+                                continue;
+                            };
+                            if store.upsert(&entry).is_ok() {
+                                saved += 1;
+                            }
+                        }
+                        Ok(saved)
+                    });
+                    match saved {
+                        Ok(n) => eprintln!("[ingest_event] saved {n}/{count} facts for {conversation_id}:{turn_id}"),
+                        Err(e) => eprintln!("[ingest_event] DB write failed: {e}"),
                     }
                 }
+                Err(e) => eprintln!("[ingest_event] LLM extraction failed for {conversation_id}:{turn_id}: {e}"),
             }
+        });
 
-            store
-                .mark_event_processed(
-                    &event_hash,
-                    &format!("{}:{}", params.conversation_id, params.turn_id),
-                    "ingest",
-                )
-                .map_err(|e| format!("Failed to mark event processed: {e}"))?;
-
-            Ok(())
-        })?;
-
-        if facts.is_empty() {
-            Ok("No facts extracted from event.".to_string())
-        } else {
-            Ok(format!("Ingested event: extracted and saved {} facts.", saved))
-        }
+        Ok(format!("event claimed, processing in background (hash: {})", event_hash))
     }
 
     #[tool(description = "Get pipeline status and statistics.")]
@@ -2152,11 +2205,7 @@ impl MemoryServer {
         let success = final_result.is_ok();
         let error_kind = final_result.as_ref().err().map(|e| format!("{e}"));
         let timestamp = Utc::now().to_rfc3339();
-        let args_hash = format!("{:x}", {
-            let mut h = DefaultHasher::new();
-            format!("{:?}", arguments).hash(&mut h);
-            h.finish()
-        });
+        let args_hash = stable_hash(&format!("{:?}", arguments));
         let _ = self.with_global_store(|store| {
             store.audit_log_insert(
                 &timestamp, server_name, tool_name, &args_hash,
@@ -2267,19 +2316,15 @@ impl ServerHandler for MemoryServer {
 // ─── Main ────────────────────────────────────────────────────────────────────────
 
 fn main() {
-    let args: Vec<String> = std::env::args().collect();
-    if args.iter().any(|a| a == "--version" || a == "-V") {
-        println!("tachi {}", env!("CARGO_PKG_VERSION"));
-        std::process::exit(0);
-    }
-    if let Err(e) = tokio_main() {
+    let cli = Cli::parse();
+    if let Err(e) = tokio_main(cli) {
         eprintln!("Fatal: {e}");
         std::process::exit(1);
     }
 }
 
 #[tokio::main]
-async fn tokio_main() -> Result<(), Box<dyn std::error::Error>> {
+async fn tokio_main(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     // Load config from dotenv files (same as before)
     let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
     let expand_user_path = |raw: &str| {
@@ -2473,9 +2518,9 @@ async fn tokio_main() -> Result<(), Box<dyn std::error::Error>> {
         eprintln!("Pipeline workers: DISABLED (set ENABLE_PIPELINE=true to enable)");
     }
 
-    let transport = (stdin(), stdout());
 
-    eprintln!("Starting Memory MCP Server v{}", env!("CARGO_PKG_VERSION"));
+    eprintln!("Starting Tachi MCP Server v{}", env!("CARGO_PKG_VERSION"));
+    eprintln!("Transport: {}", if cli.daemon { format!("HTTP daemon on port {}", cli.port) } else { "stdio".to_string() });
     eprintln!("Global DB: {}", global_db_path.display());
     if let Some(ref p) = project_db_path {
         eprintln!("Project DB: {}", p.display());
@@ -2486,12 +2531,80 @@ async fn tokio_main() -> Result<(), Box<dyn std::error::Error>> {
         "Vector search: global={}, project={}",
         server.global_vec_available, server.project_vec_available
     );
-    eprintln!("Tools: save_memory, search_memory, get_memory, list_memories, memory_stats, set_state, get_state, extract_facts, ingest_event, get_pipeline_status, hub_register, hub_discover, hub_get, hub_feedback, hub_stats, hub_call, run_skill");
 
-    let running = rmcp::service::serve_server(server, transport).await?;
-    let quit_reason = running.waiting().await?;
+    if cli.daemon {
+        // ── HTTP daemon mode ───────────────────────────────────���─────────
+        // TODO: In daemon mode we only use the global DB since there is no
+        //       single project context. Per-session project DB routing will
+        //       require a session-aware factory that resolves the project path
+        //       from a request header or query parameter.
 
-    eprintln!("Memory MCP Server stopped: {:?}", quit_reason);
+        use rmcp::transport::streamable_http_server::{
+            StreamableHttpServerConfig, StreamableHttpService,
+            session::local::LocalSessionManager,
+        };
+        use tokio_util::sync::CancellationToken;
+
+        let ct = CancellationToken::new();
+        let ct_shutdown = ct.clone();
+        let port = cli.port;
+
+        let service = StreamableHttpService::new(
+            move || Ok(server.clone()),
+            Arc::new(LocalSessionManager::default()),
+            StreamableHttpServerConfig {
+                stateful_mode: true,
+                cancellation_token: ct.child_token(),
+                ..Default::default()
+            },
+        );
+
+        let router = axum::Router::new().nest_service("/mcp", service);
+        let bind_addr = format!("127.0.0.1:{port}");
+        let listener = tokio::net::TcpListener::bind(&bind_addr).await?;
+
+        eprintln!("Tachi daemon listening on http://{bind_addr}");
+
+        tokio::select! {
+            result = axum::serve(listener, router)
+                .with_graceful_shutdown(async move { ct_shutdown.cancelled_owned().await }) => {
+                if let Err(e) = result {
+                    eprintln!("HTTP server error: {e}");
+                }
+            }
+            _ = tokio::signal::ctrl_c() => {
+                eprintln!("Received SIGINT, shutting down gracefully...");
+                ct.cancel();
+            }
+        }
+    } else {
+        // ── stdio mode (default) ─────────────────────────────────────────
+        let transport = (stdin(), stdout());
+        let running = rmcp::service::serve_server(server, transport).await?;
+
+        // Graceful shutdown: wait for either MCP quit or SIGINT/SIGTERM
+        tokio::select! {
+            quit_reason = running.waiting() => {
+                eprintln!("Memory MCP Server stopped: {:?}", quit_reason);
+            }
+            _ = tokio::signal::ctrl_c() => {
+                eprintln!("Received SIGINT, shutting down gracefully...");
+            }
+        }
+    }
 
     Ok(())
+}
+
+/// Stable hash function (FNV-1a). Deterministic across Rust toolchain versions,
+/// unlike DefaultHasher which uses SipHash with randomized keys.
+fn stable_hash(input: &str) -> String {
+    const FNV_OFFSET: u64 = 0xcbf29ce484222325;
+    const FNV_PRIME: u64 = 0x100000001b3;
+    let mut hash = FNV_OFFSET;
+    for byte in input.as_bytes() {
+        hash ^= *byte as u64;
+        hash = hash.wrapping_mul(FNV_PRIME);
+    }
+    format!("{:016x}", hash)
 }

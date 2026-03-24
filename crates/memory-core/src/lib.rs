@@ -69,6 +69,12 @@ impl MemoryStore {
         db::mark_event_processed(&self.conn, event_hash, event_id, worker)
     }
 
+    /// Atomically try to claim an event for processing.
+    /// Returns true if claimed (first processor), false if already processed.
+    pub fn try_claim_event(&self, event_hash: &str, event_id: &str, worker: &str) -> Result<bool, MemoryError> {
+        db::try_claim_event(&self.conn, event_hash, event_id, worker)
+    }
+
     /// Revision-checked update used for optimistic locking in merge flows.
     pub fn update_with_revision(
         &mut self,
