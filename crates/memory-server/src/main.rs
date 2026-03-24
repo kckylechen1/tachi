@@ -123,6 +123,46 @@ fn slim_l0_rule(rule: &MemoryEntry, db: DbScope) -> serde_json::Value {
 
 // ─── Server State ─────────────────────────────────────────────────────────────
 
+/// TTL for cached tool results (Phantom Tools)
+const TOOL_CACHE_TTL: Duration = Duration::from_secs(30);
+
+/// Tools whose results can be cached (read-only, no side effects)
+const CACHEABLE_TOOLS: &[&str] = &[
+    "search_memory",
+    "get_memory",
+    "list_memories",
+    "memory_stats",
+    "get_state",
+    "hub_discover",
+    "hub_get",
+    "hub_stats",
+    "get_pipeline_status",
+];
+
+/// Tools that invalidate the cache (write operations)
+const CACHE_INVALIDATING_TOOLS: &[&str] = &[
+    "save_memory",
+    "extract_facts",
+    "ingest_event",
+    "set_state",
+    "hub_register",
+    "hub_feedback",
+];
+
+struct CachedResult {
+    result: rmcp::model::CallToolResult,
+    created_at: Instant,
+}
+
+impl Clone for CachedResult {
+    fn clone(&self) -> Self {
+        Self {
+            result: self.result.clone(),
+            created_at: self.created_at,
+        }
+    }
+}
+
 #[derive(Clone)]
 #[allow(dead_code)]
 struct MemoryServer {
@@ -140,6 +180,10 @@ struct MemoryServer {
     skill_tool_defs: Arc<StdMutex<HashMap<String, rmcp::model::Tool>>>,
     pool: Arc<McpClientPool>,
     tool_router: ToolRouter<Self>,
+    // ─── Phantom Tools (result caching) ──────────────────────────────────────
+    tool_cache: Arc<StdMutex<HashMap<String, CachedResult>>>,
+    cache_hits: Arc<std::sync::atomic::AtomicU64>,
+    cache_misses: Arc<std::sync::atomic::AtomicU64>,
 }
 
 // ─── MCP Client Connection Pool ──────────────────────────────────────────────
@@ -222,6 +266,9 @@ impl MemoryServer {
             skill_tool_defs: Arc::new(StdMutex::new(HashMap::new())),
             pool: Arc::new(McpClientPool::new()),
             tool_router: Self::tool_router(),
+            tool_cache: Arc::new(StdMutex::new(HashMap::new())),
+            cache_hits: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            cache_misses: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         })
     }
 
@@ -913,6 +960,24 @@ fn default_audit_limit() -> usize {
     50
 }
 
+#[allow(dead_code)]
+fn default_sync_limit() -> usize {
+    100
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+struct SyncMemoriesParams {
+    /// Unique agent identifier for tracking known state
+    agent_id: String,
+    /// Optional path prefix to scope the sync (e.g. "/project")
+    #[serde(default)]
+    path_prefix: Option<String>,
+    /// Maximum entries to return (default: 100)
+    #[serde(default = "default_sync_limit")]
+    limit: usize,
+}
+
 // ─── Tool Implementations ────────────────────────────────────────────────────────
 
 #[tool_router]
@@ -1427,6 +1492,10 @@ impl MemoryServer {
             }
         }
 
+        let cache_size = self.tool_cache.lock().unwrap_or_else(|e| e.into_inner()).len();
+        let hits = self.cache_hits.load(std::sync::atomic::Ordering::Relaxed);
+        let misses = self.cache_misses.load(std::sync::atomic::Ordering::Relaxed);
+
         serde_json::to_string(&json!({
             "status": "running",
             "workers": if self.pipeline_enabled { "rust_async" } else { "disabled" },
@@ -1438,8 +1507,123 @@ impl MemoryServer {
                 "project": self.project_vec_available,
             },
             "pipeline_enabled": self.pipeline_enabled,
+            "phantom_tools": {
+                "cache_size": cache_size,
+                "cache_hits": hits,
+                "cache_misses": misses,
+                "ttl_seconds": TOOL_CACHE_TTL.as_secs(),
+            },
         }))
         .map_err(|e| format!("Failed to serialize response: {}", e))
+    }
+
+    #[tool(description = "Get only new or changed memories since last sync for this agent. Returns incremental diff to save tokens. Use agent_id to identify your agent uniquely.")]
+    async fn sync_memories(
+        &self,
+        Parameters(params): Parameters<SyncMemoriesParams>,
+    ) -> Result<String, String> {
+        let path_prefix = params.path_prefix.as_deref().unwrap_or("/");
+        let limit = params.limit.min(500);
+
+        // Collect all memories under path_prefix from both DBs
+        let mut all_entries: Vec<(MemoryEntry, DbScope)> = Vec::new();
+
+        let global_entries = self.with_global_store(|store| {
+            store
+                .list_by_path(path_prefix, limit, false)
+                .map_err(|e| format!("Failed to list global memories: {}", e))
+        })?;
+        all_entries.extend(global_entries.into_iter().map(|e| (e, DbScope::Global)));
+
+        if self.project_db_path.is_some() {
+            let project_entries = self.with_project_store(|store| {
+                store
+                    .list_by_path(path_prefix, limit, false)
+                    .map_err(|e| format!("Failed to list project memories: {}", e))
+            })?;
+            all_entries.extend(project_entries.into_iter().map(|e| (e, DbScope::Project)));
+        }
+
+        // Sort by timestamp descending and truncate
+        all_entries.sort_by(|a, b| b.0.timestamp.cmp(&a.0.timestamp));
+        all_entries.truncate(limit);
+
+        if all_entries.is_empty() {
+            return serde_json::to_string(&json!({
+                "agent_id": params.agent_id,
+                "new_count": 0,
+                "changed_count": 0,
+                "entries": [],
+            }))
+            .map_err(|e| format!("Failed to serialize: {}", e));
+        }
+
+        // Get memory IDs for lookup
+        let memory_ids: Vec<String> = all_entries.iter().map(|(e, _)| e.id.clone()).collect();
+
+        // Look up known revisions for this agent (check global DB — that's where sync state lives)
+        let known_revisions = self.with_global_store(|store| {
+            store
+                .get_agent_known_revisions(&params.agent_id, &memory_ids)
+                .map_err(|e| format!("Failed to get known revisions: {}", e))
+        })?;
+
+        // Compute diff: new or changed entries
+        let mut diff_entries: Vec<serde_json::Value> = Vec::new();
+        let mut sync_updates: Vec<(String, i64)> = Vec::new();
+        let mut new_count = 0u64;
+        let mut changed_count = 0u64;
+
+        for (entry, db_scope) in &all_entries {
+            let current_rev = entry.revision;
+            match known_revisions.get(&entry.id) {
+                None => {
+                    // New entry — agent hasn't seen it before
+                    let mut obj = match slim_entry(entry, *db_scope) {
+                        serde_json::Value::Object(m) => m,
+                        _ => serde_json::Map::new(),
+                    };
+                    obj.insert("diff_type".into(), json!("new"));
+                    diff_entries.push(serde_json::Value::Object(obj));
+                    sync_updates.push((entry.id.clone(), current_rev));
+                    new_count += 1;
+                }
+                Some(&known_rev) if current_rev > known_rev => {
+                    // Changed entry — revision bumped since last sync
+                    let mut obj = match slim_entry(entry, *db_scope) {
+                        serde_json::Value::Object(m) => m,
+                        _ => serde_json::Map::new(),
+                    };
+                    obj.insert("diff_type".into(), json!("changed"));
+                    obj.insert("prev_revision".into(), json!(known_rev));
+                    diff_entries.push(serde_json::Value::Object(obj));
+                    sync_updates.push((entry.id.clone(), current_rev));
+                    changed_count += 1;
+                }
+                _ => {
+                    // Unchanged — still update synced_at timestamp
+                    sync_updates.push((entry.id.clone(), current_rev));
+                }
+            }
+        }
+
+        // Update agent known state in global DB
+        if !sync_updates.is_empty() {
+            let _ = self.with_global_store(|store| {
+                store
+                    .update_agent_known_state(&params.agent_id, &sync_updates)
+                    .map_err(|e| format!("Failed to update agent state: {}", e))
+            });
+        }
+
+        serde_json::to_string(&json!({
+            "agent_id": params.agent_id,
+            "new_count": new_count,
+            "changed_count": changed_count,
+            "unchanged_count": all_entries.len() as u64 - new_count - changed_count,
+            "entries": diff_entries,
+        }))
+        .map_err(|e| format!("Failed to serialize: {}", e))
     }
 
     #[tool(description = "Register a capability (skill, plugin, or MCP server) in the Hub.")]
@@ -2284,31 +2468,80 @@ impl ServerHandler for MemoryServer {
         async move {
             let name = params.name.as_ref();
 
-            // 1. Native tools first (highest priority)
-            if self.tool_router.has_route(name) {
-                let context =
-                    rmcp::handler::server::tool::ToolCallContext::new(self, params, context);
-                return self.tool_router.call(context).await;
+            // ─── Phantom Tools: cache invalidation on write ops ──────────
+            if CACHE_INVALIDATING_TOOLS.contains(&name) {
+                if let Ok(mut cache) = self.tool_cache.lock() {
+                    cache.clear();
+                }
             }
 
-            // 2. Skill tools (tachi_skill_*)
-            if self
-                .skill_tools
-                .lock()
-                .map(|map| map.contains_key(name))
-                .unwrap_or(false)
-            {
-                return self.call_skill_tool(name, params.arguments).await;
+            // ─── Phantom Tools: check cache for read-only tools ──────────
+            let is_cacheable = CACHEABLE_TOOLS.contains(&name);
+            let cache_key = if is_cacheable {
+                let args_str = params
+                    .arguments
+                    .as_ref()
+                    .map(|a| serde_json::to_string(a).unwrap_or_default())
+                    .unwrap_or_default();
+                let key = stable_hash(&format!("{}{}", name, args_str));
+
+                // Check cache
+                if let Ok(cache) = self.tool_cache.lock() {
+                    if let Some(cached) = cache.get(&key) {
+                        if cached.created_at.elapsed() < TOOL_CACHE_TTL {
+                            self.cache_hits
+                                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            return Ok(cached.result.clone());
+                        }
+                    }
+                }
+                self.cache_misses
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                Some(key)
+            } else {
+                None
+            };
+
+            // ─── Dispatch to handler ─────────────────────────────────────
+            let result = {
+                // 1. Native tools first (highest priority)
+                if self.tool_router.has_route(name) {
+                    let context =
+                        rmcp::handler::server::tool::ToolCallContext::new(self, params, context);
+                    self.tool_router.call(context).await
+                }
+                // 2. Skill tools (tachi_skill_*)
+                else if self
+                    .skill_tools
+                    .lock()
+                    .map(|map| map.contains_key(name))
+                    .unwrap_or(false)
+                {
+                    self.call_skill_tool(name, params.arguments).await
+                }
+                // 3. Proxy tools (server__tool pattern)
+                else if let Some((server_name, tool_name)) = name.split_once("__") {
+                    self.proxy_call_internal(server_name, tool_name, params.arguments)
+                        .await
+                } else {
+                    Err(rmcp::ErrorData::invalid_params("tool not found", None))
+                }
+            };
+
+            // ─── Phantom Tools: store result in cache ────────────────────
+            if let (Some(key), Ok(ref res)) = (&cache_key, &result) {
+                if let Ok(mut cache) = self.tool_cache.lock() {
+                    cache.insert(
+                        key.clone(),
+                        CachedResult {
+                            result: res.clone(),
+                            created_at: Instant::now(),
+                        },
+                    );
+                }
             }
 
-            // 3. Proxy tools (server__tool pattern)
-            if let Some((server_name, tool_name)) = name.split_once("__") {
-                return self
-                    .proxy_call_internal(server_name, tool_name, params.arguments)
-                    .await;
-            }
-
-            Err(rmcp::ErrorData::invalid_params("tool not found", None))
+            result
         }
     }
 }

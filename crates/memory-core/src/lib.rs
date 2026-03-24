@@ -332,4 +332,24 @@ impl MemoryStore {
     pub fn audit_log_list(&self, limit: usize, server_filter: Option<&str>) -> Result<Vec<serde_json::Value>, MemoryError> {
         db::audit_log_list(&self.conn, limit, server_filter)
     }
+
+    // ─── Agent Known State (Context Diffing) ─────────────────────────────────
+
+    /// Get the known revisions for a set of memory IDs for a given agent.
+    pub fn get_agent_known_revisions(
+        &self,
+        agent_id: &str,
+        memory_ids: &[String],
+    ) -> Result<std::collections::HashMap<String, i64>, MemoryError> {
+        db::get_agent_known_revisions(&self.conn, agent_id, memory_ids)
+    }
+
+    /// Update the agent's known state for a set of memory entries.
+    pub fn update_agent_known_state(
+        &self,
+        agent_id: &str,
+        entries: &[(String, i64)],
+    ) -> Result<(), MemoryError> {
+        db::update_agent_known_state(&self.conn, agent_id, entries)
+    }
 }
