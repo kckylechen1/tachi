@@ -75,6 +75,11 @@ impl MemoryStore {
         db::try_claim_event(&self.conn, event_hash, event_id, worker)
     }
 
+    /// Release a claimed event on processing failure (at-least-once delivery).
+    pub fn release_event_claim(&self, event_hash: &str, worker: &str) -> Result<(), MemoryError> {
+        db::release_event_claim(&self.conn, event_hash, worker)
+    }
+
     /// Revision-checked update used for optimistic locking in merge flows.
     pub fn update_with_revision(
         &mut self,
@@ -100,6 +105,29 @@ impl MemoryStore {
             new_summary,
             new_source,
             &metadata_json,
+            vec_blob.as_deref(),
+            expected_revision,
+        )
+    }
+
+    /// Update only enrichment fields (summary + vector) with revision check.
+    /// Returns false if revision mismatch (entry was updated since enrichment started).
+    pub fn update_enrichment_fields(
+        &mut self,
+        id: &str,
+        new_summary: Option<&str>,
+        new_vec: Option<&[f32]>,
+        expected_revision: i64,
+    ) -> Result<bool, MemoryError> {
+        let vec_blob = if self.vec_available {
+            new_vec.map(db::serialize_f32)
+        } else {
+            None
+        };
+        db::update_enrichment_fields(
+            &mut self.conn,
+            id,
+            new_summary,
             vec_blob.as_deref(),
             expected_revision,
         )

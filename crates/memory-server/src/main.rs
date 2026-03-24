@@ -738,12 +738,16 @@ fn fact_to_entry(fact: &serde_json::Value, source: &str, metadata: serde_json::V
         return None;
     }
     let topic = fact["topic"].as_str().unwrap_or("").to_string();
-    let importance = fact["importance"].as_f64().unwrap_or(0.7);
+    let importance = fact["importance"].as_f64().unwrap_or(0.7).clamp(0.0, 1.0);
     let keywords: Vec<String> = fact["keywords"]
         .as_array()
         .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
         .unwrap_or_default();
-    let scope = fact["scope"].as_str().unwrap_or("general").to_string();
+    let scope_raw = fact["scope"].as_str().unwrap_or("general");
+    let scope = match scope_raw {
+        "user" | "project" | "general" => scope_raw.to_string(),
+        _ => "general".to_string(),
+    };
     let summary = text.chars().take(100).collect::<String>();
     Some(MemoryEntry {
         id: uuid::Uuid::new_v4().to_string(),
@@ -1185,35 +1189,45 @@ impl MemoryServer {
         })?;
 
         // Spawn background enrichment (embedding + summary)
+        // Uses revision-aware update to avoid overwriting concurrent changes
         let server = self.clone();
         let enrich_id = id.clone();
         let enrich_text = entry.text.clone();
+        let enrich_revision = 1_i64; // initial revision at time of save
         tokio::spawn(async move {
-            let mut enriched_entry = entry;
+            let mut new_vec: Option<Vec<f32>> = None;
+            let mut new_summary: Option<String> = None;
 
             // Generate embedding
             match server.llm.embed_voyage(&enrich_text, "document").await {
-                Ok(vec) => enriched_entry.vector = Some(vec),
+                Ok(vec) => new_vec = Some(vec),
                 Err(e) => eprintln!("[enrichment] embedding failed for {enrich_id}: {e}"),
             }
 
             // Generate summary if not provided
             if needs_summary {
                 match server.llm.generate_summary(&enrich_text).await {
-                    Ok(s) => enriched_entry.summary = s,
+                    Ok(s) => new_summary = Some(s),
                     Err(e) => eprintln!("[enrichment] summary failed for {enrich_id}: {e}"),
                 }
             }
 
-            // Update entry with enriched data
-            if let Err(e) = server.with_store_for_scope(target_db, |store| {
-                store
-                    .upsert(&enriched_entry)
-                    .map_err(|e| format!("Failed to update enriched entry: {e}"))
-            }) {
-                eprintln!("[enrichment] DB update failed for {enrich_id}: {e}");
-            } else {
-                eprintln!("[enrichment] completed for {enrich_id}");
+            // Revision-aware targeted update — discards enrichment if entry was modified
+            if new_vec.is_some() || new_summary.is_some() {
+                match server.with_store_for_scope(target_db, |store| {
+                    store
+                        .update_enrichment_fields(
+                            &enrich_id,
+                            new_summary.as_deref(),
+                            new_vec.as_deref(),
+                            enrich_revision,
+                        )
+                        .map_err(|e| format!("Failed to update enriched entry: {e}"))
+                }) {
+                    Ok(true) => eprintln!("[enrichment] completed for {enrich_id}"),
+                    Ok(false) => eprintln!("[enrichment] discarded for {enrich_id} (revision changed)"),
+                    Err(e) => eprintln!("[enrichment] DB update failed for {enrich_id}: {e}"),
+                }
             }
         });
 
@@ -1580,6 +1594,7 @@ impl MemoryServer {
         let server = self.clone();
         let conversation_id = params.conversation_id.clone();
         let turn_id = params.turn_id.clone();
+        let eh = event_hash.clone();
         tokio::spawn(async move {
             match server.llm.extract_facts(&combined_text).await {
                 Ok(facts) if facts.is_empty() => {
@@ -1608,10 +1623,22 @@ impl MemoryServer {
                     });
                     match saved {
                         Ok(n) => eprintln!("[ingest_event] saved {n}/{count} facts for {conversation_id}:{turn_id}"),
-                        Err(e) => eprintln!("[ingest_event] DB write failed: {e}"),
+                        Err(e) => {
+                            eprintln!("[ingest_event] DB write failed: {e} — releasing claim for retry");
+                            let _ = server.with_store_for_scope(target_db, |store| {
+                                store.release_event_claim(&eh, "ingest")
+                                    .map_err(|e| format!("{e}"))
+                            });
+                        }
                     }
                 }
-                Err(e) => eprintln!("[ingest_event] LLM extraction failed for {conversation_id}:{turn_id}: {e}"),
+                Err(e) => {
+                    eprintln!("[ingest_event] LLM extraction failed for {conversation_id}:{turn_id}: {e} — releasing claim for retry");
+                    let _ = server.with_store_for_scope(target_db, |store| {
+                        store.release_event_claim(&eh, "ingest")
+                            .map_err(|e| format!("{e}"))
+                    });
+                }
             }
         });
 
@@ -1962,7 +1989,7 @@ impl MemoryServer {
 
                                         self.proxy_tools
                                             .lock()
-                                            .unwrap()
+                                            .unwrap_or_else(|e| e.into_inner())
                                             .insert(server_name.to_string(), tools.clone());
 
                                         let mut updated_def = def.clone();
@@ -2020,7 +2047,7 @@ impl MemoryServer {
 
                                         self.proxy_tools
                                             .lock()
-                                            .unwrap()
+                                            .unwrap_or_else(|e| e.into_inner())
                                             .insert(server_name.to_string(), tools.clone());
 
                                         let mut updated_def = def.clone();
@@ -2293,6 +2320,16 @@ impl MemoryServer {
         &self,
         Parameters(params): Parameters<HubCallParams>,
     ) -> Result<String, String> {
+        // Check enabled status before calling
+        let cap = self.get_capability(&params.server_id)
+            .map_err(|e| format!("{e}"))?;
+        if !cap.enabled {
+            return Err(format!(
+                "MCP server '{}' is disabled. Use hub_set_enabled to activate after review.",
+                params.server_id
+            ));
+        }
+
         let server_name = params
             .server_id
             .strip_prefix("mcp:")
@@ -2500,14 +2537,10 @@ impl MemoryServer {
                         "status": "error",
                         "error": e,
                     }));
-                    return serde_json::to_string(&json!({
-                        "status": "error",
-                        "failed_at_step": i,
-                        "skill_id": step.skill_id,
-                        "error": e,
-                        "steps": step_results,
-                    }))
-                    .map_err(|e| format!("serialize: {e}"));
+                    return Err(format!(
+                        "chain_skills failed at step {} (skill '{}'): {}",
+                        i, step.skill_id, e
+                    ));
                 }
             }
         }
