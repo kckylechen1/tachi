@@ -149,8 +149,17 @@ pub(super) async fn handle_hub_register(
         }
 
         // L0 analysis: async background scan of the prompt template
-        let def: serde_json::Value = serde_json::from_str(&params.definition).unwrap_or_default();
-        if def["prompt"].as_str().is_some() {
+        let def: serde_json::Value = match serde_json::from_str(&params.definition) {
+            Ok(def) => def,
+            Err(e) => {
+                append_warning(
+                    &mut resp,
+                    format!("Skill definition is not valid JSON; skipped async analysis ({e})"),
+                );
+                json!({})
+            }
+        };
+        if let Some(prompt_text) = def.get("prompt").and_then(|v| v.as_str()) {
             let llm = server.llm.clone();
             let cap_clone = cap.clone();
             let desc_empty = params.description.is_empty();
@@ -161,7 +170,7 @@ pub(super) async fn handle_hub_register(
                     .clone()
                     .unwrap_or_else(|| server.global_db_path.clone()),
             };
-            let prompt_text = def["prompt"].as_str().unwrap().to_string();
+            let prompt_text = prompt_text.to_string();
 
             let cap_id = cap_clone.id.clone();
 
@@ -177,18 +186,42 @@ pub(super) async fn handle_hub_register(
                     .await
                 {
                     Ok(analysis_raw) => {
-                        let analysis_json: serde_json::Value =
-                            serde_json::from_str(llm::LlmClient::strip_code_fence(&analysis_raw))
-                                .unwrap_or(serde_json::json!({"summary": analysis_raw}));
+                        let analysis_json: serde_json::Value = match serde_json::from_str(
+                            llm::LlmClient::strip_code_fence(&analysis_raw),
+                        ) {
+                            Ok(parsed) => parsed,
+                            Err(e) => {
+                                eprintln!(
+                                        "[skill-analysis] invalid JSON output for {}: {}; using raw summary fallback",
+                                        cap_id, e
+                                    );
+                                serde_json::json!({"summary": analysis_raw})
+                            }
+                        };
 
                         // Auto-fill description if it was empty
                         if desc_empty {
                             if let Some(summary) = analysis_json["summary"].as_str() {
                                 let mut updated_cap = cap_clone;
                                 updated_cap.description = summary.to_string();
-                                if let Ok(store) = MemoryStore::open(db_path.to_str().unwrap_or(""))
-                                {
-                                    let _ = store.hub_register(&updated_cap);
+                                let db_str = db_path.to_string_lossy();
+                                match MemoryStore::open(db_str.as_ref()) {
+                                    Ok(store) => {
+                                        if let Err(e) = store.hub_register(&updated_cap) {
+                                            eprintln!(
+                                                "[skill-analysis] failed to persist auto description for {}: {}",
+                                                cap_id, e
+                                            );
+                                        }
+                                    }
+                                    Err(e) => {
+                                        eprintln!(
+                                            "[skill-analysis] failed to open DB for {} at '{}': {}",
+                                            cap_id,
+                                            db_path.display(),
+                                            e
+                                        );
+                                    }
                                 }
                             }
                         }
@@ -418,16 +451,32 @@ pub(super) async fn handle_hub_set_enabled(
         if let Some(server_name) = params.id.strip_prefix("mcp:") {
             if params.enabled {
                 if let Ok(cap) = server.get_capability(&params.id) {
-                    if let Ok(def) = serde_json::from_str::<serde_json::Value>(&cap.definition) {
-                        if let Some(tools_json) = def.get("discovered_tools") {
-                            if let Ok(tools) =
-                                serde_json::from_value::<Vec<rmcp::model::Tool>>(tools_json.clone())
-                            {
-                                server.cache_proxy_tools(
-                                    server_name,
-                                    filter_mcp_tools_by_permissions(&def, tools),
-                                );
+                    match serde_json::from_str::<serde_json::Value>(&cap.definition) {
+                        Ok(def) => {
+                            if let Some(tools_json) = def.get("discovered_tools") {
+                                match serde_json::from_value::<Vec<rmcp::model::Tool>>(
+                                    tools_json.clone(),
+                                ) {
+                                    Ok(tools) => {
+                                        server.cache_proxy_tools(
+                                            server_name,
+                                            filter_mcp_tools_by_permissions(&def, tools),
+                                        );
+                                    }
+                                    Err(e) => {
+                                        eprintln!(
+                                            "[hub_set_enabled] invalid discovered_tools payload for '{}': {}",
+                                            params.id, e
+                                        );
+                                    }
+                                }
                             }
+                        }
+                        Err(e) => {
+                            eprintln!(
+                                "[hub_set_enabled] invalid definition JSON for '{}': {}",
+                                params.id, e
+                            );
                         }
                     }
                 }

@@ -40,8 +40,16 @@ pub(super) fn capability_visibility_from_definition(def: &Value) -> CapabilityVi
 }
 
 pub(super) fn capability_visibility_for_cap(cap: &HubCapability) -> CapabilityVisibility {
-    let def: Value = serde_json::from_str(&cap.definition).unwrap_or_else(|_| json!({}));
-    capability_visibility_from_definition(&def)
+    match serde_json::from_str::<Value>(&cap.definition) {
+        Ok(def) => capability_visibility_from_definition(&def),
+        Err(e) => {
+            eprintln!(
+                "[hub] invalid capability definition JSON for '{}': {e}; defaulting visibility=listed",
+                cap.id
+            );
+            CapabilityVisibility::Listed
+        }
+    }
 }
 
 pub(super) fn should_expose_skill_tool(cap: &HubCapability) -> bool {

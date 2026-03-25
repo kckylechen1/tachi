@@ -109,3 +109,16 @@ pub(super) fn parse_env_u64(name: &str) -> Option<u64> {
         }
     }
 }
+
+pub(super) fn lock_or_recover<'a, T>(
+    mutex: &'a StdMutex<T>,
+    label: &str,
+) -> std::sync::MutexGuard<'a, T> {
+    match mutex.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => {
+            eprintln!("WARNING: mutex poisoned: {label}; recovering with inner state");
+            poisoned.into_inner()
+        }
+    }
+}

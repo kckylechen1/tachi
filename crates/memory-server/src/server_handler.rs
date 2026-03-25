@@ -16,11 +16,15 @@ impl ServerHandler for MemoryServer {
             let mut tools = self.tool_router.list_all();
 
             // Add proxy tools from registered MCP servers
-            let proxy_snapshot = self
-                .proxy_tools
-                .lock()
-                .map(|proxy| proxy.clone())
-                .unwrap_or_default();
+            let proxy_snapshot = match self.proxy_tools.lock() {
+                Ok(proxy) => proxy.clone(),
+                Err(poisoned) => {
+                    eprintln!(
+                        "[list_tools] WARNING: proxy_tools mutex poisoned; recovering with inner state"
+                    );
+                    poisoned.into_inner().clone()
+                }
+            };
             for (server_name, server_tools) in proxy_snapshot {
                 let cap_id = format!("mcp:{server_name}");
                 let cap = match self.get_capability(&cap_id) {
@@ -31,8 +35,16 @@ impl ServerHandler for MemoryServer {
                     continue;
                 }
 
-                let cap_def = serde_json::from_str::<serde_json::Value>(&cap.definition)
-                    .unwrap_or_else(|_| json!({}));
+                let cap_def = match serde_json::from_str::<serde_json::Value>(&cap.definition) {
+                    Ok(def) => def,
+                    Err(e) => {
+                        eprintln!(
+                            "[list_tools] WARNING: invalid capability definition JSON for '{}': {e}; skipping direct proxy exposure",
+                            cap_id
+                        );
+                        continue;
+                    }
+                };
                 let exposure_mode =
                     resolve_mcp_tool_exposure(&cap_def, self.mcp_tool_exposure_mode);
                 if exposure_mode == McpToolExposureMode::Gateway {
@@ -50,8 +62,14 @@ impl ServerHandler for MemoryServer {
                 }
             }
             // Add skill tools
-            if let Ok(skill_defs) = self.skill_tool_defs.lock() {
-                tools.extend(skill_defs.values().cloned());
+            match self.skill_tool_defs.lock() {
+                Ok(skill_defs) => tools.extend(skill_defs.values().cloned()),
+                Err(poisoned) => {
+                    eprintln!(
+                        "[list_tools] WARNING: skill_tool_defs mutex poisoned; recovering with inner state"
+                    );
+                    tools.extend(poisoned.into_inner().values().cloned());
+                }
             }
 
             Ok(rmcp::model::ListToolsResult {
@@ -83,7 +101,15 @@ impl ServerHandler for MemoryServer {
                 let args_str = params
                     .arguments
                     .as_ref()
-                    .map(|a| serde_json::to_string(a).unwrap_or_default())
+                    .map(|a| {
+                        serde_json::to_string(a).unwrap_or_else(|e| {
+                            eprintln!(
+                                "[call_tool] WARNING: failed to serialize arguments for cache key (tool='{}'): {e}",
+                                name
+                            );
+                            String::new()
+                        })
+                    })
                     .unwrap_or_default();
                 let key = stable_hash(&format!("{}{}", name, args_str));
 
@@ -120,8 +146,13 @@ impl ServerHandler for MemoryServer {
                 else if self
                     .skill_tools
                     .lock()
-                    .map(|map| map.contains_key(name))
-                    .unwrap_or(false)
+                    .unwrap_or_else(|e| {
+                        eprintln!(
+                            "[call_tool] WARNING: skill_tools mutex poisoned; recovering with inner state"
+                        );
+                        e.into_inner()
+                    })
+                    .contains_key(name)
                 {
                     self.call_skill_tool(name, params.arguments).await
                 }

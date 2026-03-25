@@ -66,8 +66,8 @@ use crate::shared_defs::{
 use crate::skill_chain_ops::handle_chain_skills;
 use crate::tool_params::*;
 use crate::utils::{
-    find_git_root, is_active_global_rule, is_trusted_command, parse_env_bool, parse_env_u64,
-    stable_hash, value_to_template_text,
+    find_git_root, is_active_global_rule, is_trusted_command, lock_or_recover, parse_env_bool,
+    parse_env_u64, stable_hash, value_to_template_text,
 };
 
 use chrono::Utc;
@@ -264,12 +264,27 @@ impl MemoryServer {
         project_db_path: Option<PathBuf>,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         // Open stores once at startup (init_schema runs here, not per-request)
-        let global_store = MemoryStore::open(global_db_path.to_str().unwrap())?;
+        let global_db_str = global_db_path.to_str().ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!(
+                    "Global DB path contains invalid UTF-8: {}",
+                    global_db_path.display()
+                ),
+            )
+        })?;
+        let global_store = MemoryStore::open(global_db_str)?;
         let global_vec_available = global_store.vec_available;
 
         let (project_store, project_db_path, project_vec_available) =
             if let Some(ref p) = project_db_path {
-                let store = MemoryStore::open(p.to_str().unwrap())?;
+                let project_db_str = p.to_str().ok_or_else(|| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::InvalidInput,
+                        format!("Project DB path contains invalid UTF-8: {}", p.display()),
+                    )
+                })?;
+                let store = MemoryStore::open(project_db_str)?;
                 let v = store.vec_available;
                 (
                     Some(Arc::new(StdMutex::new(store))),

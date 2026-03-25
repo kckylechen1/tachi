@@ -95,7 +95,8 @@ async fn tokio_main(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     };
 
     // Resolve project DB path
-    let project_db_path = if cli.no_project_db {
+    let explicit_project_db = cli.project_db.is_some();
+    let mut project_db_path = if cli.no_project_db {
         if cli.project_db.is_some() {
             eprintln!("--project-db is ignored because --no-project-db is set");
         }
@@ -123,6 +124,23 @@ async fn tokio_main(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         None
     };
 
+    if cli.daemon && project_db_path.is_some() {
+        if explicit_project_db {
+            eprintln!(
+                "Daemon mode: using explicit project DB path {} (single-project mode)",
+                project_db_path
+                    .as_ref()
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_else(|| "<unknown>".to_string())
+            );
+        } else {
+            eprintln!(
+                "Daemon mode: auto-detected project DB disabled to avoid mixed project context. Use --project-db PATH to opt into single-project daemon mode."
+            );
+            project_db_path = None;
+        }
+    }
+
     // Ensure parent dirs exist
     if let Some(parent) = global_db_path.parent() {
         tokio::fs::create_dir_all(parent).await?;
@@ -142,7 +160,7 @@ async fn tokio_main(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             let mut interval = tokio::time::interval(Duration::from_secs(60));
             loop {
                 interval.tick().await;
-                let mut conns = pool.connections.lock().unwrap();
+                let mut conns = lock_or_recover(&pool.connections, "mcp_pool.connections");
                 let now = Instant::now();
                 let idle_ttl = pool.idle_ttl;
                 let stale: Vec<String> = conns
@@ -227,27 +245,42 @@ async fn tokio_main(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 .hub_list(Some("mcp"), true)
                 .map_err(|e| format!("hub list: {e}"))?;
             for cap in mcp_caps {
-                let def: serde_json::Value =
-                    serde_json::from_str(&cap.definition).unwrap_or_default();
+                let def: serde_json::Value = match serde_json::from_str(&cap.definition) {
+                    Ok(def) => def,
+                    Err(e) => {
+                        eprintln!(
+                            "[startup] skip MCP '{}' due to invalid definition JSON: {e}",
+                            cap.id
+                        );
+                        continue;
+                    }
+                };
                 if let Some(tools_json) = def.get("discovered_tools") {
-                    if let Ok(tools) =
-                        serde_json::from_value::<Vec<rmcp::model::Tool>>(tools_json.clone())
-                    {
-                        let server_name = cap.id.strip_prefix("mcp:").unwrap_or(&cap.id);
-                        let filtered_tools = filter_mcp_tools_by_permissions(&def, tools);
-                        server
-                            .proxy_tools
-                            .lock()
-                            .unwrap()
-                            .insert(server_name.to_string(), filtered_tools);
+                    match serde_json::from_value::<Vec<rmcp::model::Tool>>(tools_json.clone()) {
+                        Ok(tools) => {
+                            let server_name = cap.id.strip_prefix("mcp:").unwrap_or(&cap.id);
+                            let filtered_tools = filter_mcp_tools_by_permissions(&def, tools);
+                            lock_or_recover(&server.proxy_tools, "proxy_tools")
+                                .insert(server_name.to_string(), filtered_tools);
+                        }
+                        Err(e) => {
+                            eprintln!(
+                                "[startup] skip cached tools for '{}' due to invalid tool payload: {e}",
+                                cap.id
+                            );
+                        }
                     }
                 }
             }
             Ok(())
         };
-        let _ = server.with_global_store(load_proxy_tools);
+        if let Err(e) = server.with_global_store(load_proxy_tools) {
+            eprintln!("[startup] failed loading global MCP proxy cache: {e}");
+        }
         if server.project_db_path.is_some() {
-            let _ = server.with_project_store(load_proxy_tools);
+            if let Err(e) = server.with_project_store(load_proxy_tools) {
+                eprintln!("[startup] failed loading project MCP proxy cache: {e}");
+            }
         }
     }
     {
@@ -257,14 +290,23 @@ async fn tokio_main(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 .map_err(|e| format!("hub list: {e}"))?;
             for cap in skill_caps {
                 if should_expose_skill_tool(&cap) {
-                    let _ = server.register_skill_tool(&cap);
+                    if let Err(e) = server.register_skill_tool(&cap) {
+                        eprintln!(
+                            "[startup] failed to register skill tool for '{}': {}",
+                            cap.id, e
+                        );
+                    }
                 }
             }
             Ok(())
         };
-        let _ = server.with_global_store(load_skill_tools);
+        if let Err(e) = server.with_global_store(load_skill_tools) {
+            eprintln!("[startup] failed loading global skill tools: {e}");
+        }
         if server.project_db_path.is_some() {
-            let _ = server.with_project_store(load_skill_tools);
+            if let Err(e) = server.with_project_store(load_skill_tools) {
+                eprintln!("[startup] failed loading project skill tools: {e}");
+            }
         }
     }
 
@@ -296,10 +338,9 @@ async fn tokio_main(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
 
     if cli.daemon {
         // HTTP daemon mode
-        // TODO: In daemon mode we only use the global DB since there is no
-        // single project context. Per-session project DB routing will
-        // require a session-aware factory that resolves the project path
-        // from a request header or query parameter.
+        // In daemon mode, project DB auto-detection is disabled above to avoid
+        // mixed project context. Users can still opt into single-project mode
+        // via explicit --project-db.
 
         use rmcp::transport::streamable_http_server::{
             session::local::LocalSessionManager, StreamableHttpServerConfig, StreamableHttpService,

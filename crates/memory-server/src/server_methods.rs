@@ -5,7 +5,7 @@ impl MemoryServer {
         &self,
         f: impl FnOnce(&mut MemoryStore) -> Result<T, String>,
     ) -> Result<T, String> {
-        let mut store = self.global_store.lock().unwrap_or_else(|e| e.into_inner());
+        let mut store = lock_or_recover(&self.global_store, "global_store");
         f(&mut store)
     }
 
@@ -17,7 +17,7 @@ impl MemoryServer {
             .project_store
             .as_ref()
             .ok_or_else(|| "No project database available (not in a git repository)".to_string())?;
-        let mut store = store_arc.lock().unwrap_or_else(|e| e.into_inner());
+        let mut store = lock_or_recover(store_arc, "project_store");
         f(&mut store)
     }
 
@@ -88,20 +88,14 @@ impl MemoryServer {
     pub(super) fn register_skill_tool(&self, cap: &HubCapability) -> Result<String, String> {
         let _ = self.unregister_skill_tool(&cap.id);
         let (tool_name, tool) = build_skill_tool_from_cap(cap)?;
-        self.skill_tools
-            .lock()
-            .map_err(|e| e.to_string())?
-            .insert(tool_name.clone(), cap.id.clone());
-        self.skill_tool_defs
-            .lock()
-            .map_err(|e| e.to_string())?
-            .insert(tool_name.clone(), tool);
+        lock_or_recover(&self.skill_tools, "skill_tools").insert(tool_name.clone(), cap.id.clone());
+        lock_or_recover(&self.skill_tool_defs, "skill_tool_defs").insert(tool_name.clone(), tool);
         Ok(tool_name)
     }
 
     pub(super) fn unregister_skill_tool(&self, skill_id: &str) -> Result<Option<String>, String> {
         let removed_tool_name = {
-            let mut map = self.skill_tools.lock().map_err(|e| e.to_string())?;
+            let mut map = lock_or_recover(&self.skill_tools, "skill_tools");
             let tool_name = map
                 .iter()
                 .find(|(_, id)| id.as_str() == skill_id)
@@ -113,10 +107,7 @@ impl MemoryServer {
         };
 
         if let Some(ref name) = removed_tool_name {
-            self.skill_tool_defs
-                .lock()
-                .map_err(|e| e.to_string())?
-                .remove(name);
+            lock_or_recover(&self.skill_tool_defs, "skill_tool_defs").remove(name);
         }
 
         Ok(removed_tool_name)
@@ -130,7 +121,10 @@ impl MemoryServer {
         let skill_id = self
             .skill_tools
             .lock()
-            .map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?
+            .unwrap_or_else(|e| {
+                eprintln!("WARNING: mutex poisoned: skill_tools; recovering with inner state");
+                e.into_inner()
+            })
             .get(tool_name)
             .cloned()
             .ok_or_else(|| {
@@ -212,8 +206,11 @@ impl MemoryServer {
         if self
             .skill_tools
             .lock()
-            .map(|s| s.contains_key(tool_name))
-            .unwrap_or(false)
+            .unwrap_or_else(|e| {
+                eprintln!("WARNING: mutex poisoned: skill_tools; recovering with inner state");
+                e.into_inner()
+            })
+            .contains_key(tool_name)
         {
             return self.call_skill_tool(tool_name, args_obj).await;
         }
