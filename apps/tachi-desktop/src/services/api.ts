@@ -1,5 +1,7 @@
 const MCP_PROTOCOL_VERSION = '2024-11-05';
 const REQUEST_TIMEOUT_MS = 5000;
+export const DEFAULT_TACHI_DAEMON_PORT = 8099;
+export const DEFAULT_TACHI_DAEMON_HOST = `localhost:${DEFAULT_TACHI_DAEMON_PORT}`;
 
 type JsonRpcId = number;
 
@@ -161,8 +163,8 @@ function configuredBaseUrls(): string[] {
   return uniqueUrls([
     ...configured,
     '/tachi',
-    'http://127.0.0.1:8080',
-    'http://localhost:8080',
+    `http://127.0.0.1:${DEFAULT_TACHI_DAEMON_PORT}`,
+    `http://localhost:${DEFAULT_TACHI_DAEMON_PORT}`,
   ]);
 }
 
@@ -514,7 +516,7 @@ class TachiApi {
       }
     }
 
-    throw new TachiOfflineError('Unable to reach Tachi daemon at localhost:8080', lastError);
+    throw new TachiOfflineError(`Unable to reach Tachi daemon at ${DEFAULT_TACHI_DAEMON_HOST}`, lastError);
   }
 }
 

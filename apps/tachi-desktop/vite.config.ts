@@ -5,9 +5,10 @@ import react from '@vitejs/plugin-react'
 export default defineConfig({
   plugins: [react()],
   server: {
+    port: 5111,
     proxy: {
       '/tachi': {
-        target: 'http://127.0.0.1:8080',
+        target: 'http://127.0.0.1:8099',
         changeOrigin: true,
         rewrite: (path) => path.replace(/^\/tachi/, ''),
       },

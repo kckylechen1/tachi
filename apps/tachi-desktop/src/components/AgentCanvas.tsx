@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import ForceGraph2D from 'react-force-graph-2d';
 import {
+  DEFAULT_TACHI_DAEMON_HOST,
   getApiErrorMessage,
   tachiApi,
   type GhostTopicSnapshot,
@@ -265,7 +266,7 @@ export function AgentCanvas({ onNodeClick, view }: AgentCanvasProps) {
             </div>
             <div className="text-muted" style={{ fontSize: '0.82rem' }}>
               {error
-                ? 'Unable to fetch live MCP data from localhost:8080.'
+                ? `Unable to fetch live MCP data from ${DEFAULT_TACHI_DAEMON_HOST}.`
                 : 'Waiting for Ghost Whispers or Kanban activity to appear.'}
             </div>
           </div>

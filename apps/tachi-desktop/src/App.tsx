@@ -3,7 +3,7 @@ import { Sidebar } from './components/Sidebar';
 import { AgentCanvas } from './components/AgentCanvas';
 import { HubDashboard } from './components/HubDashboard';
 import { Inspector, type InspectableItem } from './components/Inspector';
-import { getApiErrorMessage, tachiApi, type MemoryEntry } from './services/api';
+import { DEFAULT_TACHI_DAEMON_HOST, getApiErrorMessage, tachiApi, type MemoryEntry } from './services/api';
 
 type TabKey = 'kanban' | 'ghost' | 'memory' | 'hub' | 'settings';
 
@@ -37,7 +37,7 @@ function App() {
         await tachiApi.ping();
         if (!cancelled) {
           setDaemonOnline(true);
-          setDaemonMessage('Connected to Tachi daemon on localhost:8080');
+          setDaemonMessage(`Connected to Tachi daemon on ${DEFAULT_TACHI_DAEMON_HOST}`);
         }
       } catch (error) {
         if (!cancelled) {
