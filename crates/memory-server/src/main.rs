@@ -71,7 +71,7 @@ use crate::utils::{
 };
 
 use chrono::Utc;
-use clap::Parser;
+use clap::{Parser, Subcommand};
 use memory_core::{HubCapability, HybridWeights, MemoryEntry, MemoryStore, SearchOptions};
 use rmcp::{
     handler::server::{tool::ToolRouter, wrapper::Parameters},
@@ -128,6 +128,67 @@ struct Cli {
     /// Interval between background GC runs in seconds (overrides MEMORY_GC_INTERVAL_SECS)
     #[arg(long)]
     gc_interval_secs: Option<u64>,
+
+    /// CLI command (defaults to `serve` when omitted)
+    #[command(subcommand)]
+    command: Option<Commands>,
+}
+
+#[derive(Subcommand, Debug, Clone)]
+enum Commands {
+    /// Start MCP Server (default when no subcommand is provided)
+    Serve,
+    /// Search memories
+    Search {
+        query: String,
+        #[arg(long)]
+        path: Option<String>,
+        #[arg(long, default_value_t = 5)]
+        top_k: usize,
+    },
+    /// Save a memory
+    Save {
+        text: String,
+        #[arg(long)]
+        path: Option<String>,
+        #[arg(long)]
+        importance: Option<f64>,
+    },
+    /// Show database statistics
+    Stats,
+    /// Run garbage collection
+    Gc,
+    /// Hub management
+    Hub {
+        #[command(subcommand)]
+        action: HubAction,
+    },
+}
+
+#[derive(Subcommand, Debug, Clone)]
+enum HubAction {
+    List {
+        #[arg(long)]
+        cap_type: Option<String>,
+    },
+    Register {
+        id: String,
+        #[arg(long)]
+        cap_type: String,
+        #[arg(long)]
+        name: String,
+        #[arg(long)]
+        definition: String,
+        #[arg(long)]
+        description: Option<String>,
+    },
+    Enable {
+        id: String,
+    },
+    Disable {
+        id: String,
+    },
+    Stats,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
