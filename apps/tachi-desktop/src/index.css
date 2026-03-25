@@ -1,9 +1,9 @@
 @import url('https://fonts.googleapis.com/css2?family=Share+Tech+Mono&family=Outfit:wght@300;400;500;600;700&display=swap');
 
 :root {
-  --bg-color: #05080f; /* Deep space black/blue */
-  --hud-bg: rgba(0, 20, 30, 0.4); /* Dark translucent HUD */
-  --hud-border: #00f0ff; /* Bright Cyan HUD lines */
+  --bg-color: #020408; /* Abyss black */
+  --hud-bg: rgba(0, 15, 20, 0.6); /* Translucent datapad */
+  --hud-border: #0df; /* Bright Cyan HUD lines */
   --hud-border-dim: rgba(0, 240, 255, 0.2);
   --text-main: #e2f1f8;
   --text-muted: #5e8b9e;
@@ -36,7 +36,14 @@ body {
   background-attachment: fixed;
 }
 
-/* Add a subtle CRT scanline overlay */
+/* Add a subtle CRT scanline overlay and flicker */
+@keyframes crtFlicker {
+  0% { opacity: 0.1; }
+  5% { opacity: 0.2; }
+  10% { opacity: 0.1; }
+  100% { opacity: 0.1; }
+}
+
 body::after {
   content: " ";
   display: block;
@@ -45,10 +52,18 @@ body::after {
   left: 0;
   bottom: 0;
   right: 0;
-  background: linear-gradient(rgba(18, 16, 16, 0) 50%, rgba(0, 0, 0, 0.25) 50%), linear-gradient(90deg, rgba(255, 0, 0, 0.06), rgba(0, 255, 0, 0.02), rgba(0, 0, 255, 0.06));
-  z-index: 2;
+  background: 
+    linear-gradient(rgba(18, 16, 16, 0) 50%, rgba(0, 0, 0, 0.25) 50%), 
+    linear-gradient(90deg, rgba(255, 0, 0, 0.06), rgba(0, 255, 0, 0.02), rgba(0, 0, 255, 0.06));
+  z-index: 9999;
   background-size: 100% 2px, 3px 100%;
   pointer-events: none;
+  animation: crtFlicker 8s infinite, scrollScanlines 10s linear infinite;
+}
+
+@keyframes scrollScanlines {
+  0% { background-position: 0% 0%; }
+  100% { background-position: 0% 100%; }
 }
 
 #root {

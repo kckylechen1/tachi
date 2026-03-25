@@ -237,15 +237,15 @@ export function AgentCanvas({ onNodeClick, view }: AgentCanvasProps) {
         nodeLabel="label"
         nodeColor={(node) => {
           if (node.group === 1) return '#ffffff'; // Core Hub
-          if (node.group === 2) return '#00f0ff'; // Agents
-          return '#b026ff'; // Pub/Sub Topics
+          if (node.group === 2) return '#0df'; // Agents (Neon Cyan)
+          return '#f05'; // Pub/Sub Topics (Neon Magenta)
         }}
-        linkColor={() => 'rgba(255,255,255,0.1)'}
+        linkColor={() => 'rgba(0, 221, 255, 0.3)'}
         nodeRelSize={6}
         linkDirectionalParticles={2}
         linkDirectionalParticleSpeed={(link) => link.value * 0.005}
         onNodeClick={(node) => onNodeClick(node)}
-        backgroundColor="transparent"
+        backgroundColor="var(--bg-color)"
       />
 
       {(isLoading || error || isEmptyGraph) && (
