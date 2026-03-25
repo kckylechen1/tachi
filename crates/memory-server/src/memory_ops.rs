@@ -146,8 +146,10 @@ pub(super) async fn handle_delete_memory(
                 .map_err(|e| format!("Delete failed: {}", e))
         })?;
         if deleted {
-            return serde_json::to_string(&json!({ "deleted": true, "db": "project", "id": params.id }))
-                .map_err(|e| format!("Failed to serialize: {}", e));
+            return serde_json::to_string(
+                &json!({ "deleted": true, "db": "project", "id": params.id }),
+            )
+            .map_err(|e| format!("Failed to serialize: {}", e));
         }
     }
 

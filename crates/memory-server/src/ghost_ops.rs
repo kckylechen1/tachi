@@ -57,8 +57,11 @@ pub(super) async fn handle_ghost_subscribe(
         }
     }
 
-    let prev_cursors: HashMap<String, usize> =
-        state.cursors.get(&params.agent_id).cloned().unwrap_or_default();
+    let prev_cursors: HashMap<String, usize> = state
+        .cursors
+        .get(&params.agent_id)
+        .cloned()
+        .unwrap_or_default();
 
     let mut new_messages: Vec<serde_json::Value> = Vec::new();
     let mut new_cursors: HashMap<String, usize> = prev_cursors.clone();
@@ -101,7 +104,9 @@ pub(super) async fn handle_ghost_subscribe(
     state.cursors.insert(params.agent_id.clone(), new_cursors);
     state.cursor_seq = state.cursor_seq.saturating_add(1);
     let recency_seq = state.cursor_seq;
-    state.cursor_recency.insert(params.agent_id.clone(), recency_seq);
+    state
+        .cursor_recency
+        .insert(params.agent_id.clone(), recency_seq);
 
     serde_json::to_string(&json!({
         "agent_id": params.agent_id,

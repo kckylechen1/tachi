@@ -256,7 +256,9 @@ async fn tokio_main(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 .hub_list(Some("skill"), true)
                 .map_err(|e| format!("hub list: {e}"))?;
             for cap in skill_caps {
-                let _ = server.register_skill_tool(&cap);
+                if should_expose_skill_tool(&cap) {
+                    let _ = server.register_skill_tool(&cap);
+                }
             }
             Ok(())
         };

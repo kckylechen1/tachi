@@ -1,5 +1,61 @@
 use super::*;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum CapabilityVisibility {
+    Listed,
+    Discoverable,
+    Hidden,
+}
+
+impl CapabilityVisibility {
+    pub(super) fn from_str(raw: &str) -> Option<Self> {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "listed" | "public" | "show" => Some(Self::Listed),
+            "discoverable" | "on_demand" | "on-demand" | "call_only" | "call-only" => {
+                Some(Self::Discoverable)
+            }
+            "hidden" | "private" | "off" => Some(Self::Hidden),
+            _ => None,
+        }
+    }
+
+    pub(super) fn as_str(&self) -> &'static str {
+        match self {
+            Self::Listed => "listed",
+            Self::Discoverable => "discoverable",
+            Self::Hidden => "hidden",
+        }
+    }
+}
+
+pub(super) fn capability_visibility_from_definition(def: &Value) -> CapabilityVisibility {
+    let raw = def
+        .get("policy")
+        .and_then(|p| p.get("visibility"))
+        .and_then(|v| v.as_str())
+        .or_else(|| def.get("visibility").and_then(|v| v.as_str()));
+
+    raw.and_then(CapabilityVisibility::from_str)
+        .unwrap_or(CapabilityVisibility::Listed)
+}
+
+pub(super) fn capability_visibility_for_cap(cap: &HubCapability) -> CapabilityVisibility {
+    let def: Value = serde_json::from_str(&cap.definition).unwrap_or_else(|_| json!({}));
+    capability_visibility_from_definition(&def)
+}
+
+pub(super) fn should_expose_skill_tool(cap: &HubCapability) -> bool {
+    cap.enabled
+        && cap.cap_type.eq_ignore_ascii_case("skill")
+        && capability_visibility_for_cap(cap) == CapabilityVisibility::Listed
+}
+
+pub(super) fn should_expose_mcp_tools(cap: &HubCapability) -> bool {
+    cap.enabled
+        && cap.cap_type.eq_ignore_ascii_case("mcp")
+        && capability_visibility_for_cap(cap) == CapabilityVisibility::Listed
+}
+
 pub(super) fn sanitize_skill_tool_name(skill_id: &str) -> Option<String> {
     let raw = skill_id.strip_prefix("skill:")?;
     let mut output = String::from("tachi_skill_");

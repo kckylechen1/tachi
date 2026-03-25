@@ -75,8 +75,8 @@ pub(super) async fn handle_set_state(
     server: &MemoryServer,
     params: SetStateParams,
 ) -> Result<String, String> {
-    let value_json =
-        serde_json::to_string(&params.value).map_err(|e| format!("Failed to serialize value: {}", e))?;
+    let value_json = serde_json::to_string(&params.value)
+        .map_err(|e| format!("Failed to serialize value: {}", e))?;
 
     server.with_global_store(|store| {
         let version = store

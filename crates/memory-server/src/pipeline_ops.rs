@@ -14,15 +14,13 @@ pub(super) async fn handle_extract_facts(
         .map_err(|e| format!("LLM extraction failed: {e}"))?;
 
     if facts.is_empty() {
-        return Ok(
-            serde_json::to_string(&serde_json::json!({
-                "status": "completed",
-                "source": source,
-                "facts_extracted": 0,
-                "facts_saved": 0
-            }))
-            .unwrap(),
-        );
+        return Ok(serde_json::to_string(&serde_json::json!({
+            "status": "completed",
+            "source": source,
+            "facts_extracted": 0,
+            "facts_saved": 0
+        }))
+        .unwrap());
     }
 
     let count = facts.len();
@@ -127,7 +125,9 @@ pub(super) async fn handle_ingest_event(
                         eprintln!("[ingest_event] saved {n}/{count} facts for {conversation_id}:{turn_id}")
                     }
                     Err(e) => {
-                        eprintln!("[ingest_event] DB write failed: {e} — releasing claim for retry");
+                        eprintln!(
+                            "[ingest_event] DB write failed: {e} — releasing claim for retry"
+                        );
                         let _ = server.with_store_for_scope(target_db, |store| {
                             store
                                 .release_event_claim(&eh, "ingest")
@@ -151,7 +151,10 @@ pub(super) async fn handle_ingest_event(
                             status: "pending".to_string(),
                         };
                         {
-                            let mut dlq = server.dead_letters.lock().unwrap_or_else(|e| e.into_inner());
+                            let mut dlq = server
+                                .dead_letters
+                                .lock()
+                                .unwrap_or_else(|e| e.into_inner());
                             dlq.push_back(dl);
                             while dlq.len() > DLQ_MAX_ENTRIES {
                                 dlq.pop_front();
@@ -185,7 +188,10 @@ pub(super) async fn handle_ingest_event(
                     status: "pending".to_string(),
                 };
                 {
-                    let mut dlq = server.dead_letters.lock().unwrap_or_else(|e| e.into_inner());
+                    let mut dlq = server
+                        .dead_letters
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner());
                     dlq.push_back(dl);
                     while dlq.len() > DLQ_MAX_ENTRIES {
                         dlq.pop_front();
@@ -238,10 +244,15 @@ pub(super) async fn handle_get_pipeline_status(server: &MemoryServer) -> Result<
         .unwrap_or_else(|e| e.into_inner())
         .len();
     let hits = server.cache_hits.load(std::sync::atomic::Ordering::Relaxed);
-    let misses = server.cache_misses.load(std::sync::atomic::Ordering::Relaxed);
+    let misses = server
+        .cache_misses
+        .load(std::sync::atomic::Ordering::Relaxed);
 
     let (dlq_total, dlq_pending, dlq_resolved, dlq_abandoned) = {
-        let dlq = server.dead_letters.lock().unwrap_or_else(|e| e.into_inner());
+        let dlq = server
+            .dead_letters
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let total = dlq.len();
         let pending = dlq.iter().filter(|d| d.status == "pending").count();
         let resolved = dlq.iter().filter(|d| d.status == "resolved").count();

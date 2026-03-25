@@ -7,7 +7,10 @@ pub(super) async fn handle_dlq_list(
     let limit = params.limit.unwrap_or(50).min(200);
     let now = Utc::now();
 
-    let mut dlq = server.dead_letters.lock().unwrap_or_else(|e| e.into_inner());
+    let mut dlq = server
+        .dead_letters
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
 
     dlq.retain(|dl| {
         if let Ok(ts) = chrono::DateTime::parse_from_rfc3339(&dl.timestamp) {
@@ -58,7 +61,10 @@ pub(super) async fn handle_dlq_retry(
     params: DlqRetryParams,
 ) -> Result<String, String> {
     let dead_letter = {
-        let mut dlq = server.dead_letters.lock().unwrap_or_else(|e| e.into_inner());
+        let mut dlq = server
+            .dead_letters
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let pos = dlq.iter().position(|dl| dl.id == params.dead_letter_id);
         match pos {
             Some(idx) => {
@@ -83,7 +89,10 @@ pub(super) async fn handle_dlq_retry(
 
     match retry_result {
         Ok(res) => {
-            let mut dlq = server.dead_letters.lock().unwrap_or_else(|e| e.into_inner());
+            let mut dlq = server
+                .dead_letters
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
             if let Some(dl) = dlq.iter_mut().find(|dl| dl.id == params.dead_letter_id) {
                 dl.status = "resolved".to_string();
             }
@@ -106,7 +115,10 @@ pub(super) async fn handle_dlq_retry(
             .map_err(|e| format!("serialize: {e}"))
         }
         Err(e) => {
-            let mut dlq = server.dead_letters.lock().unwrap_or_else(|e| e.into_inner());
+            let mut dlq = server
+                .dead_letters
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
             if let Some(dl) = dlq.iter_mut().find(|dl| dl.id == params.dead_letter_id) {
                 if dl.retry_count >= dl.max_retries {
                     dl.status = "abandoned".to_string();

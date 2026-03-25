@@ -14,7 +14,9 @@ pub(super) async fn handle_save_memory(
         .map_err(|e| format!("Failed to serialize: {}", e));
     }
 
-    let id = params.id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+    let id = params
+        .id
+        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
     let timestamp = Utc::now().to_rfc3339();
     let requested_scope = params.scope.clone();
     let (target_db, warning) = server.resolve_write_scope(&requested_scope);
@@ -61,7 +63,11 @@ pub(super) async fn handle_save_memory(
         let mut new_summary: Option<String> = None;
 
         if needs_embedding {
-            match server_clone.llm.embed_voyage(&enrich_text, "document").await {
+            match server_clone
+                .llm
+                .embed_voyage(&enrich_text, "document")
+                .await
+            {
                 Ok(vec) => new_vec = Some(vec),
                 Err(e) => eprintln!("[enrichment] embedding failed for {enrich_id}: {e}"),
             }
@@ -160,7 +166,8 @@ pub(super) async fn handle_search_memory(
     params: SearchMemoryParams,
 ) -> Result<String, String> {
     if memory_core::should_skip_query(&params.query) {
-        return serde_json::to_string(&json!([])).map_err(|e| format!("Failed to serialize: {}", e));
+        return serde_json::to_string(&json!([]))
+            .map_err(|e| format!("Failed to serialize: {}", e));
     }
 
     let pipeline_enabled = server.pipeline_enabled;
@@ -211,8 +218,10 @@ pub(super) async fn handle_search_memory(
         .collect();
 
     if pipeline_enabled {
-        let mut existing_ids: HashSet<String> =
-            deduped_results.iter().map(|(r, _)| r.entry.id.clone()).collect();
+        let mut existing_ids: HashSet<String> = deduped_results
+            .iter()
+            .map(|(r, _)| r.entry.id.clone())
+            .collect();
 
         if server.project_db_path.is_some() {
             let project_rules = server.with_project_store(|store| {

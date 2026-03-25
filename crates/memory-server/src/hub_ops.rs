@@ -121,6 +121,9 @@ pub(super) async fn handle_hub_register(
         created_at: String::new(),
         updated_at: String::new(),
     };
+    let visibility = capability_visibility_for_cap(&cap);
+    resp.insert("visibility".into(), json!(visibility.as_str()));
+
     server.with_store_for_scope(target_db, |store| {
         store
             .hub_register(&cap)
@@ -128,13 +131,21 @@ pub(super) async fn handle_hub_register(
     })?;
 
     if params.cap_type == "skill" {
-        match server.register_skill_tool(&cap) {
-            Ok(tool_name) => {
-                resp.insert("tool_name".into(), json!(tool_name));
+        if should_expose_skill_tool(&cap) {
+            match server.register_skill_tool(&cap) {
+                Ok(tool_name) => {
+                    resp.insert("tool_name".into(), json!(tool_name));
+                }
+                Err(e) => {
+                    resp.insert("skill_error".into(), json!(e));
+                }
             }
-            Err(e) => {
-                resp.insert("skill_error".into(), json!(e));
-            }
+        } else {
+            let _ = server.unregister_skill_tool(&cap.id);
+            append_warning(
+                &mut resp,
+                "Skill registered but not listed in tools (policy.visibility != 'listed'). Use run_skill or change policy.visibility.",
+            );
         }
 
         // L0 analysis: async background scan of the prompt template
@@ -175,7 +186,8 @@ pub(super) async fn handle_hub_register(
                             if let Some(summary) = analysis_json["summary"].as_str() {
                                 let mut updated_cap = cap_clone;
                                 updated_cap.description = summary.to_string();
-                                if let Ok(store) = MemoryStore::open(db_path.to_str().unwrap_or("")) {
+                                if let Ok(store) = MemoryStore::open(db_path.to_str().unwrap_or(""))
+                                {
                                     let _ = store.hub_register(&updated_cap);
                                 }
                             }
@@ -236,6 +248,10 @@ pub(super) async fn handle_hub_discover(
         let mut obj = serde_json::to_value(cap).unwrap_or(json!(null));
         if let Some(o) = obj.as_object_mut() {
             o.insert("db".into(), json!("project"));
+            o.insert(
+                "visibility".into(),
+                json!(capability_visibility_for_cap(cap).as_str()),
+            );
         }
         output.push(obj);
     }
@@ -246,6 +262,10 @@ pub(super) async fn handle_hub_discover(
         let mut obj = serde_json::to_value(cap).unwrap_or(json!(null));
         if let Some(o) = obj.as_object_mut() {
             o.insert("db".into(), json!("global"));
+            o.insert(
+                "visibility".into(),
+                json!(capability_visibility_for_cap(cap).as_str()),
+            );
         }
         output.push(obj);
     }
@@ -266,6 +286,10 @@ pub(super) async fn handle_hub_get(
             let mut obj = serde_json::to_value(&cap).unwrap_or(json!(null));
             if let Some(o) = obj.as_object_mut() {
                 o.insert("db".into(), json!("project"));
+                o.insert(
+                    "visibility".into(),
+                    json!(capability_visibility_for_cap(&cap).as_str()),
+                );
             }
             return serde_json::to_string(&obj).map_err(|e| format!("serialize: {e}"));
         }
@@ -279,6 +303,10 @@ pub(super) async fn handle_hub_get(
             let mut obj = serde_json::to_value(&cap).unwrap_or(json!(null));
             if let Some(o) = obj.as_object_mut() {
                 o.insert("db".into(), json!("global"));
+                o.insert(
+                    "visibility".into(),
+                    json!(capability_visibility_for_cap(&cap).as_str()),
+                );
             }
             serde_json::to_string(&obj).map_err(|e| format!("serialize: {e}"))
         }
@@ -303,8 +331,10 @@ pub(super) async fn handle_hub_feedback(
                     .hub_record_feedback(&params.id, params.success, params.rating)
                     .map_err(|e| format!("feedback: {e}"))
             })?;
-            return serde_json::to_string(&json!({"id": params.id, "recorded": true, "db": "project"}))
-                .map_err(|e| format!("serialize: {e}"));
+            return serde_json::to_string(
+                &json!({"id": params.id, "recorded": true, "db": "project"}),
+            )
+            .map_err(|e| format!("serialize: {e}"));
         }
     }
     server.with_global_store(|store| {
@@ -393,14 +423,30 @@ pub(super) async fn handle_hub_set_enabled(
                             if let Ok(tools) =
                                 serde_json::from_value::<Vec<rmcp::model::Tool>>(tools_json.clone())
                             {
-                                server
-                                    .cache_proxy_tools(server_name, filter_mcp_tools_by_permissions(&def, tools));
+                                server.cache_proxy_tools(
+                                    server_name,
+                                    filter_mcp_tools_by_permissions(&def, tools),
+                                );
                             }
                         }
                     }
                 }
             } else {
                 server.clear_proxy_tools(server_name);
+            }
+        }
+
+        if params.id.starts_with("skill:") {
+            if params.enabled {
+                if let Ok(cap) = server.get_capability(&params.id) {
+                    if should_expose_skill_tool(&cap) {
+                        let _ = server.register_skill_tool(&cap);
+                    } else {
+                        let _ = server.unregister_skill_tool(&cap.id);
+                    }
+                }
+            } else {
+                let _ = server.unregister_skill_tool(&params.id);
             }
         }
     }
@@ -444,8 +490,8 @@ pub(super) async fn handle_run_skill(
         ));
     }
 
-    let def: serde_json::Value =
-        serde_json::from_str(&cap.definition).map_err(|e| format!("invalid skill definition JSON: {e}"))?;
+    let def: serde_json::Value = serde_json::from_str(&cap.definition)
+        .map_err(|e| format!("invalid skill definition JSON: {e}"))?;
 
     let prompt_template = def["prompt"]
         .as_str()
@@ -490,7 +536,9 @@ pub(super) async fn handle_hub_call(
     params: HubCallParams,
 ) -> Result<String, String> {
     // Check enabled status before calling
-    let cap = server.get_capability(&params.server_id).map_err(|e| format!("{e}"))?;
+    let cap = server
+        .get_capability(&params.server_id)
+        .map_err(|e| format!("{e}"))?;
     if !cap.enabled {
         return Err(format!(
             "MCP server '{}' is disabled. Use hub_set_enabled to activate after review.",

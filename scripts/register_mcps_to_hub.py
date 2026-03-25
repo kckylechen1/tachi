@@ -13,6 +13,7 @@ import os
 import copy
 import select
 import time
+import argparse
 
 SERVER_BIN = "tachi"
 REQUEST_TIMEOUT_SECS = float(os.environ.get("TACHI_REQUEST_TIMEOUT_SECS", "90"))
@@ -27,8 +28,9 @@ MCP_SERVERS = [
             "transport": "stdio",
             "command": "npx",
             "args": ["-y", "@upstash/context7-mcp@latest"],
-            "tool_exposure": "flatten",
+            "tool_exposure": "gateway",
         },
+        "policy": {"visibility": "discoverable", "scope": "core-shared"},
     },
     {
         "id": "mcp:exa",
@@ -39,6 +41,7 @@ MCP_SERVERS = [
             "url": "https://mcp.exa.ai/mcp",
             "tool_exposure": "gateway",
         },
+        "policy": {"visibility": "discoverable", "scope": "core-shared"},
     },
     {
         "id": "mcp:longbridge",
@@ -58,10 +61,33 @@ MCP_SERVERS = [
             "tool_timeout_ms": 30000,
             "max_concurrency": 1,
         },
+        "policy": {
+            "visibility": "discoverable",
+            "scope": "agent-local",
+            "owner_agent": "stock",
+        },
     },
 ]
 
 REQUEST_ID = 0
+
+
+def parse_args():
+    parser = argparse.ArgumentParser(
+        description="Register shared MCP servers into Tachi Hub with visibility policy"
+    )
+    parser.add_argument(
+        "--scope",
+        choices=["global", "project"],
+        default="global",
+        help="Hub scope to register into",
+    )
+    parser.add_argument(
+        "--disable-hidden",
+        action="store_true",
+        help="Set enabled=false for policy.visibility=hidden capabilities",
+    )
+    return parser.parse_args()
 
 
 def next_id():
@@ -152,7 +178,42 @@ def apply_tool_filters(mcp):
     return definition, "; ".join(parts)
 
 
+def apply_cap_policy(mcp, definition):
+    env_key = mcp["name"].upper().replace("-", "_")
+    policy = copy.deepcopy(mcp.get("policy") or {})
+
+    default_visibility = os.environ.get("TACHI_DEFAULT_CAP_VISIBILITY", "").strip()
+    server_visibility = os.environ.get(f"TACHI_{env_key}_CAP_VISIBILITY", "").strip()
+    visibility = server_visibility or default_visibility
+    if visibility:
+        policy["visibility"] = visibility
+
+    default_scope = os.environ.get("TACHI_DEFAULT_CAP_SCOPE", "").strip()
+    server_scope = os.environ.get(f"TACHI_{env_key}_CAP_SCOPE", "").strip()
+    cap_scope = server_scope or default_scope
+    if cap_scope:
+        policy["scope"] = cap_scope
+
+    owner_agent = os.environ.get(f"TACHI_{env_key}_OWNER_AGENT", "").strip()
+    if owner_agent:
+        policy["owner_agent"] = owner_agent
+
+    if policy:
+        definition["policy"] = policy
+
+    summary_parts = []
+    if "visibility" in policy:
+        summary_parts.append(f"visibility={policy['visibility']}")
+    if "scope" in policy:
+        summary_parts.append(f"scope={policy['scope']}")
+    if "owner_agent" in policy:
+        summary_parts.append(f"owner_agent={policy['owner_agent']}")
+
+    return definition, "; ".join(summary_parts) if summary_parts else None
+
+
 def main():
+    args = parse_args()
     print(f"Registering {len(MCP_SERVERS)} MCP servers into Tachi Hub...")
 
     proc = subprocess.Popen(
@@ -192,8 +253,11 @@ def main():
             print(f"\n  Registering {mcp['id']}...")
             try:
                 definition, filter_summary = apply_tool_filters(mcp)
+                definition, policy_summary = apply_cap_policy(mcp, definition)
                 if filter_summary:
                     print(f"    ℹ️  tool filter: {filter_summary}")
+                if policy_summary:
+                    print(f"    ℹ️  policy: {policy_summary}")
 
                 resp = call_tool(
                     proc,
@@ -204,7 +268,7 @@ def main():
                         "name": mcp["name"],
                         "description": mcp["description"],
                         "definition": json.dumps(definition),
-                        "scope": "global",
+                        "scope": args.scope,
                         "version": 1,
                     },
                 )
@@ -230,13 +294,25 @@ def main():
                 total_tools = data.get("tools_total", tools)
                 filtered = data.get("tools_filtered_out", 0)
                 exposure_mode = data.get("tool_exposure", "flatten")
+                visibility = (definition.get("policy") or {}).get(
+                    "visibility", "listed"
+                )
+
+                if args.disable_hidden and visibility == "hidden":
+                    call_tool(
+                        proc,
+                        "hub_set_enabled",
+                        {"id": mcp["id"], "enabled": False},
+                    )
+                    print(f"    ⚠ {mcp['id']}: disabled due to hidden visibility")
+
                 if isinstance(filtered, int) and filtered > 0:
                     print(
-                        f"    ✅ {mcp['id']}: {tools}/{total_tools} tools enabled ({filtered} filtered, exposure={exposure_mode})"
+                        f"    ✅ {mcp['id']}: {tools}/{total_tools} tools enabled ({filtered} filtered, exposure={exposure_mode}, visibility={visibility})"
                     )
                 else:
                     print(
-                        f"    ✅ {mcp['id']}: {tools} tools discovered (exposure={exposure_mode})"
+                        f"    ✅ {mcp['id']}: {tools} tools discovered (exposure={exposure_mode}, visibility={visibility})"
                     )
                 registered += 1
             except (

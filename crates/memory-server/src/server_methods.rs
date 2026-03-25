@@ -86,6 +86,7 @@ impl MemoryServer {
     }
 
     pub(super) fn register_skill_tool(&self, cap: &HubCapability) -> Result<String, String> {
+        let _ = self.unregister_skill_tool(&cap.id);
         let (tool_name, tool) = build_skill_tool_from_cap(cap)?;
         self.skill_tools
             .lock()
@@ -96,6 +97,29 @@ impl MemoryServer {
             .map_err(|e| e.to_string())?
             .insert(tool_name.clone(), tool);
         Ok(tool_name)
+    }
+
+    pub(super) fn unregister_skill_tool(&self, skill_id: &str) -> Result<Option<String>, String> {
+        let removed_tool_name = {
+            let mut map = self.skill_tools.lock().map_err(|e| e.to_string())?;
+            let tool_name = map
+                .iter()
+                .find(|(_, id)| id.as_str() == skill_id)
+                .map(|(name, _)| name.clone());
+            if let Some(ref name) = tool_name {
+                map.remove(name);
+            }
+            tool_name
+        };
+
+        if let Some(ref name) = removed_tool_name {
+            self.skill_tool_defs
+                .lock()
+                .map_err(|e| e.to_string())?
+                .remove(name);
+        }
+
+        Ok(removed_tool_name)
     }
 
     pub(super) async fn call_skill_tool(
@@ -110,7 +134,10 @@ impl MemoryServer {
             .get(tool_name)
             .cloned()
             .ok_or_else(|| {
-                rmcp::ErrorData::invalid_params(format!("Skill tool '{}' not found", tool_name), None)
+                rmcp::ErrorData::invalid_params(
+                    format!("Skill tool '{}' not found", tool_name),
+                    None,
+                )
             })?;
 
         let cap = self.get_capability(&skill_id)?;
@@ -143,7 +170,8 @@ impl MemoryServer {
             prompt = prompt.replace("{{input}}", &input);
         }
 
-        let output = if let Some(mock_response) = def.get("mock_response").and_then(|v| v.as_str()) {
+        let output = if let Some(mock_response) = def.get("mock_response").and_then(|v| v.as_str())
+        {
             mock_response.to_string()
         } else {
             let system = def
@@ -151,8 +179,14 @@ impl MemoryServer {
                 .and_then(|v| v.as_str())
                 .unwrap_or("You are executing a reusable skill. Follow the instruction and produce the result.");
             let model = def.get("model").and_then(|v| v.as_str());
-            let temperature = def.get("temperature").and_then(|v| v.as_f64()).unwrap_or(0.2) as f32;
-            let max_tokens = def.get("max_tokens").and_then(|v| v.as_u64()).unwrap_or(1200) as u32;
+            let temperature = def
+                .get("temperature")
+                .and_then(|v| v.as_f64())
+                .unwrap_or(0.2) as f32;
+            let max_tokens = def
+                .get("max_tokens")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(1200) as u32;
             self.llm
                 .call_llm(system, &prompt, model, temperature, max_tokens)
                 .await

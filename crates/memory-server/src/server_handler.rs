@@ -27,6 +27,9 @@ impl ServerHandler for MemoryServer {
                     Ok(cap) if cap.enabled => cap,
                     _ => continue,
                 };
+                if !should_expose_mcp_tools(&cap) {
+                    continue;
+                }
 
                 let cap_def = serde_json::from_str::<serde_json::Value>(&cap.definition)
                     .unwrap_or_else(|_| json!({}));

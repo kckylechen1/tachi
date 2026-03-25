@@ -18,24 +18,27 @@ mod memory_search_ops;
 mod pipeline_ops;
 mod prompts;
 mod sandbox_ops;
-mod server_methods;
 mod server_handler;
+mod server_methods;
 mod shared_defs;
 mod skill_chain_ops;
 mod tool_params;
 mod utils;
 
-use crate::hub_helpers::{build_skill_tool_from_cap, make_text_tool_result};
+use crate::dlq_ops::{handle_dlq_list, handle_dlq_retry};
 use crate::ghost_ops::{handle_ghost_publish, handle_ghost_subscribe, handle_ghost_topics};
 use crate::graph_state_ops::{
     handle_add_edge, handle_get_edges, handle_get_state, handle_set_state,
 };
+use crate::hub_helpers::{
+    build_skill_tool_from_cap, capability_visibility_for_cap, make_text_tool_result,
+    should_expose_mcp_tools, should_expose_skill_tool,
+};
 use crate::hub_ops::{
     handle_hub_call, handle_hub_disconnect, handle_hub_discover, handle_hub_feedback,
-    handle_hub_get, handle_hub_register, handle_hub_set_enabled, handle_hub_stats, handle_run_skill,
-    handle_tachi_audit_log,
+    handle_hub_get, handle_hub_register, handle_hub_set_enabled, handle_hub_stats,
+    handle_run_skill, handle_tachi_audit_log,
 };
-use crate::dlq_ops::{handle_dlq_list, handle_dlq_retry};
 use crate::kanban::{
     handle_check_inbox, handle_post_card, handle_update_card, CheckInboxParams, PostCardParams,
     UpdateCardParams,
@@ -325,7 +328,6 @@ impl MemoryServer {
             mcp_tool_exposure_mode,
         })
     }
-
 }
 
 // ─── Tool Parameter Types ───────────────────────────────────────────────────────
