@@ -150,32 +150,56 @@ function App() {
 
           {activeTab === 'memory' && (
             <div style={{ padding: 20, height: '100%', overflowY: 'auto' }}>
-              <form onSubmit={handleMemorySubmit} style={{ display: 'flex', gap: 10, marginBottom: 16 }}>
+              <form onSubmit={handleMemorySubmit} style={{ display: 'flex', gap: 12, marginBottom: 24 }}>
                 <input
                   value={memoryQuery}
                   onChange={(event) => setMemoryQuery(event.target.value)}
-                  placeholder="Search memory..."
+                  placeholder="Search agent memory (e.g., 'React patterns')..."
                   style={{
                     flex: 1,
                     minWidth: 0,
-                    background: 'rgba(255,255,255,0.03)',
+                    background: 'rgba(255,255,255,0.04)',
                     border: '1px solid var(--glass-border)',
-                    borderRadius: 8,
+                    borderRadius: 12,
                     color: 'var(--text-main)',
-                    padding: '10px 12px',
+                    padding: '14px 18px',
                     fontFamily: 'Outfit, sans-serif',
+                    fontSize: '1rem',
+                    outline: 'none',
+                    transition: 'all 0.3s ease',
+                    boxShadow: 'inset 0 2px 4px rgba(0,0,0,0.1)'
+                  }}
+                  onFocus={(e) => {
+                    e.target.style.borderColor = 'var(--accent-cyan)';
+                    e.target.style.boxShadow = '0 0 0 3px rgba(0, 240, 255, 0.15), inset 0 2px 4px rgba(0,0,0,0.1)';
+                  }}
+                  onBlur={(e) => {
+                    e.target.style.borderColor = 'var(--glass-border)';
+                    e.target.style.boxShadow = 'inset 0 2px 4px rgba(0,0,0,0.1)';
                   }}
                 />
                 <button
                   type="submit"
                   style={{
-                    background: 'rgba(0,240,255,0.15)',
+                    background: 'linear-gradient(135deg, rgba(0,240,255,0.15), rgba(0,240,255,0.05))',
                     color: 'var(--accent-cyan)',
-                    border: '1px solid rgba(0,240,255,0.35)',
-                    borderRadius: 8,
-                    padding: '10px 14px',
+                    border: '1px solid rgba(0,240,255,0.4)',
+                    borderRadius: 12,
+                    padding: '0 24px',
                     cursor: 'pointer',
                     fontWeight: 600,
+                    fontSize: '1rem',
+                    transition: 'all 0.3s ease',
+                    textTransform: 'uppercase',
+                    letterSpacing: '0.05em'
+                  }}
+                  onMouseOver={(e) => {
+                    e.currentTarget.style.background = 'linear-gradient(135deg, rgba(0,240,255,0.25), rgba(0,240,255,0.1))';
+                    e.currentTarget.style.boxShadow = '0 0 12px rgba(0,240,255,0.3)';
+                  }}
+                  onMouseOut={(e) => {
+                    e.currentTarget.style.background = 'linear-gradient(135deg, rgba(0,240,255,0.15), rgba(0,240,255,0.05))';
+                    e.currentTarget.style.boxShadow = 'none';
                   }}
                 >
                   Search
