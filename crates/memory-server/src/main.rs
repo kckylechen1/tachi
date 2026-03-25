@@ -15,11 +15,8 @@ mod utils;
 
 use crate::hub_helpers::{build_skill_tool_from_cap, make_text_tool_result};
 use crate::kanban::{
-    card_from_agent, card_matches_inbox, card_metadata_str, card_priority, card_status,
-    card_to_agent, card_type, enrich_kanban_card_classification, kanban_priority_importance,
-    kanban_priority_rank, normalize_agent_id, normalize_card_priority, normalize_card_status,
-    normalize_card_type, CheckInboxParams, PostCardParams, UpdateCardParams, KANBAN_CATEGORY,
-    KANBAN_PATH_PREFIX,
+    handle_check_inbox, handle_post_card, handle_update_card, CheckInboxParams, PostCardParams,
+    UpdateCardParams,
 };
 use crate::mcp_proxy::{
     append_warning, clear_mcp_discovery_metadata, filter_mcp_tools_by_permissions,
@@ -2531,128 +2528,7 @@ impl MemoryServer {
         &self,
         Parameters(params): Parameters<PostCardParams>,
     ) -> Result<String, String> {
-        let from_agent = normalize_agent_id(&params.from_agent);
-        let to_agent = normalize_agent_id(&params.to_agent);
-        if from_agent.is_empty() {
-            return Err("from_agent cannot be empty".to_string());
-        }
-        if to_agent.is_empty() {
-            return Err("to_agent cannot be empty".to_string());
-        }
-
-        let title = params.title.trim().to_string();
-        let body = params.body.trim().to_string();
-        if title.is_empty() {
-            return Err("title cannot be empty".to_string());
-        }
-        if body.is_empty() {
-            return Err("body cannot be empty".to_string());
-        }
-
-        let priority = normalize_card_priority(&params.priority);
-        let card_type = normalize_card_type(&params.card_type);
-        let status = "open".to_string();
-        let now = Utc::now().to_rfc3339();
-        let card_id = uuid::Uuid::new_v4().to_string();
-
-        let mut metadata = json!({
-            "from_agent": from_agent,
-            "to_agent": to_agent,
-            "status": status,
-            "priority": priority,
-            "card_type": card_type,
-            "created_at": now,
-        });
-        if let Some(thread_id) = params
-            .thread_id
-            .as_ref()
-            .map(|v| v.trim())
-            .filter(|v| !v.is_empty())
-        {
-            metadata["thread_id"] = json!(thread_id);
-        }
-
-        let entry = MemoryEntry {
-            id: card_id.clone(),
-            path: format!(
-                "/kanban/{}/{}",
-                normalize_agent_id(&params.from_agent),
-                normalize_agent_id(&params.to_agent)
-            ),
-            summary: title.clone(),
-            text: body.clone(),
-            importance: kanban_priority_importance(
-                metadata["priority"].as_str().unwrap_or("medium"),
-            ),
-            timestamp: now,
-            category: KANBAN_CATEGORY.to_string(),
-            topic: String::new(),
-            keywords: vec![],
-            persons: vec![],
-            entities: vec![
-                normalize_agent_id(&params.from_agent),
-                normalize_agent_id(&params.to_agent),
-            ],
-            location: String::new(),
-            source: "agent".to_string(),
-            scope: "project".to_string(),
-            archived: false,
-            access_count: 0,
-            last_access: None,
-            revision: 1,
-            vector: None,
-            metadata: metadata.clone(),
-        };
-
-        let (target_db, warning) = self.resolve_write_scope("project");
-        self.with_store_for_scope(target_db, |store| {
-            store
-                .upsert(&entry)
-                .map_err(|e| format!("failed to save kanban card: {e}"))
-        })?;
-
-        let classify_enabled = parse_env_bool("KANBAN_CLASSIFY_ENABLED").unwrap_or(false);
-        if classify_enabled {
-            let db_path = match target_db {
-                DbScope::Global => self.global_db_path.clone(),
-                DbScope::Project => self
-                    .project_db_path
-                    .clone()
-                    .unwrap_or_else(|| self.global_db_path.clone()),
-            };
-            let card_id_clone = card_id.clone();
-            let body_clone = body.clone();
-            let title_clone = title.clone();
-            let source_clone = entry.source.clone();
-            let metadata_clone = metadata.clone();
-            let expected_revision = entry.revision;
-            tokio::spawn(async move {
-                if let Err(e) = enrich_kanban_card_classification(
-                    db_path,
-                    card_id_clone,
-                    body_clone,
-                    title_clone,
-                    source_clone,
-                    metadata_clone,
-                    expected_revision,
-                )
-                .await
-                {
-                    eprintln!("[kanban] classification skipped for card: {e}");
-                }
-            });
-        }
-
-        let mut resp = serde_json::Map::new();
-        resp.insert("status".into(), json!("posted"));
-        resp.insert("card_id".into(), json!(card_id));
-        resp.insert("db".into(), json!(target_db.as_str()));
-        resp.insert("classification_enqueued".into(), json!(classify_enabled));
-        if let Some(w) = warning {
-            append_warning(&mut resp, w);
-        }
-        serde_json::to_string(&serde_json::Value::Object(resp))
-            .map_err(|e| format!("serialize: {e}"))
+        handle_post_card(self, params).await
     }
 
     #[tool(description = "Check kanban inbox for a target agent.")]
@@ -2660,75 +2536,7 @@ impl MemoryServer {
         &self,
         Parameters(params): Parameters<CheckInboxParams>,
     ) -> Result<String, String> {
-        let agent_id = normalize_agent_id(&params.agent_id);
-        if agent_id.is_empty() {
-            return Err("agent_id cannot be empty".to_string());
-        }
-        let limit = params.limit.clamp(1, 1000);
-
-        let mut cards: Vec<(MemoryEntry, DbScope)> = Vec::new();
-        let global_cards = self.with_global_store(|store| {
-            store
-                .list_by_path(KANBAN_PATH_PREFIX, limit * 4, false)
-                .map_err(|e| format!("list global kanban cards failed: {e}"))
-        })?;
-        cards.extend(
-            global_cards
-                .into_iter()
-                .filter(|entry| card_matches_inbox(entry, &params, &agent_id))
-                .map(|entry| (entry, DbScope::Global)),
-        );
-
-        if self.project_db_path.is_some() {
-            let project_cards = self.with_project_store(|store| {
-                store
-                    .list_by_path(KANBAN_PATH_PREFIX, limit * 4, false)
-                    .map_err(|e| format!("list project kanban cards failed: {e}"))
-            })?;
-            cards.extend(
-                project_cards
-                    .into_iter()
-                    .filter(|entry| card_matches_inbox(entry, &params, &agent_id))
-                    .map(|entry| (entry, DbScope::Project)),
-            );
-        }
-
-        cards.sort_by(|a, b| {
-            let pa = kanban_priority_rank(card_priority(&a.0).as_str());
-            let pb = kanban_priority_rank(card_priority(&b.0).as_str());
-            pa.cmp(&pb).then_with(|| b.0.timestamp.cmp(&a.0.timestamp))
-        });
-        cards.truncate(limit);
-
-        let payload: Vec<serde_json::Value> = cards
-            .into_iter()
-            .map(|(entry, db)| {
-                json!({
-                    "id": entry.id,
-                    "db": db.as_str(),
-                    "from_agent": card_from_agent(&entry),
-                    "to_agent": card_to_agent(&entry),
-                    "status": card_status(&entry).unwrap_or_else(|| "open".to_string()),
-                    "priority": card_priority(&entry),
-                    "card_type": card_type(&entry),
-                    "thread_id": card_metadata_str(&entry, "thread_id"),
-                    "title": entry.summary,
-                    "body": entry.text,
-                    "path": entry.path,
-                    "timestamp": entry.timestamp,
-                    "topic": entry.topic,
-                    "keywords": entry.keywords,
-                    "metadata": entry.metadata,
-                })
-            })
-            .collect();
-
-        serde_json::to_string(&json!({
-            "agent_id": agent_id,
-            "count": payload.len(),
-            "cards": payload,
-        }))
-        .map_err(|e| format!("serialize: {e}"))
+        handle_check_inbox(self, params).await
     }
 
     #[tool(description = "Update status of a kanban card.")]
@@ -2736,103 +2544,7 @@ impl MemoryServer {
         &self,
         Parameters(params): Parameters<UpdateCardParams>,
     ) -> Result<String, String> {
-        let new_status = normalize_card_status(&params.new_status).ok_or_else(|| {
-            "new_status must be one of open|acknowledged|resolved|expired".to_string()
-        })?;
-
-        let mut found: Option<(DbScope, MemoryEntry)> = None;
-        if self.project_db_path.is_some() {
-            if let Ok(Some(entry)) = self.with_project_store(|store| {
-                store
-                    .get(&params.card_id)
-                    .map_err(|e| format!("get project card failed: {e}"))
-            }) {
-                found = Some((DbScope::Project, entry));
-            }
-        }
-        if found.is_none() {
-            if let Some(entry) = self.with_global_store(|store| {
-                store
-                    .get(&params.card_id)
-                    .map_err(|e| format!("get global card failed: {e}"))
-            })? {
-                found = Some((DbScope::Global, entry));
-            }
-        }
-
-        let (target_db, mut entry) = found.ok_or_else(|| {
-            format!(
-                "kanban card '{}' not found in project/global db",
-                params.card_id
-            )
-        })?;
-        if entry.category != KANBAN_CATEGORY {
-            return Err(format!(
-                "memory '{}' is not a kanban card (category={})",
-                entry.id, entry.category
-            ));
-        }
-
-        let mut metadata = entry.metadata.clone();
-        if !metadata.is_object() {
-            metadata = json!({});
-        }
-        metadata["status"] = json!(new_status);
-        metadata["updated_at"] = json!(Utc::now().to_rfc3339());
-
-        if let Some(response_text) = params
-            .response_text
-            .as_ref()
-            .map(|v| v.trim())
-            .filter(|v| !v.is_empty())
-        {
-            let mut replies = metadata
-                .get("replies")
-                .and_then(|v| v.as_array())
-                .cloned()
-                .unwrap_or_default();
-            replies.push(json!({
-                "timestamp": Utc::now().to_rfc3339(),
-                "text": response_text,
-            }));
-            metadata["replies"] = json!(replies);
-            entry.text = format!(
-                "{}\n\n[{}] {}",
-                entry.text,
-                Utc::now().to_rfc3339(),
-                response_text
-            );
-        }
-
-        let updated = self.with_store_for_scope(target_db, |store| {
-            store
-                .update_with_revision(
-                    &entry.id,
-                    &entry.text,
-                    &entry.summary,
-                    &entry.source,
-                    &metadata,
-                    None,
-                    entry.revision,
-                )
-                .map_err(|e| format!("update card failed: {e}"))
-        })?;
-
-        if !updated {
-            return Err(format!(
-                "kanban card '{}' update rejected due to revision mismatch",
-                entry.id
-            ));
-        }
-
-        serde_json::to_string(&json!({
-            "updated": true,
-            "db": target_db.as_str(),
-            "card_id": entry.id,
-            "status": metadata["status"],
-            "revision": entry.revision + 1,
-        }))
-        .map_err(|e| format!("serialize: {e}"))
+        handle_update_card(self, params).await
     }
 
     #[tool(description = "Register a capability (skill, plugin, or MCP server) in the Hub.")]
