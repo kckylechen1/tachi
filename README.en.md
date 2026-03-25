@@ -132,6 +132,13 @@ Please install the Tachi memory extension for OpenClaw:
 1. Install the Tachi MCP server (recommended):
    brew tap kckylechen1/tachi && brew install tachi
 
+   Optional: auto-detect local agent configs and inject a Tachi MCP entry:
+   python3 scripts/setup_agent_mcp.py --apply
+
+   Optional: auto-register local skills/MCPs into Hub:
+   python3 scripts/load_skills_to_hub.py
+   python3 scripts/register_mcps_to_hub.py
+
 2. Deploy the OpenClaw extension:
    bash -c "$(curl -fsSL https://raw.githubusercontent.com/kckylechen1/tachi/main/scripts/install_openclaw_ext.sh)"
    The script automates cloning, compiling the extension, and symlinking to the OpenClaw plugin directory.
@@ -148,7 +155,7 @@ Please install the Tachi memory extension for OpenClaw:
 
 ## ✨ Key Features
 
-- **⚡ High-Performance Rust Core (`memory-core`)**: The foundational scoring, storage, entity extraction, and retrieval engines are written in Rust, featuring dynamic bindings for Node.js (`NAPI-RS`, optional) and Python (`PyO3`). The OpenClaw plugin communicates via MCP stdio by default, with NAPI as an optional fallback. **34 MCP tools** exposed as of v0.8.
+- **⚡ High-Performance Rust Core (`memory-core`)**: The foundational scoring, storage, entity extraction, and retrieval engines are written in Rust, featuring dynamic bindings for Node.js (`NAPI-RS`, optional) and Python (`PyO3`). The OpenClaw plugin communicates via MCP stdio by default, with NAPI as an optional fallback. Built-in tools plus registered proxy/skill tools are exposed dynamically.
 - **🗂️ Filesystem Paradigm**: Context is managed hierarchically via a `path` parameter (e.g., `/user/preferences`, `/project/architecture`), allowing precise isolation and contextual scoping.
 - **🔍 3-Channel Hybrid Search Engine**:
   - **Semantic**: Built-in vector embedding search via `sqlite-vec` (KNN).
@@ -158,8 +165,8 @@ Please install the Tachi memory extension for OpenClaw:
 - **🧠 3-Tier Context Extraction**: Automatically parses ingestion into three tiers: `L0` (Abstract Summary), `L1` (Overview), and `L2` (Full Text). Agents dynamically retrieve the appropriate depth based on context constraints.
 - **🔄 Evolution Deduplication**: Utilizing math-based similarities for `HARD_SKIP` and `EVOLVE` updates.
 - **🔌 Dual-DB Architecture**: Global memories (`~/.Tachi/global/memory.db`) shared across all projects, plus per-project memories (`.Tachi/memory.db` at git root) for project-scoped context. Automatic git root detection and legacy migration. No external databases required.
-- **🎯 Tachi Hub**: A unified capability registry for Skills, Plugins, and MCP Servers. Register once, discover from any agent. Includes usage tracking, feedback metrics, and dual-DB inheritance (project overrides global). 67 pre-built skills available out of the box.
-- **🔀 MCP Proxy**: Register child MCP servers once in Tachi — their tools appear transparently to all agents. Shared connection pool with lazy-connect, idle cleanup, circuit breaker, and per-child concurrency control. Sanitized env with 21 preserved system variables. Transport aliases (`http`, `streamable-http` → `sse`). No more zombie processes.
+- **🎯 Tachi Hub**: A unified capability registry for Skills, Plugins, and MCP Servers. Register once, discover from any agent. Includes usage tracking, feedback metrics, and dual-DB inheritance (project overrides global). Preloaded skill count is runtime-dependent (based on installed skill packs).
+- **🔀 MCP Proxy**: Register child MCP servers once in Tachi — with `tool_exposure=flatten` they appear as `server__tool`, or with `tool_exposure=gateway` they stay compact behind `hub_call`. Shared connection pool with lazy-connect, idle cleanup, circuit breaker, and per-child concurrency control. Sanitized env with 21 preserved system variables. Transport aliases (`http`, `streamable-http` → `sse`). No more zombie processes.
 - **🗑️ Memory Lifecycle Management**: Full lifecycle control with `delete_memory` (permanent removal with CASCADE cleanup), `archive_memory` (soft-delete with recovery), and `memory_gc` (prune stale access history, old events, and audit log entries).
 - **🧹 Noise Filtering**: Automatic rejection of junk text on save (`is_noise_text`) and meaningless queries on search (`should_skip_query`). Saves embedding API costs and keeps the memory store clean. Bypassable via `force=true`.
 - **⏰ Background Garbage Collection**: Periodic background GC timer (default: every 6 hours, configurable via `MEMORY_GC_INTERVAL_SECS`). Keeps growing tables bounded without manual intervention.

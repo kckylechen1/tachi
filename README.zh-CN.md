@@ -129,6 +129,13 @@ Tachi 支持以外部扩展插件的形式桥接运行于 OpenClaw 内核。
 1. 安装 Tachi MCP 服务（推荐）：
    brew tap kckylechen1/tachi && brew install tachi
 
+   可选：自动扫描本机常见 Agent 配置并写入 Tachi MCP 入口：
+   python3 scripts/setup_agent_mcp.py --apply
+
+   可选：自动把本地 Skills / MCP 注册进 Hub：
+   python3 scripts/load_skills_to_hub.py
+   python3 scripts/register_mcps_to_hub.py
+
 2. 部署 OpenClaw 扩展：
    bash -c "$(curl -fsSL https://raw.githubusercontent.com/kckylechen1/tachi/main/scripts/install_openclaw_ext.sh)"
    此脚本将负责拉取代码、编译扩展并在 extensions 库中建立软链接。
@@ -145,7 +152,7 @@ Tachi 支持以外部扩展插件的形式桥接运行于 OpenClaw 内核。
 
 ## ✨ 核心特性
 
-- **⚡ 高性能 Rust 内核 (`memory-core`)**：计分、存储、实体提取与检索等底层引擎完全由 Rust 实现，并为 Node.js (`NAPI-RS`, 可选) 和 Python (`PyO3`) 提供原生高性能绑定。OpenClaw 插件优先通过 MCP stdio 协议连接 Tachi 二进制，NAPI 为可选备降路径。截至 v0.8 共暴露 **34 个 MCP 工具**。
+- **⚡ 高性能 Rust 内核 (`memory-core`)**：计分、存储、实体提取与检索等底层引擎完全由 Rust 实现，并为 Node.js (`NAPI-RS`, 可选) 和 Python (`PyO3`) 提供原生高性能绑定。OpenClaw 插件优先通过 MCP stdio 协议连接 Tachi 二进制，NAPI 为可选备降路径。最终暴露工具数由内置工具 + 已注册 MCP/Skill 动态决定。
 - **🗂️ 文件系统命名空间**：记忆信息摒弃扁平存储，采用 `path` 路径参数（如 `/user/preferences`, `/project/architecture`）进行拓扑层级管理，有效实现业务数据的隔离与精准定向。
 - **🔍 三通道分流检索引擎**：
   - **语义级（Semantic）**：内建基于 `sqlite-vec` 的 Voyage-4 向量聚类查询（KNN）。
@@ -155,8 +162,8 @@ Tachi 支持以外部扩展插件的形式桥接运行于 OpenClaw 内核。
 - **🧠 三级自适应上下文分层**：数据接入时将自动被提纯为三个深度：`L0`（摘要提要）, `L1`（段落概览）, 与 `L2`（完整内容）。
 - **🔄 两阶演化（记忆去重）**：首创基于数学相似度阈值的 `HARD_SKIP` 与 `EVOLVE` 两阶段查重去重算法。
 - **🔌 双库架构**：全局记忆 (`~/.Tachi/global/memory.db`) 跨项目共享（用户偏好、通用知识），每个项目独立数据库 (`.Tachi/memory.db` 位于 git 仓库根目录) 存储项目级上下文。自动检测 git 根目录，自动迁移旧版数据库。无需任何外部独立数据库依赖。
-- **🎯 Tachi Hub 能力中心**：统一的 Skill / Plugin / MCP Server 注册与发现中心。注册一次，所有 Agent 均可发现并使用。内置使用追踪、反馈评分、双库继承（项目级覆盖全局）。开箱即用 67 个预置 Skill。
-- **🔀 MCP 代理**：在 Tachi 中注册子 MCP Server，其工具将透明地展示给所有 Agent。共享连接池，按需连接，空闲自动清理，熔断器保护，并发控制。环境变量清洗保留 21 个系统关键变量。传输协议别名 (`http`、`streamable-http` → `sse`)。告别僵尸进程。
+- **🎯 Tachi Hub 能力中心**：统一的 Skill / Plugin / MCP Server 注册与发现中心。注册一次，所有 Agent 均可发现并使用。内置使用追踪、反馈评分、双库继承（项目级覆盖全局）。预置 Skill 数量取决于当前安装的技能包与注册结果。
+- **🔀 MCP 代理**：在 Tachi 中注册子 MCP Server，可通过 `tool_exposure=flatten` 展开为 `server__tool`，也可通过 `tool_exposure=gateway` 收敛为 `hub_call` 单入口透传。共享连接池，按需连接，空闲自动清理，熔断器保护，并发控制。环境变量清洗保留 21 个系统关键变量。传输协议别名 (`http`、`streamable-http` → `sse`)。告别僵尸进程。
 - **🗑️ 记忆生命周期管理**：完整的生命周期控制——`delete_memory`（永久删除，CASCADE 清理关联数据）、`archive_memory`（软删除，可恢复）、`memory_gc`（清理过期访问历史、事件日志、审计记录）。
 - **🧹 噎声过滤**：保存时自动拦截无价值内容 (`is_noise_text`)，检索时自动跳过无意义查询 (`should_skip_query`)。节省 Embedding API 调用成本，保持记忆库清洁。可通过 `force=true` 绕过。
 - **⏰ 后台自动垃圾回收**：周期性后台 GC 定时器（默认每 6 小时，通过 `MEMORY_GC_INTERVAL_SECS` 可配置）。无需手动干预即可保持增长表有界。

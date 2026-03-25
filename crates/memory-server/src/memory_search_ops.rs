@@ -1,0 +1,355 @@
+use super::*;
+
+pub(super) async fn handle_save_memory(
+    server: &MemoryServer,
+    params: SaveMemoryParams,
+) -> Result<String, String> {
+    if !params.force && memory_core::is_noise_text(&params.text) {
+        return serde_json::to_string(&json!({
+            "saved": false,
+            "noise": true,
+            "reason": "Text detected as noise (greeting, denial, or meta-question). Not saved.",
+            "hint": "Retry with force=true if this is intentional content.",
+        }))
+        .map_err(|e| format!("Failed to serialize: {}", e));
+    }
+
+    let id = params
+        .id
+        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+    let timestamp = Utc::now().to_rfc3339();
+    let requested_scope = params.scope.clone();
+    let (target_db, warning) = server.resolve_write_scope(&requested_scope);
+
+    let summary = params.summary;
+    let needs_summary = summary.is_empty();
+    let needs_embedding = params.vector.is_none();
+
+    let entry = MemoryEntry {
+        id: id.clone(),
+        path: params.path,
+        summary,
+        text: params.text,
+        importance: params.importance,
+        timestamp: timestamp.clone(),
+        category: params.category,
+        topic: params.topic,
+        keywords: params.keywords,
+        persons: params.persons,
+        entities: params.entities,
+        location: params.location,
+        source: "mcp".to_string(),
+        scope: requested_scope,
+        archived: false,
+        access_count: 0,
+        last_access: None,
+        revision: 1,
+        metadata: serde_json::json!({}),
+        vector: params.vector,
+    };
+
+    server.with_store_for_scope(target_db, |store| {
+        store
+            .upsert(&entry)
+            .map_err(|e| format!("Failed to save memory: {}", e))
+    })?;
+
+    let server_clone = server.clone();
+    let enrich_id = id.clone();
+    let enrich_text = entry.text.clone();
+    let enrich_revision = 1_i64;
+    tokio::spawn(async move {
+        let mut new_vec: Option<Vec<f32>> = None;
+        let mut new_summary: Option<String> = None;
+
+        if needs_embedding {
+            match server_clone
+                .llm
+                .embed_voyage(&enrich_text, "document")
+                .await
+            {
+                Ok(vec) => new_vec = Some(vec),
+                Err(e) => eprintln!("[enrichment] embedding failed for {enrich_id}: {e}"),
+            }
+        }
+
+        if needs_summary {
+            match server_clone.llm.generate_summary(&enrich_text).await {
+                Ok(s) => new_summary = Some(s),
+                Err(e) => eprintln!("[enrichment] summary failed for {enrich_id}: {e}"),
+            }
+        }
+
+        if new_vec.is_some() || new_summary.is_some() {
+            match server_clone.with_store_for_scope(target_db, |store| {
+                store
+                    .update_enrichment_fields(
+                        &enrich_id,
+                        new_summary.as_deref(),
+                        new_vec.as_deref(),
+                        enrich_revision,
+                    )
+                    .map_err(|e| format!("Failed to update enriched entry: {e}"))
+            }) {
+                Ok(true) => eprintln!("[enrichment] completed for {enrich_id}"),
+                Ok(false) => eprintln!("[enrichment] discarded for {enrich_id} (revision changed)"),
+                Err(e) => eprintln!("[enrichment] DB update failed for {enrich_id}: {e}"),
+            }
+        }
+    });
+
+    let mut response = serde_json::Map::new();
+    response.insert("id".into(), json!(id));
+    response.insert("timestamp".into(), json!(timestamp));
+    response.insert("db".into(), json!(target_db.as_str()));
+    response.insert("status".into(), json!("saved (enrichment pending)"));
+    if let Some(warning) = warning {
+        response.insert("warning".into(), json!(warning));
+    }
+
+    if params.auto_link && !entry.entities.is_empty() {
+        let auto_link_server = server.clone();
+        let auto_link_id = id.clone();
+        let auto_link_entities = entry.entities.clone();
+        tokio::spawn(async move {
+            for entity in &auto_link_entities {
+                let query = entity.clone();
+                if let Ok(results) = auto_link_server.with_global_store(|store| {
+                    store
+                        .search(
+                            &query,
+                            Some(memory_core::SearchOptions {
+                                top_k: 5,
+                                ..Default::default()
+                            }),
+                        )
+                        .map_err(|e| format!("{}", e))
+                }) {
+                    for result in results {
+                        if result.entry.id == auto_link_id {
+                            continue;
+                        }
+                        let shared: Vec<&String> = result
+                            .entry
+                            .entities
+                            .iter()
+                            .filter(|e| auto_link_entities.contains(e))
+                            .collect();
+                        if !shared.is_empty() {
+                            let edge = memory_core::MemoryEdge {
+                                source_id: auto_link_id.clone(),
+                                target_id: result.entry.id.clone(),
+                                relation: "related_to".to_string(),
+                                weight: 0.5,
+                                metadata: json!({ "auto_link": true, "shared_entities": shared }),
+                                created_at: chrono::Utc::now().to_rfc3339(),
+                                valid_from: String::new(),
+                                valid_to: None,
+                            };
+                            let _ = auto_link_server.with_global_store(|store| {
+                                store.add_edge(&edge).map_err(|e| format!("{}", e))
+                            });
+                        }
+                    }
+                }
+            }
+        });
+        response.insert("auto_link".into(), json!("pending"));
+    }
+
+    serde_json::to_string(&serde_json::Value::Object(response))
+        .map_err(|e| format!("Failed to serialize response: {}", e))
+}
+
+pub(super) async fn handle_search_memory(
+    server: &MemoryServer,
+    params: SearchMemoryParams,
+) -> Result<String, String> {
+    if memory_core::should_skip_query(&params.query) {
+        return serde_json::to_string(&json!([]))
+            .map_err(|e| format!("Failed to serialize: {}", e));
+    }
+
+    let pipeline_enabled = server.pipeline_enabled;
+
+    let mut combined_results: Vec<(memory_core::SearchResult, DbScope)> = Vec::new();
+
+    let global_opts = params.to_search_options(server.global_vec_available);
+
+    let global_results = server.with_global_store(|store| {
+        store
+            .search(&params.query, Some(global_opts))
+            .map_err(|e| format!("Search failed in global DB: {}", e))
+    })?;
+    combined_results.extend(global_results.into_iter().map(|r| (r, DbScope::Global)));
+
+    if server.project_db_path.is_some() {
+        let project_opts = params.to_search_options(server.project_vec_available);
+
+        let project_results = server.with_project_store(|store| {
+            store
+                .search(&params.query, Some(project_opts))
+                .map_err(|e| format!("Search failed in project DB: {}", e))
+        })?;
+        combined_results.extend(project_results.into_iter().map(|r| (r, DbScope::Project)));
+    }
+
+    combined_results.sort_by(|a, b| {
+        b.0.score
+            .final_score
+            .partial_cmp(&a.0.score.final_score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+
+    let mut seen_ids = HashSet::new();
+    let mut deduped_results: Vec<(memory_core::SearchResult, DbScope)> = Vec::new();
+    for (result, db_scope) in combined_results {
+        if seen_ids.insert(result.entry.id.clone()) {
+            deduped_results.push((result, db_scope));
+        }
+        if deduped_results.len() >= params.top_k {
+            break;
+        }
+    }
+
+    let mut output: Vec<serde_json::Value> = deduped_results
+        .iter()
+        .map(|(r, db_scope)| slim_search_result(r, *db_scope))
+        .collect();
+
+    if pipeline_enabled {
+        let mut existing_ids: HashSet<String> = deduped_results
+            .iter()
+            .map(|(r, _)| r.entry.id.clone())
+            .collect();
+
+        if server.project_db_path.is_some() {
+            let project_rules = server.with_project_store(|store| {
+                Ok(store
+                    .list_by_path("/behavior/global_rules", 50, false)
+                    .unwrap_or_default())
+            })?;
+            for rule in project_rules {
+                if !is_active_global_rule(&rule) {
+                    continue;
+                }
+                if !existing_ids.insert(rule.id.clone()) {
+                    continue;
+                }
+                output.push(slim_l0_rule(&rule, DbScope::Project));
+            }
+        }
+
+        let global_rules = server.with_global_store(|store| {
+            Ok(store
+                .list_by_path("/behavior/global_rules", 50, false)
+                .unwrap_or_default())
+        })?;
+        for rule in global_rules {
+            if !is_active_global_rule(&rule) {
+                continue;
+            }
+            if !existing_ids.insert(rule.id.clone()) {
+                continue;
+            }
+            output.push(slim_l0_rule(&rule, DbScope::Global));
+        }
+    }
+
+    serde_json::to_string(&output).map_err(|e| format!("Failed to serialize response: {}", e))
+}
+
+pub(super) async fn handle_find_similar_memory(
+    server: &MemoryServer,
+    params: FindSimilarMemoryParams,
+) -> Result<String, String> {
+    if params.query_vec.is_empty() {
+        return serde_json::to_string(&json!([]))
+            .map_err(|e| format!("Failed to serialize response: {}", e));
+    }
+
+    if params.query_vec.iter().any(|v| !v.is_finite()) {
+        return Err("query_vec contains non-finite values".to_string());
+    }
+
+    let mut combined_results: Vec<(memory_core::SearchResult, DbScope)> = Vec::new();
+    let common_weights = memory_core::HybridWeights {
+        semantic: 1.0,
+        fts: 0.0,
+        symbolic: 0.0,
+        decay: 0.0,
+    };
+
+    let global_opts = SearchOptions {
+        candidates_per_channel: params.candidates_per_channel.max(params.top_k),
+        top_k: params.top_k,
+        weights: common_weights.clone(),
+        path_prefix: params.path_prefix.clone(),
+        query_vec: Some(params.query_vec.clone()),
+        vec_available: server.global_vec_available,
+        record_access: false,
+        include_archived: params.include_archived,
+        mmr_threshold: None,
+        graph_expand_hops: 0,
+        graph_relation_filter: None,
+    };
+
+    let global_results = server.with_global_store(|store| {
+        store
+            .search("", Some(global_opts))
+            .map_err(|e| format!("Vector search failed in global DB: {}", e))
+    })?;
+    combined_results.extend(global_results.into_iter().map(|r| (r, DbScope::Global)));
+
+    if server.project_db_path.is_some() {
+        let project_opts = SearchOptions {
+            candidates_per_channel: params.candidates_per_channel.max(params.top_k),
+            top_k: params.top_k,
+            weights: common_weights,
+            path_prefix: params.path_prefix.clone(),
+            query_vec: Some(params.query_vec.clone()),
+            vec_available: server.project_vec_available,
+            record_access: false,
+            include_archived: params.include_archived,
+            mmr_threshold: None,
+            graph_expand_hops: 0,
+            graph_relation_filter: None,
+        };
+
+        let project_results = server.with_project_store(|store| {
+            store
+                .search("", Some(project_opts))
+                .map_err(|e| format!("Vector search failed in project DB: {}", e))
+        })?;
+        combined_results.extend(project_results.into_iter().map(|r| (r, DbScope::Project)));
+    }
+
+    combined_results.sort_by(|a, b| {
+        b.0.score
+            .vector
+            .partial_cmp(&a.0.score.vector)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+
+    let mut seen_ids = HashSet::new();
+    let mut output: Vec<serde_json::Value> = Vec::new();
+    for (result, db_scope) in combined_results {
+        if !seen_ids.insert(result.entry.id.clone()) {
+            continue;
+        }
+        let mut obj = match slim_entry(&result.entry, db_scope) {
+            serde_json::Value::Object(m) => m,
+            _ => serde_json::Map::new(),
+        };
+        obj.insert(
+            "similarity".into(),
+            json!((result.score.vector * 1000.0).round() / 1000.0),
+        );
+        output.push(serde_json::Value::Object(obj));
+        if output.len() >= params.top_k {
+            break;
+        }
+    }
+
+    serde_json::to_string(&output).map_err(|e| format!("Failed to serialize response: {}", e))
+}

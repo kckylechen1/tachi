@@ -1,0 +1,658 @@
+use super::*;
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub(super) struct SaveMemoryParams {
+    /// Full text content of the memory
+    pub text: String,
+
+    /// Short summary (≤100 chars)
+    #[serde(default)]
+    pub summary: String,
+
+    /// Hierarchical path, e.g. "/openclaw/agent-main"
+    #[serde(default = "default_path")]
+    pub path: String,
+
+    /// 0.0–1.0 importance score
+    #[serde(default = "default_importance")]
+    pub importance: f64,
+
+    /// Category: "fact" | "decision" | "experience" | "preference" | "entity" | "other"
+    #[serde(default = "default_category")]
+    pub category: String,
+
+    /// Topic / subject area
+    #[serde(default)]
+    pub topic: String,
+
+    /// Keyword tags
+    #[serde(default)]
+    pub keywords: Vec<String>,
+
+    /// Person names mentioned
+    #[serde(default)]
+    pub persons: Vec<String>,
+
+    /// Entity names mentioned
+    #[serde(default)]
+    pub entities: Vec<String>,
+
+    /// Physical or logical location
+    #[serde(default)]
+    pub location: String,
+
+    /// Scope: "user" | "project" | "general"
+    #[serde(default = "default_scope")]
+    pub scope: String,
+
+    /// Optional embedding vector (if provided, skip embedding generation)
+    #[serde(default)]
+    pub vector: Option<Vec<f32>>,
+
+    /// Optional entry ID (for updates)
+    #[serde(default)]
+    pub id: Option<String>,
+
+    /// Bypass noise filter and force-save text
+    #[serde(default)]
+    pub force: bool,
+
+    /// Auto-link: create graph edges to memories sharing the same entities (default: true)
+    #[serde(default = "default_auto_link")]
+    pub auto_link: bool,
+}
+
+fn default_auto_link() -> bool {
+    true
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub(super) struct RunSkillParams {
+    /// ID of the skill capability to execute (e.g. "skill:code-review")
+    pub skill_id: String,
+
+    /// Arguments to inject into the skill's prompt template
+    #[serde(default)]
+    pub args: serde_json::Value,
+}
+
+#[allow(dead_code)]
+fn default_path() -> String {
+    "/".to_string()
+}
+
+#[allow(dead_code)]
+fn default_importance() -> f64 {
+    0.7
+}
+
+#[allow(dead_code)]
+fn default_category() -> String {
+    "fact".to_string()
+}
+
+#[allow(dead_code)]
+fn default_scope() -> String {
+    "project".to_string()
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub(super) struct HybridWeightsParam {
+    /// Semantic (vector) weight (default: 0.4)
+    #[serde(default = "default_weight_semantic")]
+    pub semantic: f64,
+    /// Full-text search weight (default: 0.3)
+    #[serde(default = "default_weight_fts")]
+    pub fts: f64,
+    /// Symbolic weight (default: 0.2)
+    #[serde(default = "default_weight_symbolic")]
+    pub symbolic: f64,
+    /// Decay weight (default: 0.1)
+    #[serde(default = "default_weight_decay")]
+    pub decay: f64,
+}
+
+fn default_weight_semantic() -> f64 {
+    0.40
+}
+
+fn default_weight_fts() -> f64 {
+    0.30
+}
+
+fn default_weight_symbolic() -> f64 {
+    0.20
+}
+
+fn default_weight_decay() -> f64 {
+    0.10
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub(super) struct SearchMemoryParams {
+    /// Search query text
+    pub query: String,
+
+    /// Optional query embedding vector; when provided, enables vector channel
+    #[serde(default)]
+    pub query_vec: Option<Vec<f32>>,
+
+    /// Number of results to return (default: 6)
+    #[serde(default = "default_top_k")]
+    pub top_k: usize,
+
+    /// Optional path prefix filter
+    #[serde(default)]
+    pub path_prefix: Option<String>,
+
+    /// Whether to include archived entries
+    #[serde(default)]
+    pub include_archived: bool,
+
+    /// Number of candidates per channel
+    #[serde(default = "default_candidates")]
+    pub candidates_per_channel: usize,
+
+    /// MMR diversity threshold (0.0-1.0), set to null to disable
+    #[serde(default = "default_mmr_threshold")]
+    pub mmr_threshold: Option<f64>,
+
+    /// Graph expand hops (0 = disabled, default = 1)
+    #[serde(default = "default_graph_hops")]
+    pub graph_expand_hops: u32,
+
+    /// Optional relation filter for graph expansion
+    #[serde(default)]
+    pub graph_relation_filter: Option<String>,
+
+    /// Optional scoring weights override {semantic, fts, symbolic, decay}
+    #[serde(default)]
+    pub weights: Option<HybridWeightsParam>,
+}
+
+impl SearchMemoryParams {
+    /// Build SearchOptions from params, only differing by vec_available per DB.
+    pub(super) fn to_search_options(&self, vec_available: bool) -> SearchOptions {
+        let weights = match &self.weights {
+            Some(w) => HybridWeights {
+                semantic: w.semantic,
+                fts: w.fts,
+                symbolic: w.symbolic,
+                decay: w.decay,
+            },
+            None => HybridWeights::default(),
+        };
+        SearchOptions {
+            top_k: self.top_k,
+            path_prefix: self.path_prefix.clone(),
+            query_vec: self.query_vec.clone(),
+            include_archived: self.include_archived,
+            candidates_per_channel: self.candidates_per_channel,
+            mmr_threshold: self.mmr_threshold,
+            graph_expand_hops: self.graph_expand_hops,
+            graph_relation_filter: self.graph_relation_filter.clone(),
+            vec_available,
+            weights,
+            ..Default::default()
+        }
+    }
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub(super) struct FindSimilarMemoryParams {
+    /// Query embedding vector (same dimension as stored embeddings)
+    pub query_vec: Vec<f32>,
+
+    /// Number of results to return (default: 5)
+    #[serde(default = "default_find_similar_top_k")]
+    pub top_k: usize,
+
+    /// Optional path prefix filter
+    #[serde(default)]
+    pub path_prefix: Option<String>,
+
+    /// Whether to include archived entries
+    #[serde(default)]
+    pub include_archived: bool,
+
+    /// Number of candidates pulled from vector channel (default: 20)
+    #[serde(default = "default_candidates")]
+    pub candidates_per_channel: usize,
+}
+
+fn default_find_similar_top_k() -> usize {
+    5
+}
+
+/// Build a MemoryEntry from a JSON fact value (shared by extract_facts and ingest_event).
+pub(super) fn fact_to_entry(
+    fact: &serde_json::Value,
+    source: &str,
+    metadata: serde_json::Value,
+) -> Option<MemoryEntry> {
+    let text = fact["text"].as_str().unwrap_or("").to_string();
+    if text.is_empty() {
+        return None;
+    }
+    let topic = fact["topic"].as_str().unwrap_or("").to_string();
+    let importance = fact["importance"].as_f64().unwrap_or(0.7).clamp(0.0, 1.0);
+    let keywords: Vec<String> = fact["keywords"]
+        .as_array()
+        .map(|a| {
+            a.iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect()
+        })
+        .unwrap_or_default();
+    let scope_raw = fact["scope"].as_str().unwrap_or("general");
+    let scope = match scope_raw {
+        "user" | "project" | "general" => scope_raw.to_string(),
+        _ => "general".to_string(),
+    };
+    let summary = text.chars().take(100).collect::<String>();
+    Some(MemoryEntry {
+        id: uuid::Uuid::new_v4().to_string(),
+        path: format!("/{}/{}", scope, topic.replace(' ', "_")),
+        summary,
+        text,
+        importance,
+        timestamp: Utc::now().to_rfc3339(),
+        category: "fact".to_string(),
+        topic,
+        keywords,
+        persons: vec![],
+        entities: vec![],
+        location: String::new(),
+        source: source.to_string(),
+        scope,
+        archived: false,
+        access_count: 0,
+        last_access: None,
+        revision: 1,
+        metadata,
+        vector: None,
+    })
+}
+
+#[allow(dead_code)]
+fn default_top_k() -> usize {
+    6
+}
+
+#[allow(dead_code)]
+fn default_candidates() -> usize {
+    20
+}
+
+#[allow(dead_code)]
+fn default_mmr_threshold() -> Option<f64> {
+    Some(0.85)
+}
+
+fn default_graph_hops() -> u32 {
+    1
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub(super) struct GetMemoryParams {
+    /// Memory entry ID
+    pub id: String,
+
+    /// Whether to include archived entries
+    #[serde(default)]
+    pub include_archived: bool,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub(super) struct ListMemoriesParams {
+    /// Path prefix to filter
+    #[serde(default = "default_path")]
+    pub path_prefix: String,
+
+    /// Maximum number of entries to return
+    #[serde(default = "default_limit")]
+    pub limit: usize,
+
+    /// Whether to include archived entries
+    #[serde(default)]
+    pub include_archived: bool,
+}
+
+#[allow(dead_code)]
+fn default_limit() -> usize {
+    100
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub(super) struct SetStateParams {
+    /// State key
+    pub key: String,
+
+    /// State value (JSON value)
+    pub value: serde_json::Value,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub(super) struct GetStateParams {
+    /// State key
+    pub key: String,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub(super) struct ExtractFactsParams {
+    /// Text to extract facts from
+    pub text: String,
+
+    /// Source identifier for the extraction
+    #[serde(default = "default_extraction_source")]
+    pub source: String,
+}
+
+#[allow(dead_code)]
+fn default_extraction_source() -> String {
+    "extraction".to_string()
+}
+
+/// A single message in a conversation turn
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub(super) struct Message {
+    /// Role of the message sender (e.g., "user", "assistant", "system")
+    #[allow(dead_code)]
+    pub role: String,
+    /// Content of the message
+    pub content: String,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub(super) struct IngestEventParams {
+    /// Conversation identifier
+    pub conversation_id: String,
+
+    /// Turn identifier
+    pub turn_id: String,
+
+    /// Messages in the conversation turn
+    pub messages: Vec<Message>,
+}
+
+#[allow(dead_code)]
+fn default_hub_version() -> u32 {
+    1
+}
+
+#[allow(dead_code)]
+fn default_true() -> bool {
+    true
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub(super) struct HubRegisterParams {
+    /// Unique capability ID, e.g. "skill:code-review", "mcp:github"
+    pub id: String,
+    /// Type: "skill" | "plugin" | "mcp"
+    pub cap_type: String,
+    /// Human-readable name
+    pub name: String,
+    /// Short description
+    #[serde(default)]
+    pub description: String,
+    /// JSON string of capability definition (prompt template, manifest, config)
+    #[serde(default)]
+    pub definition: String,
+    /// Version number
+    #[serde(default = "default_hub_version")]
+    pub version: u32,
+    /// Target database scope: "global" or "project" (default)
+    #[serde(default = "default_scope")]
+    pub scope: String,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub(super) struct HubDiscoverParams {
+    /// Optional search query (searches name + description)
+    #[serde(default)]
+    pub query: Option<String>,
+    /// Optional type filter: "skill" | "plugin" | "mcp"
+    #[serde(default)]
+    pub cap_type: Option<String>,
+    /// Only return enabled capabilities (default: true)
+    #[serde(default = "default_true")]
+    pub enabled_only: bool,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub(super) struct HubGetParams {
+    /// Capability ID to retrieve
+    pub id: String,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub(super) struct HubFeedbackParams {
+    /// Capability ID
+    pub id: String,
+    /// Whether the invocation was successful
+    pub success: bool,
+    /// Optional user rating (0.0 - 5.0)
+    #[serde(default)]
+    pub rating: Option<f64>,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub(super) struct HubCallParams {
+    /// MCP server capability ID (e.g. "mcp:github")
+    pub server_id: String,
+    /// Tool name to call on the child MCP server
+    pub tool_name: String,
+    /// JSON arguments to pass to the tool
+    #[serde(default)]
+    pub arguments: serde_json::Value,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub(super) struct HubDisconnectParams {
+    /// MCP server capability ID (e.g. "mcp:longbridge") or server name
+    pub server_id: String,
+}
+
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub(super) struct DeleteMemoryParams {
+    /// Memory entry ID to delete
+    pub id: String,
+}
+
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub(super) struct ArchiveMemoryParams {
+    /// Memory entry ID to archive
+    pub id: String,
+}
+
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub(super) struct HubSetEnabledParams {
+    /// Capability ID
+    pub id: String,
+    /// Whether to enable (true) or disable (false)
+    pub enabled: bool,
+}
+
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub(super) struct AddEdgeParams {
+    /// Source memory ID
+    pub source_id: String,
+    /// Target memory ID
+    pub target_id: String,
+    /// Relation type (e.g. "causes", "follows", "related_to")
+    pub relation: String,
+    /// Edge weight (default: 1.0)
+    #[serde(default = "default_edge_weight")]
+    pub weight: f64,
+    /// Optional JSON metadata for the edge
+    #[serde(default)]
+    pub metadata: Option<serde_json::Value>,
+
+    /// Scope: "global" or "project" (default)
+    #[serde(default = "default_scope")]
+    pub scope: String,
+}
+
+fn default_edge_weight() -> f64 {
+    1.0
+}
+
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub(super) struct GetEdgesParams {
+    /// Memory entry ID
+    pub memory_id: String,
+    /// Direction: "outgoing", "incoming", or "both" (default: "both")
+    #[serde(default = "default_edge_direction")]
+    pub direction: String,
+    /// Optional relation type filter
+    #[serde(default)]
+    pub relation_filter: Option<String>,
+
+    /// Scope: "global" or "project" (default)
+    #[serde(default = "default_scope")]
+    pub scope: String,
+}
+
+fn default_edge_direction() -> String {
+    "both".to_string()
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub(super) struct AuditLogParams {
+    /// Maximum entries to return (default: 50)
+    #[serde(default = "default_audit_limit")]
+    pub limit: usize,
+    /// Optional server_id filter
+    #[serde(default)]
+    pub server_filter: Option<String>,
+}
+
+#[allow(dead_code)]
+fn default_audit_limit() -> usize {
+    50
+}
+
+#[allow(dead_code)]
+fn default_sync_limit() -> usize {
+    100
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub(super) struct SyncMemoriesParams {
+    /// Unique agent identifier for tracking known state
+    pub agent_id: String,
+    /// Optional path prefix to scope the sync (e.g. "/project")
+    #[serde(default)]
+    pub path_prefix: Option<String>,
+    /// Maximum entries to return (default: 100)
+    #[serde(default = "default_sync_limit")]
+    pub limit: usize,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub(super) struct GhostPublishParams {
+    /// Topic to publish to (e.g. "build-status", "code-review")
+    pub topic: String,
+    /// Message payload (any JSON value)
+    pub payload: serde_json::Value,
+    /// Publisher agent identifier
+    pub publisher: String,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub(super) struct GhostSubscribeParams {
+    /// Unique agent identifier for cursor tracking
+    pub agent_id: String,
+    /// Topics to subscribe to and poll for new messages
+    pub topics: Vec<String>,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub(super) struct DlqListParams {
+    /// Filter by status: "pending", "retrying", "resolved", "abandoned"
+    #[serde(default)]
+    pub status_filter: Option<String>,
+    /// Max entries to return (default: 50)
+    #[serde(default)]
+    pub limit: Option<usize>,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub(super) struct DlqRetryParams {
+    /// ID of the dead letter entry to retry
+    pub dead_letter_id: String,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub(super) struct SandboxSetRuleParams {
+    /// Agent role (e.g. "code-review", "finance", "admin")
+    pub agent_role: String,
+    /// Path pattern to match (e.g. "/finance/*", "/project/secrets")
+    pub path_pattern: String,
+    /// Access level: "read", "write", or "deny"
+    #[serde(default = "default_access_level")]
+    pub access_level: String,
+}
+
+fn default_access_level() -> String {
+    "read".to_string()
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub(super) struct SandboxCheckParams {
+    /// Agent role to check access for
+    pub agent_role: String,
+    /// Memory path to check
+    pub path: String,
+    /// Operation type: "read" or "write"
+    #[serde(default = "default_sandbox_operation")]
+    pub operation: String,
+}
+
+fn default_sandbox_operation() -> String {
+    "read".to_string()
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub(super) struct ChainStep {
+    /// Skill capability ID (e.g. "skill:summarize")
+    pub skill_id: String,
+    /// Extra arguments to merge with piped input
+    #[serde(default)]
+    pub extra_args: Option<serde_json::Value>,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub(super) struct ChainSkillsParams {
+    /// Ordered list of skill steps to execute
+    pub steps: Vec<ChainStep>,
+    /// Input for the first step
+    pub initial_input: String,
+}
