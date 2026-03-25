@@ -1,6 +1,6 @@
 {
   "name": "@chaoxlabs/tachi-node",
-  "version": "0.7.2",
+  "version": "0.9.0",
   "description": "High-performance memory storage & hybrid search engine (Rust native module)",
   "main": "index.js",
   "types": "index.d.ts",

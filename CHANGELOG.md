@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.9.0] - Unreleased
+## [0.9.0] - 2026-03-25
 
 ### Added
 
@@ -14,6 +14,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`check_inbox` Tool**: Query per-agent inbox with status/since filters, optional broadcast fan-in (`to_agent="*"`), and deterministic ordering by priority then recency.
 - **`update_card` Tool**: Update card status via revision-checked optimistic locking and append threaded replies (`metadata.replies`) without introducing new tables.
 - **Optional local classification pipeline**: Background kanban enrichment hook (`KANBAN_CLASSIFY_ENABLED`, `KANBAN_MODEL_URL`, `KANBAN_MODEL_NAME`) to tag cards with `topic`, `keywords`, and `priority_suggestion`.
+
+#### Hub Policy & Visibility
+- **Capability visibility policy**: Skill/MCP definitions now support `policy.visibility` (`listed`, `discoverable`, `hidden`) to reduce tool-list noise while preserving on-demand calls.
+- **Safer default MCP exposure**: registration scripts default shared MCP entries toward `tool_exposure=gateway` and discoverable policy modes.
+
+### Changed
+
+- **Main server modularization**: `memory-server` tool logic is split into dedicated modules (`hub_ops`, `memory_search_ops`, `pipeline_ops`, `server_methods`, etc.), reducing `main.rs` to < 1000 lines and improving maintainability.
+- **Daemon project-context behavior**: daemon mode now disables auto-detected project DB by default to avoid mixed project context; explicit `--project-db` enables single-project daemon mode.
+
+### Fixed
+
+- **Error recovery visibility**: replaced silent fallbacks in key paths with explicit warnings for invalid definitions/tool payloads and poisoned-mutex recovery.
+- **Config validation hardening**: MCP `env`/`args` definition parsing is now stricter to prevent malformed runtime config from being silently accepted.
 
 ## [0.8.0] - 2026-03-24
 
