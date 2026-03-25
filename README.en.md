@@ -138,6 +138,8 @@ Please install the Tachi memory extension for OpenClaw:
    Optional: auto-register local skills/MCPs into Hub:
    python3 scripts/load_skills_to_hub.py
    python3 scripts/register_mcps_to_hub.py
+   # By default this also syncs local agent mcp configs and consolidates direct MCP entries registered in Hub under tachi
+   # Skip this behavior with: python3 scripts/register_mcps_to_hub.py --no-sync-agent-config
 
 2. Deploy the OpenClaw extension:
    bash -c "$(curl -fsSL https://raw.githubusercontent.com/kckylechen1/tachi/main/scripts/install_openclaw_ext.sh)"

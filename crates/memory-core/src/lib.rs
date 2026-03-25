@@ -412,4 +412,51 @@ impl MemoryStore {
     ) -> Result<(bool, Option<String>), MemoryError> {
         db::check_sandbox_access(&self.conn, agent_role, path, operation)
     }
+
+    /// Set or update runtime sandbox policy for a capability.
+    #[allow(clippy::too_many_arguments)]
+    pub fn set_sandbox_policy(
+        &self,
+        capability_id: &str,
+        runtime_type: &str,
+        env_allowlist_json: &str,
+        fs_read_roots_json: &str,
+        fs_write_roots_json: &str,
+        cwd_roots_json: &str,
+        max_startup_ms: u64,
+        max_tool_ms: u64,
+        max_concurrency: u32,
+        enabled: bool,
+    ) -> Result<(), MemoryError> {
+        db::set_sandbox_policy(
+            &self.conn,
+            capability_id,
+            runtime_type,
+            env_allowlist_json,
+            fs_read_roots_json,
+            fs_write_roots_json,
+            cwd_roots_json,
+            max_startup_ms,
+            max_tool_ms,
+            max_concurrency,
+            enabled,
+        )
+    }
+
+    /// Get runtime sandbox policy by capability id.
+    pub fn get_sandbox_policy(
+        &self,
+        capability_id: &str,
+    ) -> Result<Option<serde_json::Value>, MemoryError> {
+        db::get_sandbox_policy(&self.conn, capability_id)
+    }
+
+    /// List runtime sandbox policies.
+    pub fn list_sandbox_policies(
+        &self,
+        enabled_only: bool,
+        limit: usize,
+    ) -> Result<Vec<serde_json::Value>, MemoryError> {
+        db::list_sandbox_policies(&self.conn, enabled_only, limit)
+    }
 }

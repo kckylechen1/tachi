@@ -132,6 +132,8 @@ Tachi 亦化身为 OpenClaw 气海之元婴法宝。
    可选：自动将本地 Skills / MCP 登录万宝楼（Hub）：
    python3 scripts/load_skills_to_hub.py
    python3 scripts/register_mcps_to_hub.py
+   # 默认会自动同步常见 Agent 的 mcp 配置，并把 Hub 中已注册 MCP 的直连项收敛到 tachi
+   # 如需跳过：python3 scripts/register_mcps_to_hub.py --no-sync-agent-config
 
 2. 部署 OpenClaw 扩展：
    bash -c "$(curl -fsSL https://raw.githubusercontent.com/kckylechen1/tachi/main/scripts/install_openclaw_ext.sh)"
