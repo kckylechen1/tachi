@@ -1,5 +1,401 @@
 use super::*;
 
+fn capability_callable(cap: &HubCapability) -> bool {
+    if !cap.enabled {
+        return false;
+    }
+    if !cap.cap_type.eq_ignore_ascii_case("mcp") {
+        return true;
+    }
+    match serde_json::from_str::<serde_json::Value>(&cap.definition) {
+        Ok(def) => def
+            .get("discovery_status")
+            .and_then(|v| v.as_str())
+            .map(|s| s == "ready")
+            .unwrap_or(true),
+        Err(_) => cap.enabled,
+    }
+}
+
+fn risk_rank(risk: &str) -> u8 {
+    match risk.trim().to_ascii_lowercase().as_str() {
+        "high" => 3,
+        "medium" => 2,
+        _ => 1,
+    }
+}
+
+fn normalize_risk(risk: &str) -> &'static str {
+    match risk_rank(risk) {
+        3 => "high",
+        2 => "medium",
+        _ => "low",
+    }
+}
+
+fn findings_to_vec(value: Option<&serde_json::Value>) -> Vec<String> {
+    value
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|x| match x {
+                    serde_json::Value::String(s) => Some(s.trim().to_string()),
+                    serde_json::Value::Object(map) => map
+                        .get("finding")
+                        .or_else(|| map.get("issue"))
+                        .or_else(|| map.get("signal"))
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.trim().to_string()),
+                    _ => None,
+                })
+                .filter(|s| !s.is_empty())
+                .collect::<Vec<String>>()
+        })
+        .unwrap_or_default()
+}
+
+fn signals_to_vec(value: Option<&serde_json::Value>) -> Vec<String> {
+    value
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|x| match x {
+                    serde_json::Value::String(s) => Some(s.trim().to_string()),
+                    serde_json::Value::Object(map) => map
+                        .get("signal")
+                        .or_else(|| map.get("id"))
+                        .or_else(|| map.get("name"))
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.trim().to_string()),
+                    _ => None,
+                })
+                .filter(|s| !s.is_empty())
+                .collect::<Vec<String>>()
+        })
+        .unwrap_or_default()
+}
+
+fn merge_findings(static_findings: &[String], llm_findings: &[String]) -> Vec<String> {
+    let mut merged = Vec::new();
+    for item in static_findings.iter().chain(llm_findings.iter()) {
+        if !merged.contains(item) {
+            merged.push(item.clone());
+        }
+    }
+    merged
+}
+
+fn scan_skill_definition(def: &serde_json::Value) -> serde_json::Value {
+    let mut findings: Vec<String> = Vec::new();
+    let mut signals: Vec<String> = Vec::new();
+    let mut high_hits: u32 = 0;
+    let mut medium_hits: u32 = 0;
+
+    let prompt_like_fields = ["prompt", "template", "system", "instructions", "description"];
+    let mut corpus = String::new();
+    for field in prompt_like_fields {
+        if let Some(text) = def.get(field).and_then(|v| v.as_str()) {
+            if !corpus.is_empty() {
+                corpus.push('\n');
+            }
+            corpus.push_str(text);
+        }
+    }
+    let lower = corpus.to_ascii_lowercase();
+
+    let mut record = |signal: &str, finding: &str, severity: &str| {
+        if !signals.iter().any(|s| s == signal) {
+            signals.push(signal.to_string());
+        }
+        if !findings.iter().any(|f| f == finding) {
+            findings.push(finding.to_string());
+        }
+        if severity == "high" {
+            high_hits += 1;
+        } else {
+            medium_hits += 1;
+        }
+    };
+
+    let critical_patterns = [
+        ("rm -rf", "destructive_action", "Contains destructive shell command pattern 'rm -rf'"),
+        ("mkfs", "destructive_action", "Contains disk format pattern 'mkfs'"),
+        ("dd if=", "destructive_action", "Contains raw disk write pattern 'dd if='"),
+        ("shred ", "destructive_action", "Contains secure delete pattern 'shred'"),
+        ("sudo ", "privilege_escalation", "Contains privileged command pattern 'sudo'"),
+        (
+            "curl | sh",
+            "remote_bootstrap",
+            "Contains remote shell pipe pattern 'curl | sh'",
+        ),
+        (
+            "curl|sh",
+            "remote_bootstrap",
+            "Contains remote shell pipe pattern 'curl|sh'",
+        ),
+        (
+            "wget | sh",
+            "remote_bootstrap",
+            "Contains remote shell pipe pattern 'wget | sh'",
+        ),
+        (
+            "wget|sh",
+            "remote_bootstrap",
+            "Contains remote shell pipe pattern 'wget|sh'",
+        ),
+        (
+            "invoke-expression",
+            "remote_bootstrap",
+            "Contains PowerShell remote execution pattern 'Invoke-Expression'",
+        ),
+        (
+            "begin rsa private key",
+            "secret_exposure",
+            "Contains private key material marker",
+        ),
+        (
+            "begin openssh private key",
+            "secret_exposure",
+            "Contains OpenSSH private key material marker",
+        ),
+        (
+            "aws_secret_access_key",
+            "secret_exposure",
+            "Contains inline AWS secret key marker",
+        ),
+        (
+            "ghp_",
+            "secret_exposure",
+            "Contains inline GitHub token marker",
+        ),
+    ];
+    for (pat, signal, msg) in critical_patterns {
+        if lower.contains(pat) {
+            record(signal, msg, "high");
+        }
+    }
+
+    let warning_patterns = [
+        ("os.system(", "unbounded_execution", "Contains os.system execution pattern"),
+        (
+            "subprocess.",
+            "unbounded_execution",
+            "Contains subprocess execution pattern",
+        ),
+        ("eval(", "unbounded_execution", "Contains eval execution pattern"),
+        ("exec(", "unbounded_execution", "Contains exec execution pattern"),
+        ("bash -c", "unbounded_execution", "Contains shell trampoline pattern 'bash -c'"),
+        ("sh -c", "unbounded_execution", "Contains shell trampoline pattern 'sh -c'"),
+        (
+            "process.env",
+            "secret_exposure",
+            "Contains process.env environment access pattern",
+        ),
+        (
+            "printenv",
+            "secret_exposure",
+            "Contains environment dump pattern 'printenv'",
+        ),
+        (
+            ".env",
+            "secret_exposure",
+            "Contains '.env' access indicator",
+        ),
+        (
+            "~/.ssh",
+            "secret_exposure",
+            "Contains '~/.ssh' key path indicator",
+        ),
+        (
+            "/etc/passwd",
+            "data_exfiltration",
+            "Contains local system file path '/etc/passwd'",
+        ),
+        (
+            "ignore previous instructions",
+            "prompt_injection",
+            "Contains prompt override phrase 'ignore previous instructions'",
+        ),
+        (
+            "ignore all previous",
+            "prompt_injection",
+            "Contains prompt override phrase 'ignore all previous'",
+        ),
+        (
+            "bypass safety",
+            "prompt_injection",
+            "Contains policy bypass phrase 'bypass safety'",
+        ),
+        (
+            "disable safety",
+            "prompt_injection",
+            "Contains policy bypass phrase 'disable safety'",
+        ),
+        (
+            "reveal system prompt",
+            "prompt_injection",
+            "Contains prompt extraction phrase 'reveal system prompt'",
+        ),
+        (
+            "exfiltrate",
+            "data_exfiltration",
+            "Contains explicit exfiltration keyword",
+        ),
+        (
+            "webhook",
+            "data_exfiltration",
+            "Contains webhook external delivery pattern",
+        ),
+    ];
+    for (pat, signal, msg) in warning_patterns {
+        if lower.contains(pat) {
+            record(signal, msg, "medium");
+        }
+    }
+
+    let risk = if high_hits > 0 {
+        "high"
+    } else if medium_hits > 0 {
+        "medium"
+    } else {
+        "low"
+    };
+
+    serde_json::json!({
+        "scanned_at": Utc::now().to_rfc3339(),
+        "risk": risk,
+        "blocked": risk == "high",
+        "signals": signals,
+        "findings": findings,
+        "engine": "static-heuristic-v2",
+        "high_hits": high_hits,
+        "medium_hits": medium_hits
+    })
+}
+
+async fn scan_skill_definition_with_llm(
+    server: &MemoryServer,
+    def: &serde_json::Value,
+) -> Option<serde_json::Value> {
+    if cfg!(test) {
+        return None;
+    }
+    let enabled = parse_env_bool("SKILL_SECURITY_SCAN_USE_LLM").unwrap_or(true);
+    if !enabled {
+        return None;
+    }
+
+    let model = std::env::var("SKILL_SECURITY_SCAN_MODEL")
+        .unwrap_or_else(|_| "Qwen/Qwen3.5-27B".to_string());
+    let payload = serde_json::to_string(def).ok()?;
+
+    match server
+        .llm
+        .call_llm(
+            crate::prompts::SKILL_SECURITY_SCAN_PROMPT,
+            &payload,
+            Some(&model),
+            0.1,
+            800,
+        )
+        .await
+    {
+        Ok(raw) => {
+            let parsed: serde_json::Value = serde_json::from_str(llm::LlmClient::strip_code_fence(&raw))
+                .unwrap_or_else(|_| serde_json::json!({
+                    "risk": "medium",
+                    "blocked": false,
+                    "findings": ["Failed to parse LLM security scan JSON output"],
+                    "reason": raw
+                }));
+            Some(serde_json::json!({
+                "status": "ok",
+                "model": model,
+                "result": parsed,
+            }))
+        }
+        Err(e) => Some(serde_json::json!({
+            "status": "error",
+            "model": model,
+            "error": e,
+        })),
+    }
+}
+
+fn merge_skill_scans(
+    static_scan: &serde_json::Value,
+    llm_scan: Option<&serde_json::Value>,
+) -> serde_json::Value {
+    let static_risk = static_scan
+        .get("risk")
+        .and_then(|v| v.as_str())
+        .unwrap_or("low");
+    let static_blocked = static_scan
+        .get("blocked")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let static_findings = findings_to_vec(static_scan.get("findings"));
+    let static_signals = merge_findings(
+        &signals_to_vec(static_scan.get("signals")),
+        &signals_to_vec(static_scan.get("dangerous_signals")),
+    );
+
+    let mut llm_risk = "low";
+    let mut llm_blocked = false;
+    let mut llm_findings: Vec<String> = Vec::new();
+    let mut llm_signals: Vec<String> = Vec::new();
+    let mut llm_status = "skipped".to_string();
+    let mut llm_meta = serde_json::json!({});
+
+    if let Some(scan) = llm_scan {
+        llm_status = scan
+            .get("status")
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown")
+            .to_string();
+        llm_meta = scan.clone();
+
+        if llm_status == "ok" {
+            if let Some(result) = scan.get("result") {
+                llm_risk = result
+                    .get("risk")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("low");
+                llm_blocked = result
+                    .get("blocked")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
+                llm_findings = findings_to_vec(result.get("findings"));
+                llm_signals = merge_findings(
+                    &signals_to_vec(result.get("signals")),
+                    &signals_to_vec(result.get("dangerous_signals")),
+                );
+            }
+        }
+    }
+
+    let final_risk = if risk_rank(llm_risk) > risk_rank(static_risk) {
+        llm_risk
+    } else {
+        static_risk
+    };
+    let blocked = static_blocked || llm_blocked || normalize_risk(final_risk) == "high";
+    let findings = merge_findings(&static_findings, &llm_findings);
+    let signals = merge_findings(&static_signals, &llm_signals);
+
+    serde_json::json!({
+        "scanned_at": Utc::now().to_rfc3339(),
+        "risk": normalize_risk(final_risk),
+        "blocked": blocked,
+        "signals": signals,
+        "findings": findings,
+        "engine": "hybrid-static-llm-v1",
+        "static": static_scan,
+        "llm": llm_meta,
+        "llm_status": llm_status
+    })
+}
+
 pub(super) async fn handle_hub_register(
     server: &MemoryServer,
     params: HubRegisterParams,
@@ -57,7 +453,7 @@ pub(super) async fn handle_hub_register(
             resp.insert("enabled".into(), json!(false));
             resp.insert("discovery".into(), json!("skipped (capability disabled)"));
         } else {
-            match server.discover_mcp_tools(&def).await {
+            match server.discover_mcp_tools(&params.id, &def).await {
                 Ok(tools) => {
                     let total_tools = tools.len();
                     let filtered_tools = filter_mcp_tools_by_permissions(&def, tools);
@@ -105,6 +501,56 @@ pub(super) async fn handle_hub_register(
             .map_err(|e| format!("Failed to serialize MCP definition: {e}"))?;
     }
 
+    if params.cap_type == "skill" {
+        let mut def: serde_json::Value = match serde_json::from_str::<serde_json::Value>(&cap_definition) {
+            Ok(v) if v.is_object() => v,
+            Ok(_) => {
+                append_warning(
+                    &mut resp,
+                    "Skill definition is not a JSON object; skipped static skill scan",
+                );
+                serde_json::json!({})
+            }
+            Err(_) => {
+                append_warning(
+                    &mut resp,
+                    "Skill definition is not valid JSON; skipped static skill scan",
+                );
+                serde_json::json!({})
+            }
+        };
+
+        if def.is_object() {
+            let static_scan = scan_skill_definition(&def);
+            let llm_scan = scan_skill_definition_with_llm(server, &def).await;
+            let scan = merge_skill_scans(&static_scan, llm_scan.as_ref());
+
+            let blocked = scan
+                .get("blocked")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            let risk = scan
+                .get("risk")
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown")
+                .to_string();
+            def["security_scan"] = scan.clone();
+            resp.insert("skill_scan".into(), scan);
+            if blocked {
+                enabled = false;
+                resp.insert("enabled".into(), json!(false));
+                append_warning(
+                    &mut resp,
+                    format!(
+                        "Skill static scan blocked registration activation (risk={risk}). Review definition and re-enable explicitly."
+                    ),
+                );
+            }
+            cap_definition = serde_json::to_string(&def)
+                .map_err(|e| format!("Failed to serialize skill definition: {e}"))?;
+        }
+    }
+
     let cap = HubCapability {
         id: params.id.clone(),
         cap_type: params.cap_type.clone(),
@@ -123,6 +569,7 @@ pub(super) async fn handle_hub_register(
     };
     let visibility = capability_visibility_for_cap(&cap);
     resp.insert("visibility".into(), json!(visibility.as_str()));
+    resp.insert("callable".into(), json!(capability_callable(&cap)));
 
     server.with_store_for_scope(target_db, |store| {
         store
@@ -285,6 +732,7 @@ pub(super) async fn handle_hub_discover(
                 "visibility".into(),
                 json!(capability_visibility_for_cap(cap).as_str()),
             );
+            o.insert("callable".into(), json!(capability_callable(cap)));
         }
         output.push(obj);
     }
@@ -299,6 +747,7 @@ pub(super) async fn handle_hub_discover(
                 "visibility".into(),
                 json!(capability_visibility_for_cap(cap).as_str()),
             );
+            o.insert("callable".into(), json!(capability_callable(cap)));
         }
         output.push(obj);
     }
@@ -323,6 +772,7 @@ pub(super) async fn handle_hub_get(
                     "visibility".into(),
                     json!(capability_visibility_for_cap(&cap).as_str()),
                 );
+                o.insert("callable".into(), json!(capability_callable(&cap)));
             }
             return serde_json::to_string(&obj).map_err(|e| format!("serialize: {e}"));
         }
@@ -340,6 +790,7 @@ pub(super) async fn handle_hub_get(
                     "visibility".into(),
                     json!(capability_visibility_for_cap(&cap).as_str()),
                 );
+                o.insert("callable".into(), json!(capability_callable(&cap)));
             }
             serde_json::to_string(&obj).map_err(|e| format!("serialize: {e}"))
         }
