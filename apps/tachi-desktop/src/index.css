@@ -1,17 +1,18 @@
-@import url('https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Share+Tech+Mono&family=Outfit:wght@300;400;500;600;700&display=swap');
 
 :root {
-  --bg-color: #0d0d12;
-  --glass-bg: rgba(255, 255, 255, 0.03);
-  --glass-border: rgba(255, 255, 255, 0.08);
-  --text-main: #e2e8f0;
-  --text-muted: #94a3b8;
-  --accent-cyan: #00f0ff;
-  --accent-magenta: #ff0066;
-  --accent-purple: #b026ff;
+  --bg-color: #05080f; /* Deep space black/blue */
+  --hud-bg: rgba(0, 20, 30, 0.4); /* Dark translucent HUD */
+  --hud-border: #00f0ff; /* Bright Cyan HUD lines */
+  --hud-border-dim: rgba(0, 240, 255, 0.2);
+  --text-main: #e2f1f8;
+  --text-muted: #5e8b9e;
   
-  --panel-radius: 20px;
-  --blur-amount: 24px;
+  --accent-cyan: #00f0ff;
+  --accent-magenta: #ff0055;
+  --accent-amber: #ffb700;
+  
+  --hud-radius: 0px; /* Sharp corners for tech feel */
 }
 
 * {
@@ -27,28 +28,76 @@ body {
   height: 100vh;
   width: 100vw;
   overflow: hidden;
-  /* Premium Ambient Glow */
+  /* Scanline effect and grid */
   background-image: 
-    radial-gradient(circle at 10% 50%, rgba(0, 240, 255, 0.08), transparent 30%),
-    radial-gradient(circle at 90% 20%, rgba(255, 0, 102, 0.08), transparent 35%),
-    radial-gradient(circle at 50% 100%, rgba(176, 38, 255, 0.05), transparent 40%);
+    linear-gradient(rgba(0, 240, 255, 0.03) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(0, 240, 255, 0.03) 1px, transparent 1px);
+  background-size: 40px 40px;
   background-attachment: fixed;
+}
+
+/* Add a subtle CRT scanline overlay */
+body::after {
+  content: " ";
+  display: block;
+  position: absolute;
+  top: 0;
+  left: 0;
+  bottom: 0;
+  right: 0;
+  background: linear-gradient(rgba(18, 16, 16, 0) 50%, rgba(0, 0, 0, 0.25) 50%), linear-gradient(90deg, rgba(255, 0, 0, 0.06), rgba(0, 255, 0, 0.02), rgba(0, 0, 255, 0.06));
+  z-index: 2;
+  background-size: 100% 2px, 3px 100%;
+  pointer-events: none;
 }
 
 #root {
   display: flex;
   height: 100vh;
   width: 100vw;
+  position: relative;
+  z-index: 10;
 }
 
-/* Glassmorphism utility */
+/* Command Center Panel */
 .glass-panel {
-  background: var(--glass-bg);
-  backdrop-filter: blur(var(--blur-amount));
-  -webkit-backdrop-filter: blur(var(--blur-amount));
-  border: 1px solid var(--glass-border);
-  border-radius: var(--panel-radius);
-  box-shadow: 0 8px 32px 0 rgba(0, 0, 0, 0.3);
+  background: var(--hud-bg);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  border: 1px solid var(--hud-border-dim);
+  box-shadow: 
+    0 0 10px rgba(0, 240, 255, 0.05),
+    inset 0 0 15px rgba(0, 240, 255, 0.05);
+  /* Tech angled corners using clip-path */
+  clip-path: polygon(
+    0 10px, 
+    10px 0, 
+    100% 0, 
+    100% calc(100% - 10px), 
+    calc(100% - 10px) 100%, 
+    0 100%
+  );
+  position: relative;
+}
+
+/* Decorative HUD corners */
+.glass-panel::before, .glass-panel::after {
+  content: '';
+  position: absolute;
+  width: 10px;
+  height: 10px;
+  border-right: 2px solid var(--accent-cyan);
+  border-bottom: 2px solid var(--accent-cyan);
+  bottom: 0;
+  right: 0;
+}
+.glass-panel::before {
+  top: 0;
+  left: 0;
+  border-right: none;
+  border-bottom: none;
+  border-left: 2px solid var(--accent-cyan);
+  border-top: 2px solid var(--accent-cyan);
 }
 
 /* Layout */
@@ -65,6 +114,7 @@ body {
   display: flex;
   flex-direction: column;
   padding: 20px;
+  border-top: 2px solid var(--accent-cyan);
 }
 
 .main-canvas {
@@ -72,13 +122,17 @@ body {
   overflow: hidden;
   display: flex;
   flex-direction: column;
+  border-top: 2px solid var(--accent-cyan);
 }
 
 /* Typography & General */
 h1, h2, h3, h4 {
-  font-weight: 600;
-  letter-spacing: -0.02em;
+  font-family: 'Share Tech Mono', monospace;
+  font-weight: 400;
+  letter-spacing: 1px;
+  text-transform: uppercase;
   margin-bottom: 12px;
+  text-shadow: 0 0 8px rgba(0, 240, 255, 0.5);
 }
 
 h2 {
@@ -88,8 +142,10 @@ h2 {
 
 .text-muted {
   color: var(--text-muted);
-  font-size: 0.9rem;
+  font-size: 0.85rem;
+  font-family: 'Share Tech Mono', monospace;
   line-height: 1.5;
+  text-transform: uppercase;
 }
 
 /* Sidebar Nav */
@@ -97,118 +153,144 @@ h2 {
   display: flex;
   align-items: center;
   gap: 14px;
-  padding: 14px 18px;
+  padding: 12px 16px;
   margin-bottom: 8px;
-  border-radius: 12px;
   color: var(--text-muted);
   text-decoration: none;
-  transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+  transition: all 0.2s ease;
   cursor: pointer;
   border: 1px solid transparent;
+  font-family: 'Share Tech Mono', monospace;
+  text-transform: uppercase;
+  font-size: 0.9rem;
+  letter-spacing: 1px;
 }
 
 .nav-item:hover {
-  background: rgba(255,255,255,0.06);
-  color: var(--text-main);
-  transform: translateX(4px);
+  background: rgba(0, 240, 255, 0.05);
+  color: var(--accent-cyan);
+  border: 1px solid var(--hud-border-dim);
 }
 
 .nav-item.active {
-  background: linear-gradient(90deg, rgba(0, 240, 255, 0.15), rgba(0, 240, 255, 0.02));
-  border: 1px solid rgba(0, 240, 255, 0.2);
-  border-left: 4px solid var(--accent-cyan);
+  background: rgba(0, 240, 255, 0.1);
+  border: 1px solid var(--accent-cyan);
   color: var(--accent-cyan);
-  box-shadow: inset 20px 0 40px -20px rgba(0, 240, 255, 0.1);
+  box-shadow: inset 0 0 10px rgba(0, 240, 255, 0.2);
 }
 
-/* Mock Card Data */
+/* Data blocks / Cards */
 .kanban-card, .ghost-message {
   padding: 16px;
-  border-radius: 12px;
-  background: rgba(255,255,255,0.02);
-  border: 1px solid rgba(255,255,255,0.05);
+  background: rgba(0, 20, 30, 0.6);
+  border: 1px solid var(--hud-border-dim);
+  border-left: 3px solid var(--accent-cyan);
   margin-bottom: 16px;
-  transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
-  box-shadow: 0 4px 12px rgba(0,0,0,0.1);
-  backdrop-filter: blur(8px);
+  transition: all 0.2s ease;
+  box-shadow: 0 4px 12px rgba(0,0,0,0.5);
 }
 
 .kanban-card:hover, .ghost-message:hover {
-  background: rgba(255,255,255,0.06);
-  transform: translateY(-4px) scale(1.01);
-  border-color: rgba(255,255,255,0.2);
-  box-shadow: 0 8px 24px rgba(0,0,0,0.2), 0 0 0 1px rgba(255,255,255,0.05) inset;
+  background: rgba(0, 240, 255, 0.05);
+  border-color: var(--accent-cyan);
+  box-shadow: 0 0 15px rgba(0, 240, 255, 0.15), inset 0 0 10px rgba(0, 240, 255, 0.1);
 }
 
+/* Glitchy/Tech Tags */
 .tag {
   display: inline-flex;
   align-items: center;
-  font-size: 0.75rem;
-  font-weight: 600;
-  letter-spacing: 0.05em;
-  padding: 4px 10px;
-  border-radius: 16px;
+  font-family: 'Share Tech Mono', monospace;
+  font-size: 0.7rem;
+  letter-spacing: 1px;
+  padding: 4px 8px;
   margin-right: 8px;
   margin-bottom: 8px;
   background: rgba(0, 240, 255, 0.1);
   color: var(--accent-cyan);
-  border: 1px solid rgba(0, 240, 255, 0.25);
+  border: 1px solid var(--accent-cyan);
   text-transform: uppercase;
 }
 
 .tag.topic {
-  background: rgba(176, 38, 255, 0.1);
-  color: var(--accent-purple);
-  border-color: rgba(176, 38, 255, 0.25);
+  background: rgba(255, 183, 0, 0.1);
+  color: var(--accent-amber);
+  border-color: var(--accent-amber);
 }
 
 .tag.alert {
-  background: rgba(255, 0, 102, 0.1);
+  background: rgba(255, 0, 85, 0.1);
   color: var(--accent-magenta);
-  border-color: rgba(255, 0, 102, 0.25);
+  border-color: var(--accent-magenta);
 }
 
 /* Animations */
-@keyframes pulseGlow {
-  0% { box-shadow: 0 0 0 0 rgba(0, 240, 255, 0.6); }
-  70% { box-shadow: 0 0 0 12px rgba(0, 240, 255, 0); }
-  100% { box-shadow: 0 0 0 0 rgba(0, 240, 255, 0); }
+@keyframes hudPulse {
+  0% { opacity: 1; }
+  50% { opacity: 0.4; box-shadow: 0 0 15px var(--accent-cyan); }
+  100% { opacity: 1; }
 }
 
 .status-dot {
-  width: 10px;
-  height: 10px;
-  border-radius: 50%;
+  width: 8px;
+  height: 8px;
   background-color: var(--accent-cyan);
   display: inline-block;
   margin-right: 12px;
-  animation: pulseGlow 2s infinite;
+  animation: hudPulse 2s infinite;
   box-shadow: 0 0 8px var(--accent-cyan);
 }
 
 .status-dot.offline {
   background-color: var(--accent-magenta);
-  animation: pulseGlowOffline 2s infinite;
+  animation: hudPulse 1s infinite step-end;
   box-shadow: 0 0 8px var(--accent-magenta);
 }
 
-@keyframes pulseGlowOffline {
-  0% { box-shadow: 0 0 0 0 rgba(255, 0, 102, 0.6); }
-  70% { box-shadow: 0 0 0 12px rgba(255, 0, 102, 0); }
-  100% { box-shadow: 0 0 0 0 rgba(255, 0, 102, 0); }
+/* HUD Input Fields */
+input {
+  background: rgba(0, 20, 30, 0.8) !important;
+  color: var(--accent-cyan) !important;
+  font-family: 'Share Tech Mono', monospace !important;
+  border-radius: 0 !important;
+  border: 1px solid var(--hud-border-dim) !important;
+  border-bottom: 2px solid var(--accent-cyan) !important;
+  box-shadow: none !important;
 }
 
-/* Glowing Scrollbars */
+input:focus {
+  border-color: var(--accent-cyan) !important;
+  box-shadow: 0 0 10px rgba(0, 240, 255, 0.2) inset !important;
+}
+
+/* HUD Buttons */
+button {
+  background: rgba(0, 240, 255, 0.1) !important;
+  color: var(--accent-cyan) !important;
+  font-family: 'Share Tech Mono', monospace !important;
+  border-radius: 0 !important;
+  border: 1px solid var(--accent-cyan) !important;
+  text-shadow: 0 0 4px rgba(0, 240, 255, 0.5);
+  clip-path: polygon(10px 0, 100% 0, 100% calc(100% - 10px), calc(100% - 10px) 100%, 0 100%, 0 10px) !important;
+}
+
+button:hover {
+  background: rgba(0, 240, 255, 0.2) !important;
+  box-shadow: 0 0 15px rgba(0, 240, 255, 0.4) inset !important;
+}
+
+/* Tech Scrollbars */
 ::-webkit-scrollbar {
-  width: 6px;
+  width: 4px;
 }
 ::-webkit-scrollbar-track {
-  background: transparent;
+  background: rgba(0, 20, 30, 0.5);
+  border-left: 1px solid var(--hud-border-dim);
 }
 ::-webkit-scrollbar-thumb {
-  background: rgba(255, 255, 255, 0.1);
-  border-radius: 10px;
+  background: var(--accent-cyan);
 }
 ::-webkit-scrollbar-thumb:hover {
-  background: rgba(255, 255, 255, 0.2);
+  background: #fff;
+  box-shadow: 0 0 10px var(--accent-cyan);
 }
