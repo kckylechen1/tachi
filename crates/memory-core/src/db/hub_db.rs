@@ -8,8 +8,12 @@ use super::common::now_utc_iso;
 pub fn hub_upsert(conn: &Connection, cap: &HubCapability) -> Result<(), MemoryError> {
     let now = now_utc_iso();
     conn.execute(
-        "INSERT INTO hub_capabilities (id, type, name, version, description, definition, enabled, created_at, updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?8)
+        "INSERT INTO hub_capabilities (
+            id, type, name, version, description, definition, enabled,
+            review_status, health_status, last_error, last_success_at, last_failure_at,
+            fail_streak, active_version, exposure_mode, created_at, updated_at
+         )
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?16)
          ON CONFLICT(id) DO UPDATE SET
            type = excluded.type,
            name = excluded.name,
@@ -17,6 +21,14 @@ pub fn hub_upsert(conn: &Connection, cap: &HubCapability) -> Result<(), MemoryEr
            description = excluded.description,
            definition = excluded.definition,
            enabled = excluded.enabled,
+           review_status = excluded.review_status,
+           health_status = excluded.health_status,
+           last_error = excluded.last_error,
+           last_success_at = excluded.last_success_at,
+           last_failure_at = excluded.last_failure_at,
+           fail_streak = excluded.fail_streak,
+           active_version = excluded.active_version,
+           exposure_mode = excluded.exposure_mode,
            updated_at = excluded.updated_at",
         params![
             &cap.id,
@@ -26,6 +38,14 @@ pub fn hub_upsert(conn: &Connection, cap: &HubCapability) -> Result<(), MemoryEr
             &cap.description,
             &cap.definition,
             cap.enabled as i32,
+            &cap.review_status,
+            &cap.health_status,
+            cap.last_error.as_deref(),
+            cap.last_success_at.as_deref(),
+            cap.last_failure_at.as_deref(),
+            cap.fail_streak as i64,
+            cap.active_version.as_deref(),
+            &cap.exposure_mode,
             &now,
         ],
     )?;
@@ -36,6 +56,8 @@ pub fn hub_upsert(conn: &Connection, cap: &HubCapability) -> Result<(), MemoryEr
 pub fn hub_get(conn: &Connection, id: &str) -> Result<Option<HubCapability>, MemoryError> {
     let mut stmt = conn.prepare(
         "SELECT id, type, name, version, description, definition, enabled,
+                review_status, health_status, last_error, last_success_at, last_failure_at,
+                fail_streak, active_version, exposure_mode,
                 uses, successes, failures, avg_rating, last_used, created_at, updated_at
          FROM hub_capabilities WHERE id = ?1",
     )?;
@@ -55,6 +77,8 @@ pub fn hub_list(
 ) -> Result<Vec<HubCapability>, MemoryError> {
     let mut sql = String::from(
         "SELECT id, type, name, version, description, definition, enabled,
+                review_status, health_status, last_error, last_success_at, last_failure_at,
+                fail_streak, active_version, exposure_mode,
                 uses, successes, failures, avg_rating, last_used, created_at, updated_at
          FROM hub_capabilities WHERE 1=1",
     );
@@ -90,6 +114,8 @@ pub fn hub_search(
     let pattern = format!("%{}%", query);
     let mut sql = String::from(
         "SELECT id, type, name, version, description, definition, enabled,
+                review_status, health_status, last_error, last_success_at, last_failure_at,
+                fail_streak, active_version, exposure_mode,
                 uses, successes, failures, avg_rating, last_used, created_at, updated_at
          FROM hub_capabilities
          WHERE (name LIKE ?1 OR description LIKE ?1)",
@@ -122,6 +148,118 @@ pub fn hub_set_enabled(conn: &Connection, id: &str, enabled: bool) -> Result<boo
         params![enabled as i32, &now, id],
     )?;
     Ok(conn.changes() > 0)
+}
+
+pub fn hub_set_review(
+    conn: &Connection,
+    id: &str,
+    review_status: &str,
+    enabled: Option<bool>,
+) -> Result<bool, MemoryError> {
+    let now = now_utc_iso();
+    match enabled {
+        Some(flag) => {
+            conn.execute(
+                "UPDATE hub_capabilities
+                 SET review_status = ?1,
+                     enabled = ?2,
+                     updated_at = ?3
+                 WHERE id = ?4",
+                params![review_status, flag as i32, &now, id],
+            )?;
+        }
+        None => {
+            conn.execute(
+                "UPDATE hub_capabilities
+                 SET review_status = ?1,
+                     updated_at = ?2
+                 WHERE id = ?3",
+                params![review_status, &now, id],
+            )?;
+        }
+    }
+    Ok(conn.changes() > 0)
+}
+
+pub fn hub_set_active_version_route(
+    conn: &Connection,
+    alias_id: &str,
+    active_capability_id: &str,
+) -> Result<(), MemoryError> {
+    let now = now_utc_iso();
+    conn.execute(
+        "INSERT INTO hub_version_routes (alias_id, active_capability_id, updated_at)
+         VALUES (?1, ?2, ?3)
+         ON CONFLICT(alias_id) DO UPDATE SET
+             active_capability_id = excluded.active_capability_id,
+             updated_at = excluded.updated_at",
+        params![alias_id, active_capability_id, &now],
+    )?;
+    Ok(())
+}
+
+pub fn hub_get_active_version_route(
+    conn: &Connection,
+    alias_id: &str,
+) -> Result<Option<String>, MemoryError> {
+    let mut stmt = conn.prepare(
+        "SELECT active_capability_id
+         FROM hub_version_routes
+         WHERE alias_id = ?1",
+    )?;
+    let result = stmt.query_row(params![alias_id], |row| row.get::<_, String>(0));
+    match result {
+        Ok(target) => Ok(Some(target)),
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+        Err(e) => Err(MemoryError::from(e)),
+    }
+}
+
+pub fn hub_record_call_outcome(
+    conn: &Connection,
+    id: &str,
+    success: bool,
+    error_kind: Option<&str>,
+    open_threshold: u32,
+) -> Result<(), MemoryError> {
+    let now = now_utc_iso();
+    if success {
+        conn.execute(
+            "UPDATE hub_capabilities
+             SET health_status = 'healthy',
+                 last_error = NULL,
+                 last_success_at = ?1,
+                 fail_streak = 0,
+                 updated_at = ?1
+             WHERE id = ?2",
+            params![&now, id],
+        )?;
+        return Ok(());
+    }
+
+    let current_streak: i64 = conn.query_row(
+        "SELECT fail_streak FROM hub_capabilities WHERE id = ?1",
+        params![id],
+        |row| row.get(0),
+    )?;
+    let next_streak = current_streak.saturating_add(1);
+    let next_health = if next_streak as u32 >= open_threshold.max(1) {
+        "open"
+    } else {
+        "degraded"
+    };
+
+    conn.execute(
+        "UPDATE hub_capabilities
+         SET health_status = ?1,
+             last_error = ?2,
+             last_failure_at = ?3,
+             fail_streak = ?4,
+             updated_at = ?3
+         WHERE id = ?5",
+        params![next_health, error_kind, &now, next_streak, id],
+    )?;
+    Ok(())
 }
 
 /// Record feedback for a hub capability invocation.
@@ -176,12 +314,20 @@ fn hub_cap_from_row(row: &rusqlite::Row) -> HubCapability {
         description: row.get(4).unwrap_or_default(),
         definition: row.get(5).unwrap_or_default(),
         enabled: row.get::<_, i32>(6).unwrap_or(1) != 0,
-        uses: row.get::<_, i64>(7).unwrap_or(0) as u64,
-        successes: row.get::<_, i64>(8).unwrap_or(0) as u64,
-        failures: row.get::<_, i64>(9).unwrap_or(0) as u64,
-        avg_rating: row.get(10).unwrap_or(0.0),
-        last_used: row.get(11).unwrap_or(None),
-        created_at: row.get(12).unwrap_or_default(),
-        updated_at: row.get(13).unwrap_or_default(),
+        review_status: row.get(7).unwrap_or_else(|_| "approved".to_string()),
+        health_status: row.get(8).unwrap_or_else(|_| "healthy".to_string()),
+        last_error: row.get(9).unwrap_or(None),
+        last_success_at: row.get(10).unwrap_or(None),
+        last_failure_at: row.get(11).unwrap_or(None),
+        fail_streak: row.get::<_, i64>(12).unwrap_or(0).max(0) as u32,
+        active_version: row.get(13).unwrap_or(None),
+        exposure_mode: row.get(14).unwrap_or_else(|_| "direct".to_string()),
+        uses: row.get::<_, i64>(15).unwrap_or(0) as u64,
+        successes: row.get::<_, i64>(16).unwrap_or(0) as u64,
+        failures: row.get::<_, i64>(17).unwrap_or(0) as u64,
+        avg_rating: row.get(18).unwrap_or(0.0),
+        last_used: row.get(19).unwrap_or(None),
+        created_at: row.get(20).unwrap_or_default(),
+        updated_at: row.get(21).unwrap_or_default(),
     }
 }

@@ -115,6 +115,14 @@ pub fn init_schema(conn: &Connection) -> Result<(), MemoryError> {
             description TEXT NOT NULL DEFAULT '',
             definition  TEXT NOT NULL DEFAULT '',
             enabled     INTEGER NOT NULL DEFAULT 1,
+            review_status TEXT NOT NULL DEFAULT 'approved',
+            health_status TEXT NOT NULL DEFAULT 'healthy',
+            last_error    TEXT,
+            last_success_at TEXT,
+            last_failure_at TEXT,
+            fail_streak   INTEGER NOT NULL DEFAULT 0,
+            active_version TEXT,
+            exposure_mode TEXT NOT NULL DEFAULT 'direct',
             uses        INTEGER NOT NULL DEFAULT 0,
             successes   INTEGER NOT NULL DEFAULT 0,
             failures    INTEGER NOT NULL DEFAULT 0,
@@ -126,6 +134,15 @@ pub fn init_schema(conn: &Connection) -> Result<(), MemoryError> {
         CREATE INDEX IF NOT EXISTS idx_hub_cap_type ON hub_capabilities(type);
         CREATE INDEX IF NOT EXISTS idx_hub_cap_name ON hub_capabilities(name);
         CREATE INDEX IF NOT EXISTS idx_hub_cap_enabled ON hub_capabilities(enabled);
+        CREATE INDEX IF NOT EXISTS idx_hub_cap_review_status ON hub_capabilities(review_status);
+        CREATE INDEX IF NOT EXISTS idx_hub_cap_health_status ON hub_capabilities(health_status);
+
+        CREATE TABLE IF NOT EXISTS hub_version_routes (
+            alias_id TEXT PRIMARY KEY,
+            active_capability_id TEXT NOT NULL,
+            updated_at TEXT NOT NULL DEFAULT ''
+        );
+        CREATE INDEX IF NOT EXISTS idx_hub_route_target ON hub_version_routes(active_capability_id);
 
         -- Audit log for proxy tool calls
         CREATE TABLE IF NOT EXISTS audit_log (
@@ -218,6 +235,36 @@ pub fn init_schema(conn: &Connection) -> Result<(), MemoryError> {
         "derived_items",
         "created_at",
         "TEXT NOT NULL DEFAULT ''",
+    )?;
+
+    // Hub governance columns for review + health + routing metadata
+    ensure_column(
+        conn,
+        "hub_capabilities",
+        "review_status",
+        "TEXT NOT NULL DEFAULT 'approved'",
+    )?;
+    ensure_column(
+        conn,
+        "hub_capabilities",
+        "health_status",
+        "TEXT NOT NULL DEFAULT 'healthy'",
+    )?;
+    ensure_column(conn, "hub_capabilities", "last_error", "TEXT")?;
+    ensure_column(conn, "hub_capabilities", "last_success_at", "TEXT")?;
+    ensure_column(conn, "hub_capabilities", "last_failure_at", "TEXT")?;
+    ensure_column(
+        conn,
+        "hub_capabilities",
+        "fail_streak",
+        "INTEGER NOT NULL DEFAULT 0",
+    )?;
+    ensure_column(conn, "hub_capabilities", "active_version", "TEXT")?;
+    ensure_column(
+        conn,
+        "hub_capabilities",
+        "exposure_mode",
+        "TEXT NOT NULL DEFAULT 'direct'",
     )?;
 
     // Indexes on migrated columns — MUST come after ensure_column so the

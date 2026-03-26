@@ -68,6 +68,14 @@ async fn proxy_call_blocks_disabled_capability_even_directly() {
         description: "test disabled server".to_string(),
         definition: r#"{"transport":"stdio","command":"npx","args":[]}"#.to_string(),
         enabled: false,
+        review_status: "pending".to_string(),
+        health_status: "unknown".to_string(),
+        last_error: None,
+        last_success_at: None,
+        last_failure_at: None,
+        fail_streak: 0,
+        active_version: None,
+        exposure_mode: "direct".to_string(),
         uses: 0,
         successes: 0,
         failures: 0,
@@ -91,8 +99,8 @@ async fn proxy_call_blocks_disabled_capability_even_directly() {
         .expect_err("disabled MCP capability should be blocked");
 
     assert!(
-        err.to_string().contains("disabled"),
-        "expected disabled error, got: {}",
+        err.to_string().contains("not callable") && err.to_string().contains("enabled=false"),
+        "expected governance callable error, got: {}",
         err
     );
 }
@@ -301,6 +309,14 @@ async fn retry_dispatch_blocks_direct_proxy_tool_when_gateway_mode() {
         })
         .to_string(),
         enabled: true,
+        review_status: "approved".to_string(),
+        health_status: "healthy".to_string(),
+        last_error: None,
+        last_success_at: None,
+        last_failure_at: None,
+        fail_streak: 0,
+        active_version: None,
+        exposure_mode: "gateway".to_string(),
         uses: 0,
         successes: 0,
         failures: 0,

@@ -31,13 +31,14 @@ use crate::graph_state_ops::{
     handle_add_edge, handle_get_edges, handle_get_state, handle_set_state,
 };
 use crate::hub_helpers::{
-    build_skill_tool_from_cap, capability_visibility_for_cap, make_text_tool_result,
-    should_expose_mcp_tools, should_expose_skill_tool,
+    build_skill_tool_from_cap, capability_callable, capability_visibility_for_cap,
+    make_text_tool_result, review_status_allows_call, should_expose_mcp_tools,
+    should_expose_skill_tool,
 };
 use crate::hub_ops::{
     handle_hub_call, handle_hub_disconnect, handle_hub_discover, handle_hub_feedback,
-    handle_hub_get, handle_hub_register, handle_hub_set_enabled, handle_hub_stats,
-    handle_run_skill, handle_tachi_audit_log,
+    handle_hub_get, handle_hub_register, handle_hub_review, handle_hub_set_active_version,
+    handle_hub_set_enabled, handle_hub_stats, handle_run_skill, handle_tachi_audit_log,
 };
 use crate::kanban::{
     handle_check_inbox, handle_post_card, handle_update_card, CheckInboxParams, PostCardParams,
@@ -255,6 +256,8 @@ const CACHE_INVALIDATING_TOOLS: &[&str] = &[
     "ingest_event",
     "set_state",
     "hub_register",
+    "hub_review",
+    "hub_set_active_version",
     "hub_feedback",
     "sandbox_set_rule",
     "sandbox_set_policy",
@@ -728,6 +731,22 @@ impl MemoryServer {
         handle_hub_set_enabled(self, params).await
     }
 
+    #[tool(description = "Set governance review status for a Hub capability.")]
+    async fn hub_review(
+        &self,
+        Parameters(params): Parameters<HubReviewParams>,
+    ) -> Result<String, String> {
+        handle_hub_review(self, params).await
+    }
+
+    #[tool(description = "Route an alias capability ID to a concrete active capability version.")]
+    async fn hub_set_active_version(
+        &self,
+        Parameters(params): Parameters<HubSetActiveVersionParams>,
+    ) -> Result<String, String> {
+        handle_hub_set_active_version(self, params).await
+    }
+
     #[tool(
         description = "Add or update an edge in the memory graph. Edges represent causal, temporal, or entity relationships between memories."
     )]
@@ -1042,11 +1061,11 @@ impl MemoryServer {
         let server_id = format!("mcp:{}", server_name);
 
         let cap = self.get_capability(&server_id)?;
-        if !cap.enabled {
+        if !capability_callable(&cap) {
             return Err(rmcp::ErrorData::invalid_params(
                 format!(
-                    "MCP server '{}' is disabled. Use hub_set_enabled to activate after review.",
-                    server_id
+                    "MCP server '{}' is not callable (enabled={}, review_status={}, health_status={}).",
+                    server_id, cap.enabled, cap.review_status, cap.health_status
                 ),
                 None,
             ));
@@ -1080,11 +1099,11 @@ impl MemoryServer {
         // 0. Look up capability for deny-list and timeout config
         let server_id = format!("mcp:{}", server_name);
         let cap = self.get_capability(&server_id)?;
-        if !cap.enabled {
+        if !capability_callable(&cap) {
             return Err(rmcp::ErrorData::invalid_params(
                 format!(
-                    "MCP server '{}' is disabled. Use hub_set_enabled to activate after review.",
-                    server_id
+                    "MCP server '{}' is not callable (enabled={}, review_status={}, health_status={}).",
+                    server_id, cap.enabled, cap.review_status, cap.health_status
                 ),
                 None,
             ));

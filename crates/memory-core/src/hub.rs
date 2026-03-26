@@ -5,6 +5,18 @@
 
 use serde::{Deserialize, Serialize};
 
+fn default_review_status() -> String {
+    "approved".to_string()
+}
+
+fn default_health_status() -> String {
+    "healthy".to_string()
+}
+
+fn default_exposure_mode() -> String {
+    "direct".to_string()
+}
+
 /// A registered capability in the Sigil Hub.
 ///
 /// Capabilities come in three types:
@@ -36,6 +48,38 @@ pub struct HubCapability {
 
     /// Whether this capability is currently active
     pub enabled: bool,
+
+    /// Review status for governance gate: pending | approved | rejected
+    #[serde(default = "default_review_status")]
+    pub review_status: String,
+
+    /// Runtime health status: unknown | healthy | degraded | open
+    #[serde(default = "default_health_status")]
+    pub health_status: String,
+
+    /// Last failure reason surfaced by governance / execution path
+    #[serde(default)]
+    pub last_error: Option<String>,
+
+    /// ISO 8601 timestamp of last successful invocation
+    #[serde(default)]
+    pub last_success_at: Option<String>,
+
+    /// ISO 8601 timestamp of last failed invocation
+    #[serde(default)]
+    pub last_failure_at: Option<String>,
+
+    /// Consecutive failure streak for circuit governance
+    #[serde(default)]
+    pub fail_streak: u32,
+
+    /// Active version pointer for alias routes (optional)
+    #[serde(default)]
+    pub active_version: Option<String>,
+
+    /// Exposure mode metadata (e.g. direct | gateway)
+    #[serde(default = "default_exposure_mode")]
+    pub exposure_mode: String,
 
     /// Total number of invocations
     pub uses: u64,

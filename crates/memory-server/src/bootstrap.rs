@@ -83,7 +83,7 @@ fn run_cli_command(command: Commands, db_path: &PathBuf) -> Result<(), Box<dyn s
     match command {
         Commands::Serve => Ok(()),
         Commands::Search { query, path, top_k } => {
-            let mut store = open_cli_store(db_path)?;
+            let store = open_cli_store(db_path)?;
             let path_prefix = path.clone();
             let results = store.search(
                 &query,
@@ -164,6 +164,7 @@ fn run_cli_command(command: Commands, db_path: &PathBuf) -> Result<(), Box<dyn s
                 } => {
                     let (enabled, warning) =
                         evaluate_cli_capability_enabled(&cap_type, &definition)?;
+                    let is_mcp = cap_type.eq_ignore_ascii_case("mcp");
                     let cap = HubCapability {
                         id: id.clone(),
                         cap_type,
@@ -172,6 +173,22 @@ fn run_cli_command(command: Commands, db_path: &PathBuf) -> Result<(), Box<dyn s
                         description: description.unwrap_or_default(),
                         definition,
                         enabled,
+                        review_status: if is_mcp {
+                            "pending".to_string()
+                        } else {
+                            "approved".to_string()
+                        },
+                        health_status: if is_mcp {
+                            "unknown".to_string()
+                        } else {
+                            "healthy".to_string()
+                        },
+                        last_error: None,
+                        last_success_at: None,
+                        last_failure_at: None,
+                        fail_streak: 0,
+                        active_version: None,
+                        exposure_mode: "direct".to_string(),
                         uses: 0,
                         successes: 0,
                         failures: 0,
