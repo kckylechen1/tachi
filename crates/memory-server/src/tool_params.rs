@@ -623,6 +623,57 @@ pub(super) struct GhostSubscribeParams {
 
 #[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub(super) struct GhostAckParams {
+    /// Unique agent identifier for cursor tracking
+    pub agent_id: String,
+    /// Topic to acknowledge
+    pub topic: String,
+    /// Optional explicit topic index to acknowledge up to
+    #[serde(default)]
+    pub index: Option<u64>,
+    /// Optional message id to acknowledge up to
+    #[serde(default)]
+    pub message_id: Option<String>,
+}
+
+#[allow(dead_code)]
+fn default_ghost_reflect_promote_rule() -> bool {
+    true
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub(super) struct GhostReflectParams {
+    /// Agent generating the reflection
+    pub agent_id: String,
+    /// Optional topic scope for this reflection
+    #[serde(default)]
+    pub topic: Option<String>,
+    /// Reflection summary text
+    pub summary: String,
+    /// Optional structured metadata
+    #[serde(default)]
+    pub metadata: Option<serde_json::Value>,
+    /// Whether to promote reflection into derived rules memory
+    #[serde(default = "default_ghost_reflect_promote_rule")]
+    pub promote_rule: bool,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub(super) struct GhostPromoteParams {
+    /// Ghost message id to promote
+    pub message_id: String,
+    /// Optional memory path (default: /ghost/messages)
+    #[serde(default)]
+    pub path: Option<String>,
+    /// Optional promoted importance
+    #[serde(default)]
+    pub importance: Option<f64>,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub(super) struct DlqListParams {
     /// Filter by status: "pending", "retrying", "resolved", "abandoned"
     #[serde(default)]

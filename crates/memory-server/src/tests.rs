@@ -118,6 +118,14 @@ async fn proxy_call_requires_sandbox_policy_and_records_preflight_denial() {
         definition: r#"{"transport":"stdio","command":"npx","args":["-y","dummy-mcp"]}"#
             .to_string(),
         enabled: true,
+        review_status: "approved".to_string(),
+        health_status: "healthy".to_string(),
+        last_error: None,
+        last_success_at: None,
+        last_failure_at: None,
+        fail_streak: 0,
+        active_version: None,
+        exposure_mode: "direct".to_string(),
         uses: 0,
         successes: 0,
         failures: 0,
@@ -194,6 +202,127 @@ async fn ghost_subscribe_evicts_least_recent_cursor_when_full() {
     );
     assert!(state.cursors.contains_key("agent-new"));
     assert!(state.cursor_recency.contains_key("agent-new"));
+}
+
+#[tokio::test]
+async fn ghost_publish_subscribe_ack_roundtrip_persists_cursor() {
+    let server = make_server();
+
+    let publish = server
+        .ghost_publish(Parameters(GhostPublishParams {
+            topic: "ops-alerts".to_string(),
+            payload: json!({"text": "build failed"}),
+            publisher: "agent-a".to_string(),
+        }))
+        .await
+        .expect("ghost_publish should succeed");
+    let publish_json: serde_json::Value =
+        serde_json::from_str(&publish).expect("ghost_publish response should be JSON");
+    let message_id = publish_json["id"]
+        .as_str()
+        .expect("ghost_publish should return id")
+        .to_string();
+
+    let sub1 = server
+        .ghost_subscribe(Parameters(GhostSubscribeParams {
+            agent_id: "agent-b".to_string(),
+            topics: vec!["ops-alerts".to_string()],
+        }))
+        .await
+        .expect("ghost_subscribe should succeed");
+    let sub1_json: serde_json::Value =
+        serde_json::from_str(&sub1).expect("ghost_subscribe response should be JSON");
+    assert_eq!(sub1_json["new_count"], json!(1));
+    assert_eq!(sub1_json["messages"][0]["id"], json!(message_id));
+
+    let sub2 = server
+        .ghost_subscribe(Parameters(GhostSubscribeParams {
+            agent_id: "agent-b".to_string(),
+            topics: vec!["ops-alerts".to_string()],
+        }))
+        .await
+        .expect("ghost_subscribe second poll should succeed");
+    let sub2_json: serde_json::Value =
+        serde_json::from_str(&sub2).expect("ghost_subscribe second response should be JSON");
+    assert_eq!(sub2_json["new_count"], json!(0));
+
+    let ack = server
+        .ghost_ack(Parameters(GhostAckParams {
+            agent_id: "agent-b".to_string(),
+            topic: "ops-alerts".to_string(),
+            index: Some(1),
+            message_id: None,
+        }))
+        .await
+        .expect("ghost_ack should succeed");
+    let ack_json: serde_json::Value =
+        serde_json::from_str(&ack).expect("ghost_ack response should be JSON");
+    assert_eq!(ack_json["acknowledged_index"], json!(1));
+}
+
+#[tokio::test]
+async fn ghost_promote_writes_memory_and_marks_message_promoted() {
+    let server = make_server();
+
+    let publish = server
+        .ghost_publish(Parameters(GhostPublishParams {
+            topic: "release".to_string(),
+            payload: json!({"text": "release 1.2.3 deployed"}),
+            publisher: "release-bot".to_string(),
+        }))
+        .await
+        .expect("ghost_publish should succeed");
+    let publish_json: serde_json::Value =
+        serde_json::from_str(&publish).expect("ghost_publish response should be JSON");
+    let message_id = publish_json["id"]
+        .as_str()
+        .expect("ghost_publish should return id")
+        .to_string();
+
+    let promote = server
+        .ghost_promote(Parameters(GhostPromoteParams {
+            message_id: message_id.clone(),
+            path: Some("/ghost/tests".to_string()),
+            importance: Some(0.9),
+        }))
+        .await
+        .expect("ghost_promote should succeed");
+    let promote_json: serde_json::Value =
+        serde_json::from_str(&promote).expect("ghost_promote response should be JSON");
+    let memory_id = promote_json["memory_id"]
+        .as_str()
+        .expect("ghost_promote should return memory_id")
+        .to_string();
+
+    let memory = server
+        .get_memory(Parameters(GetMemoryParams {
+            id: memory_id,
+            include_archived: false,
+        }))
+        .await
+        .expect("get_memory should succeed");
+    let memory_json: serde_json::Value =
+        serde_json::from_str(&memory).expect("get_memory response should be JSON");
+    assert_eq!(memory_json["path"], json!("/ghost/tests"));
+    assert_eq!(memory_json["category"], json!("ghost"));
+
+    let reflected = server
+        .ghost_reflect(Parameters(GhostReflectParams {
+            agent_id: "agent-reflector".to_string(),
+            topic: Some("release".to_string()),
+            summary: "Release deployment pattern stabilized.".to_string(),
+            metadata: Some(json!({"source": "unit-test"})),
+            promote_rule: true,
+        }))
+        .await
+        .expect("ghost_reflect should succeed");
+    let reflected_json: serde_json::Value =
+        serde_json::from_str(&reflected).expect("ghost_reflect response should be JSON");
+    assert_eq!(reflected_json["promote_rule"], json!(true));
+    assert!(
+        reflected_json["rule_id"].is_string(),
+        "ghost_reflect should return promoted rule id"
+    );
 }
 
 #[tokio::test]
