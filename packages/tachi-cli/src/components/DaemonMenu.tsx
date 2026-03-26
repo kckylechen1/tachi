@@ -3,6 +3,7 @@ import { Box, Text, useInput } from 'ink';
 import { t } from '../utils/i18n.js';
 import { colors } from '../utils/ui.js';
 import { startDaemon, stopDaemon, getDaemonStatus } from '../utils/daemon.js';
+import { LogsView } from './LogsView.js';
 
 interface DaemonMenuProps {
   onBack: () => void;
@@ -14,6 +15,7 @@ export function DaemonMenu({ onBack }: DaemonMenuProps) {
   const [port, setPort] = useState<number | undefined>(undefined);
   const [memoryCount, setMemoryCount] = useState(0);
   const [message, setMessage] = useState('');
+  const [showLogs, setShowLogs] = useState(false);
 
   useEffect(() => {
     refreshStatus();
@@ -53,7 +55,7 @@ export function DaemonMenu({ onBack }: DaemonMenuProps) {
     { id: 'start', label: t('daemon.start'), action: handleStart, showWhen: 'offline' },
     { id: 'stop', label: t('daemon.stop'), action: handleStop, showWhen: 'online' },
     { id: 'restart', label: t('daemon.restart'), action: async () => { await handleStop(); await handleStart(); }, showWhen: 'online' },
-    { id: 'logs', label: t('daemon.logs'), action: () => {}, showWhen: 'always' },
+    { id: 'logs', label: t('daemon.logs'), action: () => setShowLogs(true), showWhen: 'always' },
     { id: 'back', label: t('daemon.back'), action: onBack, showWhen: 'always' },
   ];
 
@@ -75,6 +77,10 @@ export function DaemonMenu({ onBack }: DaemonMenuProps) {
 
   const statusIcon = status === 'online' ? '🟢' : '🔴';
   const statusText = status === 'online' ? t('daemon.online') : t('daemon.offline');
+
+  if (showLogs) {
+    return <LogsView onBack={() => setShowLogs(false)} />;
+  }
 
   return (
     <Box flexDirection="column" padding={1}>
