@@ -26,7 +26,10 @@ mod tool_params;
 mod utils;
 
 use crate::dlq_ops::{handle_dlq_list, handle_dlq_retry};
-use crate::ghost_ops::{handle_ghost_publish, handle_ghost_subscribe, handle_ghost_topics};
+use crate::ghost_ops::{
+    handle_ghost_ack, handle_ghost_promote, handle_ghost_publish, handle_ghost_reflect,
+    handle_ghost_subscribe, handle_ghost_topics,
+};
 use crate::graph_state_ops::{
     handle_add_edge, handle_get_edges, handle_get_state, handle_set_state,
 };
@@ -607,20 +610,7 @@ impl MemoryServer {
 const PUBSUB_RING_MAX: usize = 100;
 const PUBSUB_MAX_CURSORS: usize = 1000;
 
-#[derive(Clone)]
-struct PubSubMessage {
-    topic: String,
-    payload: serde_json::Value,
-    publisher: String,
-    timestamp: String,
-    id: String,
-}
-
 struct PubSubState {
-    /// topic → ring buffer of messages (max PUBSUB_RING_MAX per topic)
-    messages: HashMap<String, VecDeque<PubSubMessage>>,
-    /// Global monotonic index per topic (total messages ever published)
-    next_index: HashMap<String, usize>,
     /// agent_id → (topic → last_seen_global_index)
     cursors: HashMap<String, HashMap<String, usize>>,
     /// agent_id → monotonic recency sequence (used for LRU cursor eviction)
@@ -632,8 +622,6 @@ struct PubSubState {
 impl PubSubState {
     fn new() -> Self {
         Self {
-            messages: HashMap::new(),
-            next_index: HashMap::new(),
             cursors: HashMap::new(),
             cursor_recency: HashMap::new(),
             cursor_seq: 0,
@@ -942,6 +930,36 @@ impl MemoryServer {
     )]
     async fn ghost_topics(&self) -> Result<String, String> {
         handle_ghost_topics(self).await
+    }
+
+    #[tool(
+        description = "Acknowledge a Ghost topic cursor for an agent. Supports explicit index or message_id."
+    )]
+    async fn ghost_ack(
+        &self,
+        Parameters(params): Parameters<GhostAckParams>,
+    ) -> Result<String, String> {
+        handle_ghost_ack(self, params).await
+    }
+
+    #[tool(
+        description = "Write a Ghost reflection entry and optionally promote it into derived rules."
+    )]
+    async fn ghost_reflect(
+        &self,
+        Parameters(params): Parameters<GhostReflectParams>,
+    ) -> Result<String, String> {
+        handle_ghost_reflect(self, params).await
+    }
+
+    #[tool(
+        description = "Promote a Ghost message into long-term memory and mark the message as promoted."
+    )]
+    async fn ghost_promote(
+        &self,
+        Parameters(params): Parameters<GhostPromoteParams>,
+    ) -> Result<String, String> {
+        handle_ghost_promote(self, params).await
     }
 
     // ─── Skill Chaining (Unix Pipe-Style Composition) ────────────────────────
