@@ -4,9 +4,17 @@ import { banner, colors } from '../utils/ui.js';
 import { t, setLanguage } from '../utils/i18n.js';
 import { loadConfig } from '../utils/config.js';
 import { getDaemonStatus } from '../utils/daemon.js';
+import { DaemonMenu } from './DaemonMenu.js';
+import { McpMenu } from './McpMenu.js';
+import { SkillsMenu } from './SkillsMenu.js';
+import { MemoryMenu } from './MemoryMenu.js';
+import { SettingsMenu } from './SettingsMenu.js';
+
+type MenuView = 'main' | 'daemon' | 'mcp' | 'skills' | 'memory' | 'settings' | 'exit';
 
 export function MainMenu() {
   const { exit } = useApp();
+  const [currentView, setCurrentView] = useState<MenuView>('main');
   const [selectedIndex, setSelectedIndex] = useState(0);
   const [daemonStatus, setDaemonStatus] = useState<'online' | 'offline' | 'starting'>('offline');
   const [memoryCount, setMemoryCount] = useState(0);
@@ -14,47 +22,67 @@ export function MainMenu() {
   useEffect(() => {
     const config = loadConfig();
     setLanguage(config.ui.language);
-    
-    // Check daemon status
+    refreshStatus();
+  }, []);
+
+  const refreshStatus = () => {
     getDaemonStatus().then(status => {
       setDaemonStatus(status.online ? 'online' : 'offline');
       setMemoryCount(status.memoryCount || 0);
     });
-  }, []);
+  };
 
   const menuItems = [
-    { id: 'daemon', label: t('menu.daemon') },
-    { id: 'mcp', label: t('menu.mcp') },
-    { id: 'skills', label: t('menu.skills') },
-    { id: 'memory', label: t('menu.memory') },
-    { id: 'settings', label: t('menu.settings') },
-    { id: 'exit', label: t('menu.exit') },
+    { id: 'daemon' as MenuView, label: t('menu.daemon') },
+    { id: 'mcp' as MenuView, label: t('menu.mcp') },
+    { id: 'skills' as MenuView, label: t('menu.skills') },
+    { id: 'memory' as MenuView, label: t('menu.memory') },
+    { id: 'settings' as MenuView, label: t('menu.settings') },
+    { id: 'exit' as MenuView, label: t('menu.exit') },
   ];
 
   useInput((input, key) => {
+    if (currentView !== 'main') return;
+    
     if (key.upArrow) {
       setSelectedIndex(prev => (prev > 0 ? prev - 1 : menuItems.length - 1));
     } else if (key.downArrow) {
       setSelectedIndex(prev => (prev < menuItems.length - 1 ? prev + 1 : 0));
     } else if (key.return) {
-      handleSelect(menuItems[selectedIndex].id);
+      const selected = menuItems[selectedIndex].id;
+      if (selected === 'exit') {
+        exit();
+      } else {
+        setCurrentView(selected);
+      }
     } else if (input === 'q' || key.escape) {
       exit();
     }
   });
 
-  const handleSelect = (id: string) => {
-    switch (id) {
-      case 'exit':
-        exit();
-        break;
-      case 'daemon':
-        // Navigate to daemon menu
-        break;
-      // TODO: Implement other menu navigations
-    }
+  const handleBack = () => {
+    setCurrentView('main');
+    refreshStatus();
   };
 
+  // Render submenus
+  if (currentView === 'daemon') {
+    return <DaemonMenu onBack={handleBack} />;
+  }
+  if (currentView === 'mcp') {
+    return <McpMenu onBack={handleBack} />;
+  }
+  if (currentView === 'skills') {
+    return <SkillsMenu onBack={handleBack} />;
+  }
+  if (currentView === 'memory') {
+    return <MemoryMenu onBack={handleBack} />;
+  }
+  if (currentView === 'settings') {
+    return <SettingsMenu onBack={handleBack} />;
+  }
+
+  // Main menu
   const statusIcon = daemonStatus === 'online' ? '🟢' : '🔴';
   const statusText = daemonStatus === 'online' ? t('daemon.online') : t('daemon.offline');
 
