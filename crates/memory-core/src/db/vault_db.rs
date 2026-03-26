@@ -5,6 +5,13 @@ use crate::error::MemoryError;
 use crate::vault::{VaultConfig, VaultEntry, VaultKeyRotation};
 use rusqlite::{params, Connection};
 
+fn parse_allowed_agents(raw: Option<String>) -> Result<Option<Vec<String>>, MemoryError> {
+    Ok(raw
+        .map(|value| serde_json::from_str(&value))
+        .transpose()
+        .map(|value| value.filter(|agents: &Vec<String>| !agents.is_empty()))?)
+}
+
 pub fn vault_get_config(conn: &Connection) -> Result<Option<VaultConfig>, MemoryError> {
     let mut stmt = conn.prepare(
         "SELECT salt, verifier, kdf_algorithm, kdf_params, cipher, created_at, updated_at 
@@ -56,14 +63,21 @@ pub fn vault_set_config(conn: &Connection, config: &VaultConfig) -> Result<(), M
 
 pub fn vault_upsert_entry(conn: &Connection, entry: &VaultEntry) -> Result<(), MemoryError> {
     let now = now_utc_iso();
+    let allowed_agents_json = entry
+        .allowed_agents
+        .as_ref()
+        .filter(|agents| !agents.is_empty())
+        .map(serde_json::to_string)
+        .transpose()?;
     conn.execute(
-        "INSERT INTO vault_entries (name, encrypted_value, nonce, secret_type, description, created_at, updated_at, accessed_at, access_count)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+        "INSERT INTO vault_entries (name, encrypted_value, nonce, secret_type, description, allowed_agents, created_at, updated_at, accessed_at, access_count)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
          ON CONFLICT(name) DO UPDATE SET
             encrypted_value = excluded.encrypted_value,
             nonce = excluded.nonce,
             secret_type = excluded.secret_type,
             description = excluded.description,
+            allowed_agents = excluded.allowed_agents,
             updated_at = excluded.updated_at",
         params![
             entry.name,
@@ -71,6 +85,7 @@ pub fn vault_upsert_entry(conn: &Connection, entry: &VaultEntry) -> Result<(), M
             entry.nonce,
             entry.secret_type,
             entry.description,
+            allowed_agents_json,
             if entry.created_at.is_empty() { now.clone() } else { entry.created_at.clone() },
             now,
             entry.accessed_at.clone(),
@@ -82,7 +97,7 @@ pub fn vault_upsert_entry(conn: &Connection, entry: &VaultEntry) -> Result<(), M
 
 pub fn vault_get_entry(conn: &Connection, name: &str) -> Result<Option<VaultEntry>, MemoryError> {
     let mut stmt = conn.prepare(
-        "SELECT name, encrypted_value, nonce, secret_type, description, created_at, updated_at, accessed_at, access_count 
+        "SELECT name, encrypted_value, nonce, secret_type, description, allowed_agents, created_at, updated_at, accessed_at, access_count 
          FROM vault_entries WHERE name = ?1"
     )?;
 
@@ -93,10 +108,17 @@ pub fn vault_get_entry(conn: &Connection, name: &str) -> Result<Option<VaultEntr
             nonce: row.get(2)?,
             secret_type: row.get(3)?,
             description: row.get(4)?,
-            created_at: row.get(5)?,
-            updated_at: row.get(6)?,
-            accessed_at: row.get(7)?,
-            access_count: row.get(8)?,
+            allowed_agents: parse_allowed_agents(row.get(5)?).map_err(|e| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    5,
+                    rusqlite::types::Type::Text,
+                    Box::new(e),
+                )
+            })?,
+            created_at: row.get(6)?,
+            updated_at: row.get(7)?,
+            accessed_at: row.get(8)?,
+            access_count: row.get(9)?,
         })
     });
 
@@ -109,7 +131,7 @@ pub fn vault_get_entry(conn: &Connection, name: &str) -> Result<Option<VaultEntr
 
 pub fn vault_list_entries(conn: &Connection) -> Result<Vec<VaultEntry>, MemoryError> {
     let mut stmt = conn.prepare(
-        "SELECT name, encrypted_value, nonce, secret_type, description, created_at, updated_at, accessed_at, access_count 
+        "SELECT name, encrypted_value, nonce, secret_type, description, allowed_agents, created_at, updated_at, accessed_at, access_count 
          FROM vault_entries ORDER BY name"
     )?;
 
@@ -120,10 +142,17 @@ pub fn vault_list_entries(conn: &Connection) -> Result<Vec<VaultEntry>, MemoryEr
             nonce: row.get(2)?,
             secret_type: row.get(3)?,
             description: row.get(4)?,
-            created_at: row.get(5)?,
-            updated_at: row.get(6)?,
-            accessed_at: row.get(7)?,
-            access_count: row.get(8)?,
+            allowed_agents: parse_allowed_agents(row.get(5)?).map_err(|e| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    5,
+                    rusqlite::types::Type::Text,
+                    Box::new(e),
+                )
+            })?,
+            created_at: row.get(6)?,
+            updated_at: row.get(7)?,
+            accessed_at: row.get(8)?,
+            access_count: row.get(9)?,
         })
     })?;
 
@@ -135,7 +164,7 @@ pub fn vault_list_entries_by_type(
     secret_type: &str,
 ) -> Result<Vec<VaultEntry>, MemoryError> {
     let mut stmt = conn.prepare(
-        "SELECT name, encrypted_value, nonce, secret_type, description, created_at, updated_at, accessed_at, access_count 
+        "SELECT name, encrypted_value, nonce, secret_type, description, allowed_agents, created_at, updated_at, accessed_at, access_count 
          FROM vault_entries WHERE secret_type = ?1 ORDER BY name"
     )?;
 
@@ -146,10 +175,17 @@ pub fn vault_list_entries_by_type(
             nonce: row.get(2)?,
             secret_type: row.get(3)?,
             description: row.get(4)?,
-            created_at: row.get(5)?,
-            updated_at: row.get(6)?,
-            accessed_at: row.get(7)?,
-            access_count: row.get(8)?,
+            allowed_agents: parse_allowed_agents(row.get(5)?).map_err(|e| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    5,
+                    rusqlite::types::Type::Text,
+                    Box::new(e),
+                )
+            })?,
+            created_at: row.get(6)?,
+            updated_at: row.get(7)?,
+            accessed_at: row.get(8)?,
+            access_count: row.get(9)?,
         })
     })?;
 
@@ -166,6 +202,22 @@ pub fn vault_touch_entry(conn: &Connection, name: &str) -> Result<(), MemoryErro
     conn.execute(
         "UPDATE vault_entries SET accessed_at = ?1, access_count = access_count + 1 WHERE name = ?2",
         params![now, name],
+    )?;
+    Ok(())
+}
+
+pub fn vault_insert_audit(
+    conn: &Connection,
+    timestamp: &str,
+    operation: &str,
+    secret_name: Option<&str>,
+    success: bool,
+    detail: Option<&str>,
+) -> Result<(), MemoryError> {
+    conn.execute(
+        "INSERT INTO vault_audit (timestamp, operation, secret_name, success, detail)
+         VALUES (?1, ?2, ?3, ?4, ?5)",
+        params![timestamp, operation, secret_name, success as i64, detail],
     )?;
     Ok(())
 }

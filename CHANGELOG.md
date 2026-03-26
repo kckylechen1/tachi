@@ -5,6 +5,42 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.12.0] - 2026-03-27
+
+### Added
+
+#### Vault Hardening
+- **Auto-lock timeout**: Vault automatically locks after 30 minutes of inactivity (configurable via `vault_auto_lock_after_secs`). `vault_get` returns "Vault auto-locked" when timeout is exceeded. `vault_status` includes `auto_lock_after_secs` field.
+- **Brute-force protection**: After 5 failed `vault_unlock` attempts, lockout for 5 minutes. Counter resets on successful unlock. Clear error messages with remaining lockout time.
+- **Audit logging**: New `vault_audit` table with indexes on `timestamp`, `operation`, and `secret_name`. `record_vault_audit()` helper called from `vault_init`, `vault_unlock` (success/fail), `vault_lock`, `vault_set`, `vault_get`, and `vault_remove`.
+- **Access control (`allowed_agents`)**: `vault_set` now accepts `allowed_agents: Vec<String>` (optional). Stored as JSON in `vault_entries.allowed_agents` column. `vault_get` requires `agent_id` parameter when `allowed_agents` is set. Returns clear "Access denied" errors for unauthorized agents.
+- **Vault list returns `allowed_agents`** metadata for each secret.
+- **Minimum password length**: `vault_init` enforces 8+ character passwords.
+
+#### Kanban Card GC
+- **`gc_expired_kanban_cards`**: Deletes kanban cards with status "resolved" or "expired" older than configurable `max_age_days` (default: 30). Integrated into both CLI `gc` command and `memory_gc` tool, returning `kanban_cards_pruned` count.
+- **Background GC integration**: Periodic GC timer (6h interval) now includes kanban card pruning alongside existing table maintenance.
+
+#### MCP Connection Pool Hardening
+- **13 bare `.lock().unwrap()` calls replaced** with `lock_or_recover()` / `read_or_recover()` / `write_or_recover()` helpers in MCP pool code (`connections`, `connecting_locks`, `circuits`, `semaphores`). Prevents panics on poisoned mutexes.
+
+### Changed
+- **Vault key management**: `get_vault_key()` now returns owned `[u8; 32]` instead of `RwLockReadGuard`, using `read_or_recover` helper for poison recovery. `vault_lock` uses `clear_cached_vault_state()` which clears both `vault_key` and `vault_unlock_time`.
+- **Vault `vault_get` rotation**: Entry selection moved into `select_vault_entry()` called under write lock (`with_global_store`) for atomicity with rotation state.
+- **Vault `vault_remove`**: Now returns error instead of `"removed": false` for non-secret failures (audit logging, DB errors).
+
+### Fixed
+- **vault_audit table missing**: Added `CREATE TABLE IF NOT EXISTS vault_audit` to `schema.rs` with proper indexes. `vault_insert_audit` handler no longer panics.
+- **MCP pool poison recovery**: All `.lock().unwrap()` calls in pool management replaced with `lock_or_recover()` to handle poisoned mutexes gracefully.
+
+### Tests
+- **55 tests** (up from 50): 5 new tests:
+  - `vault_auto_lock_expires_cached_key`: Auto-lock after timeout, status shows locked
+  - `vault_unlock_enforces_bruteforce_lockout_and_resets_on_success`: 5 failed attempts → lockout, counter reset on success
+  - `vault_get_respects_allowed_agents`: Missing agent_id → denied, wrong agent → denied, correct agent → allowed
+  - `vault_operations_record_audit_entries`: Audit rows for init/set/get/lock/unlock(both success+fail)/remove
+  - `memory_gc_prunes_expired_resolved_kanban_cards`: Resolved card older than 30 days gets deleted
+
 ## [0.11.0] - 2026-03-26
 
 ### Added

@@ -22,6 +22,7 @@ pub struct VaultEntry {
     pub nonce: String,           // base64-encoded 12 bytes
     pub secret_type: String,     // api_key | oauth_token | json_blob | cookie | other
     pub description: String,
+    pub allowed_agents: Option<Vec<String>>,
     pub created_at: String,
     pub updated_at: String,
     pub accessed_at: String,
@@ -93,6 +94,7 @@ impl Default for VaultEntry {
             nonce: String::new(),
             secret_type: "api_key".to_string(),
             description: String::new(),
+            allowed_agents: None,
             created_at: String::new(),
             updated_at: String::new(),
             accessed_at: String::new(),

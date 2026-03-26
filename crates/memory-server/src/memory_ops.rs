@@ -203,17 +203,27 @@ pub(super) async fn handle_memory_gc(server: &MemoryServer) -> Result<String, St
     let mut results = serde_json::Map::new();
 
     let global_gc = server.with_global_store(|store| {
-        store
+        let mut gc = store
             .gc_tables()
-            .map_err(|e| format!("GC failed on global DB: {}", e))
+            .map_err(|e| format!("GC failed on global DB: {}", e))?;
+        let kanban_deleted = gc_expired_kanban_cards(store, DEFAULT_KANBAN_GC_MAX_AGE_DAYS)?;
+        if let Some(object) = gc.as_object_mut() {
+            object.insert("kanban_cards_pruned".into(), json!(kanban_deleted));
+        }
+        Ok(gc)
     })?;
     results.insert("global".into(), global_gc);
 
     if server.has_project_db() {
         let project_gc = server.with_project_store(|store| {
-            store
+            let mut gc = store
                 .gc_tables()
-                .map_err(|e| format!("GC failed on project DB: {}", e))
+                .map_err(|e| format!("GC failed on project DB: {}", e))?;
+            let kanban_deleted = gc_expired_kanban_cards(store, DEFAULT_KANBAN_GC_MAX_AGE_DAYS)?;
+            if let Some(object) = gc.as_object_mut() {
+                object.insert("kanban_cards_pruned".into(), json!(kanban_deleted));
+            }
+            Ok(gc)
         })?;
         results.insert("project".into(), project_gc);
     }

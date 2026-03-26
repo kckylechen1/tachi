@@ -7,6 +7,9 @@ use chrono::Utc;
 use memory_core::vault::{VaultConfig, VaultEntry, VaultKeyRotation};
 use serde_json::json;
 
+const VAULT_UNLOCK_MAX_FAILED_ATTEMPTS: u32 = 5;
+const VAULT_UNLOCK_LOCKOUT_SECS: u64 = 300;
+
 fn default_secret_type() -> String {
     "api_key".to_string()
 }
@@ -38,6 +41,9 @@ pub(super) struct VaultSetParams {
     /// Optional human-readable description
     #[serde(default)]
     pub description: String,
+    /// Agent IDs allowed to read this secret. When absent, any caller may read it.
+    #[serde(default)]
+    pub allowed_agents: Option<Vec<String>>,
     /// If true and secret name ends with _N pattern, set up key rotation
     #[serde(default)]
     pub enable_rotation: bool,
@@ -51,6 +57,9 @@ pub(super) struct VaultSetParams {
 pub(super) struct VaultGetParams {
     /// Secret name to retrieve
     pub name: String,
+    /// Agent ID requesting the secret. Required when allowed_agents is set.
+    #[serde(default)]
+    pub agent_id: Option<String>,
     /// If true and this is a rotation prefix, auto-select next key
     #[serde(default)]
     pub auto_rotate: bool,
@@ -96,6 +105,21 @@ fn normalize_rotation_strategy(s: &str) -> String {
     }
 }
 
+fn normalize_allowed_agents(allowed_agents: Option<Vec<String>>) -> Option<Vec<String>> {
+    allowed_agents.and_then(|agents| {
+        let normalized: Vec<String> = agents
+            .into_iter()
+            .map(|agent| agent.trim().to_string())
+            .filter(|agent| !agent.is_empty())
+            .collect();
+        if normalized.is_empty() {
+            None
+        } else {
+            Some(normalized)
+        }
+    })
+}
+
 fn rotation_index(name: &str, prefix: &str) -> Option<u32> {
     let suffix = name.strip_prefix(prefix)?.strip_prefix('_')?;
     suffix.parse::<u32>().ok()
@@ -110,16 +134,62 @@ fn collect_rotation_entries(entries: Vec<VaultEntry>, prefix: &str) -> Vec<(u32,
     matching
 }
 
-/// Check if vault is unlocked and return the key.
-fn get_vault_key(server: &MemoryServer) -> Result<std::sync::RwLockReadGuard<'_, Option<[u8; 32]>>, String> {
-    let key_guard = server
-        .vault_key
-        .read()
-        .map_err(|e| format!("Failed to lock vault key: {e}"))?;
-    if key_guard.is_none() {
-        return Err("Vault is locked. Call vault_unlock first.".into());
+fn remaining_lockout_seconds(until: Instant) -> u64 {
+    let remaining = until.saturating_duration_since(Instant::now());
+    let secs = remaining.as_secs();
+    if remaining.subsec_nanos() > 0 {
+        secs.saturating_add(1)
+    } else {
+        secs
     }
-    Ok(key_guard)
+}
+
+fn clear_cached_vault_state(server: &MemoryServer) {
+    *write_or_recover(&server.vault_key, "vault_key") = None;
+    *write_or_recover(&server.vault_unlock_time, "vault_unlock_time") = None;
+}
+
+fn maybe_auto_lock_vault(server: &MemoryServer) -> bool {
+    let unlock_time = *read_or_recover(&server.vault_unlock_time, "vault_unlock_time");
+    let Some(unlock_time) = unlock_time else {
+        return false;
+    };
+
+    if unlock_time.elapsed() > Duration::from_secs(server.vault_auto_lock_after_secs) {
+        clear_cached_vault_state(server);
+        return true;
+    }
+
+    false
+}
+
+fn record_vault_audit(
+    server: &MemoryServer,
+    operation: &str,
+    secret_name: Option<&str>,
+    success: bool,
+    detail: Option<&str>,
+) {
+    let timestamp = Utc::now().to_rfc3339();
+    if let Err(err) = server.with_global_store(|store| {
+        store
+            .vault_insert_audit(&timestamp, operation, secret_name, success, detail)
+            .map_err(|e| e.to_string())
+    }) {
+        eprintln!("WARNING: failed to record vault audit: {err}");
+    }
+}
+
+/// Check if vault is unlocked and return the cached key.
+fn get_vault_key(server: &MemoryServer) -> Result<[u8; 32], String> {
+    if maybe_auto_lock_vault(server) {
+        return Err("Vault auto-locked. Call vault_unlock first.".into());
+    }
+
+    read_or_recover(&server.vault_key, "vault_key")
+        .as_ref()
+        .copied()
+        .ok_or_else(|| "Vault is locked. Call vault_unlock first.".to_string())
 }
 
 /// Check if vault is initialized.
@@ -129,220 +199,83 @@ fn is_vault_initialized(server: &MemoryServer) -> Result<bool, String> {
         .map(|opt| opt.is_some())
 }
 
-pub(super) async fn handle_vault_init(
-    server: &MemoryServer,
-    params: VaultInitParams,
-) -> Result<String, String> {
-    // Check if already initialized
-    if is_vault_initialized(server)? {
-        return Err("Vault already initialized. Use vault_unlock to unlock.".into());
-    }
-
-    // Generate salt
-    let salt = crypto::generate_salt();
-    let salt_b64 = B64.encode(&salt);
-
-    // Derive key
-    let key = crypto::derive_key(&params.password, &salt)?;
-
-    // Create verifier
-    let verifier = crypto::create_verifier(&key)?;
-
-    // Create config
-    let now = Utc::now().to_rfc3339();
-    let config = VaultConfig {
-        salt: salt_b64,
-        verifier,
-        kdf_algorithm: "argon2id".to_string(),
-        kdf_params: r#"{"m":65536,"t":3,"p":4}"#.to_string(),
-        cipher: "aes-256-gcm".to_string(),
-        created_at: now.clone(),
-        updated_at: now,
-    };
-
-    // Save config
-    server
-        .with_global_store(|store| store.vault_set_config(&config).map_err(|e| e.to_string()))
-        .map_err(|e| format!("Failed to save vault config: {e}"))?;
-
-    // Cache key
-    let mut key_guard = server
-        .vault_key
-        .write()
-        .map_err(|e| format!("Failed to lock vault key: {e}"))?;
-    *key_guard = Some(key);
-
-    let resp = json!({
-        "initialized": true,
-        "locked": false,
-        "message": "Vault initialized and unlocked"
-    });
-    serde_json::to_string(&resp).map_err(|e| format!("serialize: {e}"))
-}
-
-pub(super) async fn handle_vault_unlock(
-    server: &MemoryServer,
-    params: VaultUnlockParams,
-) -> Result<String, String> {
-    // Load config
-    let config = server
-        .with_global_store_read(|store| store.vault_get_config().map_err(|e| e.to_string()))
-        .map_err(|e| format!("Failed to load vault config: {e}"))?
-        .ok_or("Vault not initialized. Call vault_init first.")?;
-
-    // Decode salt
-    let salt = B64
-        .decode(&config.salt)
-        .map_err(|e| format!("Invalid salt in vault config: {e}"))?;
-
-    // Derive key
-    let key = crypto::derive_key(&params.password, &salt)?;
-
-    // Verify password
-    if !crypto::verify_password(&key, &config.verifier)? {
-        return Err("Wrong password".into());
-    }
-
-    // Cache key
-    let mut key_guard = server
-        .vault_key
-        .write()
-        .map_err(|e| format!("Failed to lock vault key: {e}"))?;
-    *key_guard = Some(key);
-
-    let resp = json!({
-        "unlocked": true
-    });
-    serde_json::to_string(&resp).map_err(|e| format!("serialize: {e}"))
-}
-
-pub(super) async fn handle_vault_lock(server: &MemoryServer) -> Result<String, String> {
-    let mut key_guard = server
-        .vault_key
-        .write()
-        .map_err(|e| format!("Failed to lock vault key: {e}"))?;
-    *key_guard = None;
-
-    let resp = json!({
-        "locked": true
-    });
-    serde_json::to_string(&resp).map_err(|e| format!("serialize: {e}"))
-}
-
-pub(super) async fn handle_vault_set(
-    server: &MemoryServer,
-    params: VaultSetParams,
-) -> Result<String, String> {
-    // Validate name
-    crypto::validate_secret_name(&params.name)?;
-
-    // Check vault is unlocked
-    let key_guard = get_vault_key(server)?;
-    let key = key_guard.as_ref().unwrap();
-
-    // Validate secret type
-    let secret_type = match params.secret_type.to_ascii_lowercase().as_str() {
-        "api_key" => "api_key",
-        "oauth_token" | "oauth" => "oauth_token",
-        "json_blob" | "json" => "json_blob",
-        "cookie" => "cookie",
-        _ => "other",
-    };
-
-    // Encrypt value
-    let (encrypted_value, nonce) = crypto::encrypt(key, params.value.as_bytes())?;
-
-    // Check if this is a new entry
-    let is_new = !server
-        .with_global_store(|store| store.vault_entry_exists(&params.name).map_err(|e| e.to_string()))
-        .map_err(|e| format!("Failed to check existing entry: {e}"))?;
-
-    // Create entry
-    let now = Utc::now().to_rfc3339();
-    let entry = VaultEntry {
-        name: params.name.clone(),
-        encrypted_value,
-        nonce,
-        secret_type: secret_type.to_string(),
-        description: params.description,
-        created_at: if is_new { now.clone() } else { String::new() },
-        updated_at: now,
-        accessed_at: String::new(),
-        access_count: 0,
-    };
-
-    // Save entry
-    server
-        .with_global_store(|store| store.vault_upsert_entry(&entry).map_err(|e| e.to_string()))
-        .map_err(|e| format!("Failed to save secret: {e}"))?;
-
-    // Handle rotation setup if requested
-    if params.enable_rotation {
-        // Check if name matches pattern like KEY_1, KEY_2
-        if let Some(pos) = params.name.rfind('_') {
-            let suffix = &params.name[pos + 1..];
-            if suffix.parse::<u32>().is_ok() {
-                let prefix = &params.name[..pos];
-                let strategy = normalize_rotation_strategy(
-                    &params.rotation_strategy.unwrap_or_else(|| "round_robin".to_string()));
-                
-                // Count existing keys with this prefix
-                let all_entries = server
-                    .with_global_store_read(|store| store.vault_list_entries().map_err(|e| e.to_string()))
-                    .map_err(|e| format!("Failed to list entries: {e}"))?;
-
-                let total_keys = collect_rotation_entries(all_entries, prefix).len() as i64;
-                
-                // Update or create rotation record
-                let rotation = VaultKeyRotation {
-                    prefix: prefix.to_string(),
-                    current_index: 1,
-                    total_keys,
-                    rotation_strategy: strategy,
-                    created_at: Utc::now().to_rfc3339(),
-                    updated_at: Utc::now().to_rfc3339(),
-                };
-                
-                server
-                    .with_global_store(|store| store.vault_set_rotation(&rotation).map_err(|e| e.to_string()))
-                    .map_err(|e| format!("Failed to save rotation config: {e}"))?;
-            }
+fn ensure_vault_unlock_allowed(server: &MemoryServer) -> Result<(), String> {
+    let mut state = lock_or_recover(&server.vault_failed_attempts, "vault_failed_attempts");
+    if let Some(until) = state.1 {
+        if Instant::now() < until {
+            return Err(format!(
+                "Vault unlock temporarily locked. Try again in {} seconds.",
+                remaining_lockout_seconds(until)
+            ));
         }
+        *state = (0, None);
     }
-
-    let resp = json!({
-        "stored": true,
-        "name": params.name,
-        "secret_type": secret_type,
-        "created": is_new
-    });
-    serde_json::to_string(&resp).map_err(|e| format!("serialize: {e}"))
+    Ok(())
 }
 
-pub(super) async fn handle_vault_get(
-    server: &MemoryServer,
-    params: VaultGetParams,
-) -> Result<String, String> {
-    // Check vault is unlocked
-    let key_guard = get_vault_key(server)?;
-    let key = key_guard.as_ref().unwrap();
+fn record_vault_unlock_failure(server: &MemoryServer) -> Result<String, String> {
+    let mut state = lock_or_recover(&server.vault_failed_attempts, "vault_failed_attempts");
+    state.0 = state.0.saturating_add(1);
+    if state.0 >= VAULT_UNLOCK_MAX_FAILED_ATTEMPTS {
+        let until = Instant::now() + Duration::from_secs(VAULT_UNLOCK_LOCKOUT_SECS);
+        state.1 = Some(until);
+        return Err(format!(
+            "Too many failed vault unlock attempts. Try again in {} seconds.",
+            remaining_lockout_seconds(until)
+        ));
+    }
+    Err("Wrong password".to_string())
+}
 
-    let exact_entry = server
-        .with_global_store_read(|store| store.vault_get_entry(&params.name).map_err(|e| e.to_string()))
+fn reset_vault_unlock_failures(server: &MemoryServer) {
+    *lock_or_recover(&server.vault_failed_attempts, "vault_failed_attempts") = (0, None);
+}
+
+fn ensure_agent_allowed(entry: &VaultEntry, agent_id: Option<&str>) -> Result<(), String> {
+    let Some(allowed_agents) = entry.allowed_agents.as_ref() else {
+        return Ok(());
+    };
+
+    let Some(agent_id) = agent_id.map(str::trim).filter(|agent| !agent.is_empty()) else {
+        return Err(format!(
+            "Access denied for secret '{}': agent_id is required.",
+            entry.name
+        ));
+    };
+
+    if allowed_agents.iter().any(|allowed| allowed == agent_id) {
+        Ok(())
+    } else {
+        Err(format!(
+            "Access denied for agent '{}' to secret '{}'.",
+            agent_id, entry.name
+        ))
+    }
+}
+
+fn select_vault_entry(
+    store: &mut MemoryStore,
+    params: &VaultGetParams,
+) -> Result<(String, VaultEntry), String> {
+    let exact_entry = store
+        .vault_get_entry(&params.name)
         .map_err(|e| format!("Failed to get secret: {e}"))?;
-    let rotation = server
-        .with_global_store_read(|store| store.vault_get_rotation(&params.name).map_err(|e| e.to_string()))
+    let rotation = store
+        .vault_get_rotation(&params.name)
         .map_err(|e| format!("Failed to check rotation: {e}"))?;
 
-    let (target_name, entry) = if let Some(rotation) = rotation {
+    if let Some(rotation) = rotation {
         if params.auto_rotate || exact_entry.is_none() {
-            let all_entries = server
-                .with_global_store_read(|store| store.vault_list_entries().map_err(|e| e.to_string()))
+            let all_entries = store
+                .vault_list_entries()
                 .map_err(|e| format!("Failed to list entries: {e}"))?;
             let matching_keys = collect_rotation_entries(all_entries, &rotation.prefix);
 
             if matching_keys.is_empty() {
-                return Err(format!("No keys found for rotation prefix '{}'", params.name));
+                return Err(format!(
+                    "No keys found for rotation prefix '{}'",
+                    params.name
+                ));
             }
 
             let selected = match rotation.rotation_strategy.as_str() {
@@ -354,8 +287,8 @@ pub(super) async fn handle_vault_get(
                         updated_at: Utc::now().to_rfc3339(),
                         ..rotation.clone()
                     };
-                    server
-                        .with_global_store(|store| store.vault_set_rotation(&new_rotation).map_err(|e| e.to_string()))
+                    store
+                        .vault_set_rotation(&new_rotation)
                         .map_err(|e| format!("Failed to update rotation: {e}"))?;
                     matching_keys.get(idx).cloned()
                 }
@@ -369,54 +302,300 @@ pub(super) async fn handle_vault_get(
                     .min_by_key(|(_, entry)| (entry.access_count, entry.accessed_at.clone())),
                 _ => matching_keys.into_iter().next(),
             }
-            .ok_or("No key selected")?;
+            .ok_or_else(|| "No key selected".to_string())?;
 
-            (selected.1.name.clone(), selected.1)
+            Ok((selected.1.name.clone(), selected.1))
         } else {
             let entry = exact_entry.ok_or_else(|| format!("Secret not found: {}", params.name))?;
-            (entry.name.clone(), entry)
+            Ok((entry.name.clone(), entry))
         }
     } else {
         let entry = exact_entry.ok_or_else(|| format!("Secret not found: {}", params.name))?;
-        (entry.name.clone(), entry)
-    };
+        Ok((entry.name.clone(), entry))
+    }
+}
 
-    // Decrypt value
-    let decrypted = crypto::decrypt(key, &entry.encrypted_value, &entry.nonce)?;
-    let value = String::from_utf8(decrypted)
-        .map_err(|e| format!("Decrypted value is not valid UTF-8: {e}"))?;
+pub(super) async fn handle_vault_init(
+    server: &MemoryServer,
+    params: VaultInitParams,
+) -> Result<String, String> {
+    let result = (|| {
+        if is_vault_initialized(server)? {
+            return Err("Vault already initialized. Use vault_unlock to unlock.".into());
+        }
 
-    // Update access stats
-    server
-        .with_global_store(|store| store.vault_touch_entry(&target_name).map_err(|e| e.to_string()))
-        .map_err(|e| format!("Failed to update access stats: {e}"))?;
+        if params.password.len() < 8 {
+            return Err("Password must be at least 8 characters long.".into());
+        }
 
-    let resp = json!({
-        "name": entry.name,
-        "value": value,
-        "secret_type": entry.secret_type,
-        "description": entry.description,
-        "access_count": entry.access_count + 1,
-    });
-    serde_json::to_string(&resp).map_err(|e| format!("serialize: {e}"))
+        let salt = crypto::generate_salt();
+        let salt_b64 = B64.encode(&salt);
+        let key = crypto::derive_key(&params.password, &salt)?;
+        let verifier = crypto::create_verifier(&key)?;
+        let now = Utc::now().to_rfc3339();
+        let config = VaultConfig {
+            salt: salt_b64,
+            verifier,
+            kdf_algorithm: "argon2id".to_string(),
+            kdf_params: r#"{"m":65536,"t":3,"p":4}"#.to_string(),
+            cipher: "aes-256-gcm".to_string(),
+            created_at: now.clone(),
+            updated_at: now,
+        };
+
+        server
+            .with_global_store(|store| store.vault_set_config(&config).map_err(|e| e.to_string()))
+            .map_err(|e| format!("Failed to save vault config: {e}"))?;
+
+        *write_or_recover(&server.vault_key, "vault_key") = Some(key);
+        *write_or_recover(&server.vault_unlock_time, "vault_unlock_time") = Some(Instant::now());
+        reset_vault_unlock_failures(server);
+
+        serde_json::to_string(&json!({
+            "initialized": true,
+            "locked": false,
+            "message": "Vault initialized and unlocked"
+        }))
+        .map_err(|e| format!("serialize: {e}"))
+    })();
+
+    record_vault_audit(
+        server,
+        "vault_init",
+        None,
+        result.is_ok(),
+        result.as_ref().err().map(String::as_str),
+    );
+    result
+}
+
+pub(super) async fn handle_vault_unlock(
+    server: &MemoryServer,
+    params: VaultUnlockParams,
+) -> Result<String, String> {
+    let result = (|| {
+        ensure_vault_unlock_allowed(server)?;
+
+        let config = server
+            .with_global_store_read(|store| store.vault_get_config().map_err(|e| e.to_string()))
+            .map_err(|e| format!("Failed to load vault config: {e}"))?
+            .ok_or_else(|| "Vault not initialized. Call vault_init first.".to_string())?;
+
+        let salt = B64
+            .decode(&config.salt)
+            .map_err(|e| format!("Invalid salt in vault config: {e}"))?;
+        let key = crypto::derive_key(&params.password, &salt)?;
+
+        if !crypto::verify_password(&key, &config.verifier)? {
+            return record_vault_unlock_failure(server);
+        }
+
+        *write_or_recover(&server.vault_key, "vault_key") = Some(key);
+        *write_or_recover(&server.vault_unlock_time, "vault_unlock_time") = Some(Instant::now());
+        reset_vault_unlock_failures(server);
+
+        serde_json::to_string(&json!({
+            "unlocked": true
+        }))
+        .map_err(|e| format!("serialize: {e}"))
+    })();
+
+    record_vault_audit(
+        server,
+        "vault_unlock",
+        None,
+        result.is_ok(),
+        result.as_ref().err().map(String::as_str),
+    );
+    result
+}
+
+pub(super) async fn handle_vault_lock(server: &MemoryServer) -> Result<String, String> {
+    let result = (|| {
+        clear_cached_vault_state(server);
+        serde_json::to_string(&json!({
+            "locked": true
+        }))
+        .map_err(|e| format!("serialize: {e}"))
+    })();
+
+    record_vault_audit(
+        server,
+        "vault_lock",
+        None,
+        result.is_ok(),
+        result.as_ref().err().map(String::as_str),
+    );
+    result
+}
+
+pub(super) async fn handle_vault_set(
+    server: &MemoryServer,
+    params: VaultSetParams,
+) -> Result<String, String> {
+    let secret_name = params.name.clone();
+    let result = (|| {
+        crypto::validate_secret_name(&params.name)?;
+        let key = get_vault_key(server)?;
+
+        let secret_type = match params.secret_type.to_ascii_lowercase().as_str() {
+            "api_key" => "api_key",
+            "oauth_token" | "oauth" => "oauth_token",
+            "json_blob" | "json" => "json_blob",
+            "cookie" => "cookie",
+            _ => "other",
+        };
+        let allowed_agents = normalize_allowed_agents(params.allowed_agents.clone());
+        let (encrypted_value, nonce) = crypto::encrypt(&key, params.value.as_bytes())?;
+
+        let is_new = !server
+            .with_global_store(|store| {
+                store
+                    .vault_entry_exists(&params.name)
+                    .map_err(|e| e.to_string())
+            })
+            .map_err(|e| format!("Failed to check existing entry: {e}"))?;
+
+        let now = Utc::now().to_rfc3339();
+        let entry = VaultEntry {
+            name: params.name.clone(),
+            encrypted_value,
+            nonce,
+            secret_type: secret_type.to_string(),
+            description: params.description.clone(),
+            allowed_agents,
+            created_at: if is_new { now.clone() } else { String::new() },
+            updated_at: now,
+            accessed_at: String::new(),
+            access_count: 0,
+        };
+
+        server
+            .with_global_store(|store| store.vault_upsert_entry(&entry).map_err(|e| e.to_string()))
+            .map_err(|e| format!("Failed to save secret: {e}"))?;
+
+        if params.enable_rotation {
+            if let Some(pos) = params.name.rfind('_') {
+                let suffix = &params.name[pos + 1..];
+                if suffix.parse::<u32>().is_ok() {
+                    let prefix = &params.name[..pos];
+                    let strategy = normalize_rotation_strategy(
+                        &params
+                            .rotation_strategy
+                            .clone()
+                            .unwrap_or_else(|| "round_robin".to_string()),
+                    );
+
+                    let all_entries = server
+                        .with_global_store_read(|store| {
+                            store.vault_list_entries().map_err(|e| e.to_string())
+                        })
+                        .map_err(|e| format!("Failed to list entries: {e}"))?;
+
+                    let total_keys = collect_rotation_entries(all_entries, prefix).len() as i64;
+                    let rotation = VaultKeyRotation {
+                        prefix: prefix.to_string(),
+                        current_index: 1,
+                        total_keys,
+                        rotation_strategy: strategy,
+                        created_at: Utc::now().to_rfc3339(),
+                        updated_at: Utc::now().to_rfc3339(),
+                    };
+
+                    server
+                        .with_global_store(|store| {
+                            store
+                                .vault_set_rotation(&rotation)
+                                .map_err(|e| e.to_string())
+                        })
+                        .map_err(|e| format!("Failed to save rotation config: {e}"))?;
+                }
+            }
+        }
+
+        serde_json::to_string(&json!({
+            "stored": true,
+            "name": params.name,
+            "secret_type": secret_type,
+            "created": is_new
+        }))
+        .map_err(|e| format!("serialize: {e}"))
+    })();
+
+    record_vault_audit(
+        server,
+        "vault_set",
+        Some(&secret_name),
+        result.is_ok(),
+        match &result {
+            Ok(_) => Some("stored"),
+            Err(err) => Some(err.as_str()),
+        },
+    );
+    result
+}
+
+pub(super) async fn handle_vault_get(
+    server: &MemoryServer,
+    params: VaultGetParams,
+) -> Result<String, String> {
+    let requested_name = params.name.clone();
+    let result = (|| {
+        let key = get_vault_key(server)?;
+        let (target_name, entry) =
+            server.with_global_store(|store| select_vault_entry(store, &params))?;
+
+        ensure_agent_allowed(&entry, params.agent_id.as_deref())?;
+
+        let decrypted = crypto::decrypt(&key, &entry.encrypted_value, &entry.nonce)?;
+        let value = String::from_utf8(decrypted)
+            .map_err(|e| format!("Decrypted value is not valid UTF-8: {e}"))?;
+
+        server
+            .with_global_store(|store| {
+                store
+                    .vault_touch_entry(&target_name)
+                    .map_err(|e| e.to_string())
+            })
+            .map_err(|e| format!("Failed to update access stats: {e}"))?;
+
+        serde_json::to_string(&json!({
+            "name": entry.name,
+            "value": value,
+            "secret_type": entry.secret_type,
+            "description": entry.description,
+            "allowed_agents": entry.allowed_agents,
+            "access_count": entry.access_count + 1,
+        }))
+        .map_err(|e| format!("serialize: {e}"))
+    })();
+
+    record_vault_audit(
+        server,
+        "vault_get",
+        Some(&requested_name),
+        result.is_ok(),
+        result.as_ref().err().map(String::as_str),
+    );
+    result
 }
 
 pub(super) async fn handle_vault_list(
     server: &MemoryServer,
     params: VaultListParams,
 ) -> Result<String, String> {
-    // Check vault is initialized
     if !is_vault_initialized(server)? {
         return Err("Vault not initialized. Call vault_init first.".into());
     }
 
-    // List entries (no need to be unlocked - only metadata)
     let entries = if let Some(ref secret_type) = params.secret_type {
-        server
-            .with_global_store_read(|store| store.vault_list_entries_by_type(secret_type).map_err(|e| e.to_string()))
+        server.with_global_store_read(|store| {
+            store
+                .vault_list_entries_by_type(secret_type)
+                .map_err(|e| e.to_string())
+        })
     } else {
-        server
-            .with_global_store_read(|store| store.vault_list_entries().map_err(|e| e.to_string()))
+        server.with_global_store_read(|store| store.vault_list_entries().map_err(|e| e.to_string()))
     }
     .map_err(|e| format!("Failed to list secrets: {e}"))?;
 
@@ -427,6 +606,7 @@ pub(super) async fn handle_vault_list(
                 "name": e.name,
                 "secret_type": e.secret_type,
                 "description": e.description,
+                "allowed_agents": e.allowed_agents,
                 "created_at": e.created_at,
                 "updated_at": e.updated_at,
                 "access_count": e.access_count,
@@ -445,34 +625,51 @@ pub(super) async fn handle_vault_remove(
     server: &MemoryServer,
     params: VaultRemoveParams,
 ) -> Result<String, String> {
-    // Check vault is unlocked
-    let _key_guard = get_vault_key(server)?;
+    let secret_name = params.name.clone();
+    let result = (|| {
+        let _key = get_vault_key(server)?;
+        let removed = server
+            .with_global_store(|store| {
+                store
+                    .vault_delete_entry(&params.name)
+                    .map_err(|e| e.to_string())
+            })
+            .map_err(|e| format!("Failed to remove secret: {e}"))?;
 
-    let removed = server
-        .with_global_store(|store| store.vault_delete_entry(&params.name).map_err(|e| e.to_string()))
-        .map_err(|e| format!("Failed to remove secret: {e}"))?;
+        if removed {
+            serde_json::to_string(&json!({
+                "removed": true,
+                "name": params.name
+            }))
+            .map_err(|e| format!("serialize: {e}"))
+        } else {
+            Err(format!("Secret not found: {}", params.name))
+        }
+    })();
 
-    let resp = if removed {
-        json!({
-            "removed": true,
-            "name": params.name
-        })
-    } else {
-        json!({
+    record_vault_audit(
+        server,
+        "vault_remove",
+        Some(&secret_name),
+        result.is_ok(),
+        result.as_ref().err().map(String::as_str),
+    );
+
+    match result {
+        Ok(value) => Ok(value),
+        Err(err) if err.starts_with("Secret not found: ") => serde_json::to_string(&json!({
             "removed": false,
-            "error": format!("Secret not found: {}", params.name)
-        })
-    };
-    serde_json::to_string(&resp).map_err(|e| format!("serialize: {e}"))
+            "error": err,
+        }))
+        .map_err(|e| format!("serialize: {e}")),
+        Err(err) => Err(err),
+    }
 }
 
 pub(super) async fn handle_vault_status(server: &MemoryServer) -> Result<String, String> {
     let initialized = is_vault_initialized(server)?;
-    let locked = server
-        .vault_key
-        .read()
-        .map_err(|e| format!("Failed to lock vault key: {e}"))?
-        .is_none();
+    let _ = maybe_auto_lock_vault(server);
+    let locked = read_or_recover(&server.vault_key, "vault_key").is_none();
     let entry_count = if initialized {
         server
             .with_global_store_read(|store| store.vault_count_entries().map_err(|e| e.to_string()))
@@ -485,6 +682,7 @@ pub(super) async fn handle_vault_status(server: &MemoryServer) -> Result<String,
         "initialized": initialized,
         "locked": locked,
         "entry_count": entry_count,
+        "auto_lock_after_secs": server.vault_auto_lock_after_secs,
     });
     serde_json::to_string(&resp).map_err(|e| format!("serialize: {e}"))
 }
@@ -493,16 +691,13 @@ pub(super) async fn handle_vault_setup_rotation(
     server: &MemoryServer,
     params: VaultSetupRotationParams,
 ) -> Result<String, String> {
-    // Check vault is unlocked
-    let _key_guard = get_vault_key(server)?;
+    let _key = get_vault_key(server)?;
 
     if params.total_keys < 2 {
         return Err("Rotation requires at least 2 keys".into());
     }
 
     let strategy = normalize_rotation_strategy(&params.strategy);
-
-    // Verify keys exist
     let all_entries = server
         .with_global_store_read(|store| store.vault_list_entries().map_err(|e| e.to_string()))
         .map_err(|e| format!("Failed to list entries: {e}"))?;
@@ -522,7 +717,6 @@ pub(super) async fn handle_vault_setup_rotation(
         ));
     }
 
-    // Create rotation record
     let now = Utc::now().to_rfc3339();
     let rotation = VaultKeyRotation {
         prefix: params.prefix.clone(),
@@ -534,7 +728,11 @@ pub(super) async fn handle_vault_setup_rotation(
     };
 
     server
-        .with_global_store(|store| store.vault_set_rotation(&rotation).map_err(|e| e.to_string()))
+        .with_global_store(|store| {
+            store
+                .vault_set_rotation(&rotation)
+                .map_err(|e| e.to_string())
+        })
         .map_err(|e| format!("Failed to save rotation config: {e}"))?;
 
     let resp = json!({

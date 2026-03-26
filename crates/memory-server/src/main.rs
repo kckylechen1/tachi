@@ -39,19 +39,19 @@ use crate::graph_state_ops::{
 };
 use crate::hub_helpers::{
     build_skill_tool_from_cap, capability_callable, capability_visibility_for_cap,
-    CapabilityVisibility, make_text_tool_result, review_status_allows_call,
-    should_expose_mcp_tools, should_expose_skill_tool,
+    make_text_tool_result, review_status_allows_call, should_expose_mcp_tools,
+    should_expose_skill_tool, CapabilityVisibility,
 };
 use crate::hub_ops::{
-    handle_hub_call, handle_hub_disconnect, handle_hub_discover, handle_export_skills,
+    handle_export_skills, handle_hub_call, handle_hub_disconnect, handle_hub_discover,
     handle_hub_feedback, handle_hub_get, handle_hub_register, handle_hub_review,
     handle_hub_set_active_version, handle_hub_set_enabled, handle_hub_stats, handle_run_skill,
     handle_skill_evolve, handle_tachi_audit_log, handle_vc_bind, handle_vc_list,
     handle_vc_register, handle_vc_resolve,
 };
 use crate::kanban::{
-    handle_check_inbox, handle_post_card, handle_update_card, CheckInboxParams, PostCardParams,
-    UpdateCardParams,
+    gc_expired_kanban_cards, handle_check_inbox, handle_post_card, handle_update_card,
+    CheckInboxParams, PostCardParams, UpdateCardParams, DEFAULT_KANBAN_GC_MAX_AGE_DAYS,
 };
 use crate::mcp_proxy::{
     append_warning, clear_mcp_discovery_metadata, filter_mcp_tools_by_permissions,
@@ -77,12 +77,6 @@ use crate::sandbox_ops::{
     handle_sandbox_check, handle_sandbox_exec_audit, handle_sandbox_get_policy,
     handle_sandbox_list_policies, handle_sandbox_set_policy, handle_sandbox_set_rule,
 };
-use crate::vault_ops::{
-    handle_vault_get, handle_vault_init, handle_vault_list, handle_vault_lock,
-    handle_vault_remove, handle_vault_set, handle_vault_setup_rotation, handle_vault_status,
-    handle_vault_unlock, VaultGetParams, VaultInitParams, VaultListParams, VaultRemoveParams,
-    VaultSetParams, VaultSetupRotationParams, VaultUnlockParams,
-};
 use crate::shared_defs::{
     categorize_error, slim_entry, slim_l0_rule, slim_search_result, DeadLetter, DLQ_MAX_ENTRIES,
     DLQ_TTL_SECS,
@@ -92,6 +86,12 @@ use crate::tool_params::*;
 use crate::utils::{
     find_git_root, is_active_global_rule, is_trusted_command, lock_or_recover, parse_env_bool,
     parse_env_u64, read_or_recover, stable_hash, value_to_template_text, write_or_recover,
+};
+use crate::vault_ops::{
+    handle_vault_get, handle_vault_init, handle_vault_list, handle_vault_lock, handle_vault_remove,
+    handle_vault_set, handle_vault_setup_rotation, handle_vault_status, handle_vault_unlock,
+    VaultGetParams, VaultInitParams, VaultListParams, VaultRemoveParams, VaultSetParams,
+    VaultSetupRotationParams, VaultUnlockParams,
 };
 
 use chrono::Utc;
@@ -396,6 +396,9 @@ struct MemoryServer {
     enrich_tx: mpsc::UnboundedSender<EnrichmentItem>,
     // ─── Vault (Encrypted Secret Storage) ────────────────────────────────────
     vault_key: Arc<StdRwLock<Option<[u8; 32]>>>,
+    vault_unlock_time: Arc<StdRwLock<Option<Instant>>>,
+    vault_failed_attempts: Arc<StdMutex<(u32, Option<Instant>)>>,
+    vault_auto_lock_after_secs: u64,
     // ─── Rate Limiter ────────────────────────────────────────────────────────
     /// Sliding window: tool call timestamps per session. Key = session_id (or "default").
     rate_limit_windows: Arc<StdMutex<HashMap<String, VecDeque<Instant>>>>,
@@ -520,14 +523,18 @@ impl MemoryServer {
         let (enrich_tx, enrich_rx) = mpsc::unbounded_channel::<EnrichmentItem>();
 
         // Build hot-swap state before moving project_store into the struct
-        let hot_project_db = Arc::new(StdRwLock::new(
-            project_store.as_ref().map(|s| ProjectDbState {
+        let hot_project_db = Arc::new(StdRwLock::new(project_store.as_ref().map(|s| {
+            ProjectDbState {
                 store: Arc::clone(s),
-                rw_gate: project_rw_gate.clone().expect("project_rw_gate must exist if project_store exists"),
-                db_path: project_db_path.clone().expect("project_db_path must exist if project_store exists"),
+                rw_gate: project_rw_gate
+                    .clone()
+                    .expect("project_rw_gate must exist if project_store exists"),
+                db_path: project_db_path
+                    .clone()
+                    .expect("project_db_path must exist if project_store exists"),
                 vec_available: project_vec_available,
-            })
-        ));
+            }
+        })));
 
         let server = Self {
             global_store: Arc::new(StdMutex::new(global_store)),
@@ -555,6 +562,9 @@ impl MemoryServer {
             mcp_tool_exposure_mode,
             enrich_tx,
             vault_key: Arc::new(StdRwLock::new(None)),
+            vault_unlock_time: Arc::new(StdRwLock::new(None)),
+            vault_failed_attempts: Arc::new(StdMutex::new((0, None))),
+            vault_auto_lock_after_secs: 1800,
             rate_limit_windows: Arc::new(StdMutex::new(HashMap::new())),
             rate_limit_bursts: Arc::new(StdMutex::new(HashMap::new())),
             rate_limit_rpm: parse_env_u64("RATE_LIMIT_RPM").unwrap_or(DEFAULT_RATE_LIMIT_RPM),
@@ -1175,10 +1185,7 @@ impl MemoryServer {
         &self,
         Parameters(_params): Parameters<AgentWhoamiParams>,
     ) -> Result<String, String> {
-        let guard = self
-            .agent_profile
-            .read()
-            .unwrap_or_else(|e| e.into_inner());
+        let guard = self.agent_profile.read().unwrap_or_else(|e| e.into_inner());
         match guard.as_ref() {
             Some(profile) => serde_json::to_string(&profile).map_err(|e| format!("serialize: {e}")),
             None => Ok(r#"{"status":"unregistered","message":"No agent profile set. Call agent_register to identify this session."}"#.to_string()),
@@ -1195,10 +1202,7 @@ impl MemoryServer {
         Parameters(params): Parameters<HandoffLeaveParams>,
     ) -> Result<String, String> {
         let from_agent = {
-            let guard = self
-                .agent_profile
-                .read()
-                .unwrap_or_else(|e| e.into_inner());
+            let guard = self.agent_profile.read().unwrap_or_else(|e| e.into_inner());
             guard
                 .as_ref()
                 .map(|p| p.agent_id.clone())
@@ -1217,10 +1221,7 @@ impl MemoryServer {
         };
 
         let memo_id = memo.id.clone();
-        let mut memos = self
-            .handoff_memos
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        let mut memos = self.handoff_memos.lock().unwrap_or_else(|e| e.into_inner());
 
         // Also persist to memory for cross-restart durability
         let memo_json = serde_json::to_string(&memo).map_err(|e| format!("serialize: {e}"))?;
@@ -1256,9 +1257,7 @@ impl MemoryServer {
             vector: None,
             metadata: serde_json::json!({"handoff_memo_id": memo_id}),
         };
-        self.with_global_store(|store| {
-            store.upsert(&entry).map_err(|e| format!("{e}"))
-        })?;
+        self.with_global_store(|store| store.upsert(&entry).map_err(|e| format!("{e}")))?;
 
         memos.push(memo);
 
@@ -1284,10 +1283,7 @@ impl MemoryServer {
         &self,
         Parameters(params): Parameters<HandoffCheckParams>,
     ) -> Result<String, String> {
-        let mut memos = self
-            .handoff_memos
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        let mut memos = self.handoff_memos.lock().unwrap_or_else(|e| e.into_inner());
 
         let matching: Vec<&HandoffMemo> = memos
             .iter()
@@ -1606,9 +1602,7 @@ impl MemoryServer {
 
     // ─── Vault (Encrypted Secret Storage) ────────────────────────────────────
 
-    #[tool(
-        description = "Initialize the vault with a master password. Can only be called once."
-    )]
+    #[tool(description = "Initialize the vault with a master password. Can only be called once.")]
     async fn vault_init(
         &self,
         Parameters(params): Parameters<VaultInitParams>,
@@ -1702,14 +1696,15 @@ impl MemoryServer {
             .unwrap_or(resolved_capability_id);
         // Check under lock
         {
-            let conns = self.pool.connections.lock().unwrap();
+            let conns = lock_or_recover(&self.pool.connections, "mcp_pool.connections");
             if conns.contains_key(server_name) {
                 return Ok(());
             }
         }
         // Not connected — acquire connecting lock to serialize connection attempts
         let connecting_lock = {
-            let mut locks = self.pool.connecting_locks.lock().unwrap();
+            let mut locks =
+                lock_or_recover(&self.pool.connecting_locks, "mcp_pool.connecting_locks");
             locks
                 .entry(server_name.to_string())
                 .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
@@ -1718,7 +1713,7 @@ impl MemoryServer {
         let _guard = connecting_lock.lock().await;
         // Double-check after acquiring lock
         {
-            let conns = self.pool.connections.lock().unwrap();
+            let conns = lock_or_recover(&self.pool.connections, "mcp_pool.connections");
             if conns.contains_key(server_name) {
                 return Ok(());
             }
@@ -1831,7 +1826,7 @@ impl MemoryServer {
             .await
             .map_err(|e| rmcp::ErrorData::internal_error(e, None))?;
 
-        self.pool.connections.lock().unwrap().insert(
+        lock_or_recover(&self.pool.connections, "mcp_pool.connections").insert(
             server_name.to_string(),
             ChildConnection {
                 client,
@@ -2026,7 +2021,7 @@ impl MemoryServer {
 
         // 2. Check circuit breaker
         {
-            let mut circuits = self.pool.circuits.lock().unwrap();
+            let mut circuits = lock_or_recover(&self.pool.circuits, "mcp_pool.circuits");
             if let Some((state, count)) = circuits.get_mut(server_name) {
                 match state {
                     CircuitState::Open { until } => {
@@ -2060,7 +2055,7 @@ impl MemoryServer {
 
         // 3. Acquire per-child concurrency permit (rebuild if max_concurrency changed)
         let semaphore = {
-            let mut sems = self.pool.semaphores.lock().unwrap();
+            let mut sems = lock_or_recover(&self.pool.semaphores, "mcp_pool.semaphores");
             let mut max_conc = cap_def["max_concurrency"].as_u64().unwrap_or(1);
             if let Some(policy_cap) = sandbox_policy
                 .as_ref()
@@ -2098,7 +2093,7 @@ impl MemoryServer {
         }
 
         let peer = {
-            let mut conns = self.pool.connections.lock().unwrap();
+            let mut conns = lock_or_recover(&self.pool.connections, "mcp_pool.connections");
             if let Some(conn) = conns.get_mut(server_name) {
                 conn.last_used = Instant::now();
                 conn.client.peer().clone()
@@ -2129,7 +2124,7 @@ impl MemoryServer {
         let (final_result, sandbox_decision, sandbox_error_kind) = match result {
             Ok(Ok(r)) => {
                 // Tool returned successfully (even if r.is_error — that's a tool-level error, not transport)
-                let mut circuits = self.pool.circuits.lock().unwrap();
+                let mut circuits = lock_or_recover(&self.pool.circuits, "mcp_pool.circuits");
                 circuits.insert(server_name.to_string(), (CircuitState::Closed, 0));
                 (Ok(r), "allowed", None)
             }
@@ -2201,7 +2196,7 @@ impl MemoryServer {
     fn record_circuit_failure(&self, server_name: &str) {
         let mut should_remove = false;
         {
-            let mut circuits = self.pool.circuits.lock().unwrap();
+            let mut circuits = lock_or_recover(&self.pool.circuits, "mcp_pool.circuits");
             let entry = circuits
                 .entry(server_name.to_string())
                 .or_insert((CircuitState::Closed, 0));
@@ -2214,7 +2209,7 @@ impl MemoryServer {
             }
         }
         if should_remove {
-            self.pool.connections.lock().unwrap().remove(server_name);
+            lock_or_recover(&self.pool.connections, "mcp_pool.connections").remove(server_name);
         }
     }
 }

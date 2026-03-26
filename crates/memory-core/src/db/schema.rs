@@ -343,12 +343,25 @@ pub fn init_schema(conn: &Connection) -> Result<(), MemoryError> {
             nonce           TEXT NOT NULL,
             secret_type     TEXT NOT NULL DEFAULT 'api_key',
             description     TEXT NOT NULL DEFAULT '',
+            allowed_agents  TEXT,
             created_at      TEXT NOT NULL DEFAULT '',
             updated_at      TEXT NOT NULL DEFAULT '',
             accessed_at     TEXT NOT NULL DEFAULT '',
             access_count    INTEGER NOT NULL DEFAULT 0
         );
         CREATE INDEX IF NOT EXISTS idx_vault_entries_type ON vault_entries(secret_type);
+
+        CREATE TABLE IF NOT EXISTS vault_audit (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            timestamp       TEXT NOT NULL,
+            operation       TEXT NOT NULL,
+            secret_name     TEXT,
+            success         INTEGER NOT NULL DEFAULT 1,
+            detail          TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_vault_audit_timestamp ON vault_audit(timestamp DESC);
+        CREATE INDEX IF NOT EXISTS idx_vault_audit_operation ON vault_audit(operation);
+        CREATE INDEX IF NOT EXISTS idx_vault_audit_secret_name ON vault_audit(secret_name);
 
         -- Vault: key rotation state for multi-key secrets
         CREATE TABLE IF NOT EXISTS vault_key_rotations (
@@ -514,6 +527,8 @@ fn ensure_fts_backfilled(conn: &Connection) -> Result<(), MemoryError> {
            FROM memories"#,
         [],
     )?;
+
+    ensure_column(conn, "vault_entries", "allowed_agents", "TEXT")?;
 
     Ok(())
 }

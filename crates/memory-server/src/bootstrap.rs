@@ -146,7 +146,13 @@ fn run_cli_command(command: Commands, db_path: &PathBuf) -> Result<(), Box<dyn s
         }
         Commands::Gc => {
             let mut store = open_cli_store(db_path)?;
-            print_pretty_json(&store.gc_tables()?)
+            let mut gc = store.gc_tables()?;
+            let kanban_deleted =
+                gc_expired_kanban_cards(&mut store, DEFAULT_KANBAN_GC_MAX_AGE_DAYS)?;
+            if let Some(object) = gc.as_object_mut() {
+                object.insert("kanban_cards_pruned".into(), json!(kanban_deleted));
+            }
+            print_pretty_json(&gc)
         }
         Commands::Hub { action } => {
             let store = open_cli_store(db_path)?;
@@ -449,16 +455,28 @@ async fn tokio_main(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             loop {
                 interval.tick().await;
                 eprintln!("[gc] Running scheduled garbage collection...");
-                match gc_server
-                    .with_global_store(|store: &mut MemoryStore| store.gc_tables().map_err(|e| format!("{}", e)))
-                {
+                match gc_server.with_global_store(|store: &mut MemoryStore| {
+                    let mut gc = store.gc_tables().map_err(|e| format!("{e}"))?;
+                    let kanban_deleted =
+                        gc_expired_kanban_cards(store, DEFAULT_KANBAN_GC_MAX_AGE_DAYS)?;
+                    if let Some(object) = gc.as_object_mut() {
+                        object.insert("kanban_cards_pruned".into(), json!(kanban_deleted));
+                    }
+                    Ok(gc)
+                }) {
                     Ok(result) => eprintln!("[gc] Global DB: {}", result),
                     Err(e) => eprintln!("[gc] Global DB error: {}", e),
                 }
                 if gc_server.has_project_db() {
-                    match gc_server
-                        .with_project_store(|store: &mut MemoryStore| store.gc_tables().map_err(|e| format!("{}", e)))
-                    {
+                    match gc_server.with_project_store(|store: &mut MemoryStore| {
+                        let mut gc = store.gc_tables().map_err(|e| format!("{e}"))?;
+                        let kanban_deleted =
+                            gc_expired_kanban_cards(store, DEFAULT_KANBAN_GC_MAX_AGE_DAYS)?;
+                        if let Some(object) = gc.as_object_mut() {
+                            object.insert("kanban_cards_pruned".into(), json!(kanban_deleted));
+                        }
+                        Ok(gc)
+                    }) {
                         Ok(result) => eprintln!("[gc] Project DB: {}", result),
                         Err(e) => eprintln!("[gc] Project DB error: {}", e),
                     }

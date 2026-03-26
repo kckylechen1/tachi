@@ -811,6 +811,25 @@ impl MemoryStore {
         db::vault_touch_entry(&self.conn, name)
     }
 
+    /// Insert a vault audit record.
+    pub fn vault_insert_audit(
+        &self,
+        timestamp: &str,
+        operation: &str,
+        secret_name: Option<&str>,
+        success: bool,
+        detail: Option<&str>,
+    ) -> Result<(), MemoryError> {
+        db::vault_insert_audit(
+            &self.conn,
+            timestamp,
+            operation,
+            secret_name,
+            success,
+            detail,
+        )
+    }
+
     /// Count total number of secrets.
     pub fn vault_count_entries(&self) -> Result<i64, MemoryError> {
         db::vault_count_entries(&self.conn)

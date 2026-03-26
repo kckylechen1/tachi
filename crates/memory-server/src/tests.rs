@@ -1228,6 +1228,7 @@ async fn vault_init_set_get_lock_unlock_roundtrip() {
             value: "sk-test-123".to_string(),
             secret_type: "api_key".to_string(),
             description: "primary openai key".to_string(),
+            allowed_agents: None,
             enable_rotation: false,
             rotation_strategy: None,
         }))
@@ -1237,6 +1238,7 @@ async fn vault_init_set_get_lock_unlock_roundtrip() {
     let get = server
         .vault_get(Parameters(VaultGetParams {
             name: "OPENAI_API_KEY".to_string(),
+            agent_id: None,
             auto_rotate: false,
         }))
         .await
@@ -1245,10 +1247,14 @@ async fn vault_init_set_get_lock_unlock_roundtrip() {
         serde_json::from_str(&get).expect("vault_get response should be JSON");
     assert_eq!(get_json["value"], json!("sk-test-123"));
 
-    server.vault_lock().await.expect("vault_lock should succeed");
+    server
+        .vault_lock()
+        .await
+        .expect("vault_lock should succeed");
     let locked_get = server
         .vault_get(Parameters(VaultGetParams {
             name: "OPENAI_API_KEY".to_string(),
+            agent_id: None,
             auto_rotate: false,
         }))
         .await;
@@ -1270,7 +1276,10 @@ async fn vault_init_set_get_lock_unlock_roundtrip() {
         .await
         .expect("vault_unlock should succeed");
 
-    let status = server.vault_status().await.expect("vault_status should succeed");
+    let status = server
+        .vault_status()
+        .await
+        .expect("vault_status should succeed");
     let status_json: serde_json::Value =
         serde_json::from_str(&status).expect("vault_status response should be JSON");
     assert_eq!(status_json["initialized"], json!(true));
@@ -1299,6 +1308,7 @@ async fn vault_rotation_prefix_get_round_robin_works() {
                 value: value.to_string(),
                 secret_type: "api_key".to_string(),
                 description: "rotated key".to_string(),
+                allowed_agents: None,
                 enable_rotation: false,
                 rotation_strategy: None,
             }))
@@ -1318,6 +1328,7 @@ async fn vault_rotation_prefix_get_round_robin_works() {
     let first = server
         .vault_get(Parameters(VaultGetParams {
             name: "GEMINI_API_KEY".to_string(),
+            agent_id: None,
             auto_rotate: false,
         }))
         .await
@@ -1328,6 +1339,7 @@ async fn vault_rotation_prefix_get_round_robin_works() {
     let second = server
         .vault_get(Parameters(VaultGetParams {
             name: "GEMINI_API_KEY".to_string(),
+            agent_id: None,
             auto_rotate: false,
         }))
         .await
@@ -1339,6 +1351,383 @@ async fn vault_rotation_prefix_get_round_robin_works() {
     assert_eq!(first_json["value"], json!("gemini-key-1"));
     assert_eq!(second_json["name"], json!("GEMINI_API_KEY_2"));
     assert_eq!(second_json["value"], json!("gemini-key-2"));
+}
+
+#[tokio::test]
+async fn vault_auto_lock_expires_cached_key() {
+    let mut server = make_server();
+    server.vault_auto_lock_after_secs = 1;
+
+    server
+        .vault_init(Parameters(VaultInitParams {
+            password: "auto-lock-password".to_string(),
+        }))
+        .await
+        .expect("vault_init should succeed");
+
+    server
+        .vault_set(Parameters(VaultSetParams {
+            name: "AUTO_LOCK_SECRET".to_string(),
+            value: "secret-value".to_string(),
+            secret_type: "api_key".to_string(),
+            description: "auto lock test secret".to_string(),
+            allowed_agents: None,
+            enable_rotation: false,
+            rotation_strategy: None,
+        }))
+        .await
+        .expect("vault_set should succeed");
+
+    *write_or_recover(&server.vault_unlock_time, "vault_unlock_time") =
+        Some(Instant::now() - Duration::from_secs(2));
+
+    let err = server
+        .vault_get(Parameters(VaultGetParams {
+            name: "AUTO_LOCK_SECRET".to_string(),
+            agent_id: None,
+            auto_rotate: false,
+        }))
+        .await
+        .expect_err("vault_get should fail after auto-lock timeout");
+    assert!(
+        err.contains("Vault auto-locked"),
+        "expected auto-lock error, got: {err}"
+    );
+
+    let status = server
+        .vault_status()
+        .await
+        .expect("vault_status should succeed");
+    let status_json: serde_json::Value =
+        serde_json::from_str(&status).expect("vault_status response should be JSON");
+    assert_eq!(status_json["locked"], json!(true));
+}
+
+#[tokio::test]
+async fn vault_unlock_enforces_bruteforce_lockout_and_resets_on_success() {
+    let server = make_server();
+
+    server
+        .vault_init(Parameters(VaultInitParams {
+            password: "correct-password".to_string(),
+        }))
+        .await
+        .expect("vault_init should succeed");
+    server
+        .vault_lock()
+        .await
+        .expect("vault_lock should succeed");
+
+    for attempt in 1..5 {
+        let err = server
+            .vault_unlock(Parameters(VaultUnlockParams {
+                password: format!("wrong-password-{attempt}"),
+            }))
+            .await
+            .expect_err("wrong password should fail");
+        assert!(
+            err.contains("Wrong password"),
+            "expected wrong password error on attempt {attempt}, got: {err}"
+        );
+    }
+
+    let lockout_err = server
+        .vault_unlock(Parameters(VaultUnlockParams {
+            password: "still-wrong".to_string(),
+        }))
+        .await
+        .expect_err("fifth failed attempt should trigger lockout");
+    assert!(
+        lockout_err.contains("Too many failed vault unlock attempts"),
+        "expected lockout error, got: {lockout_err}"
+    );
+
+    let blocked_err = server
+        .vault_unlock(Parameters(VaultUnlockParams {
+            password: "correct-password".to_string(),
+        }))
+        .await
+        .expect_err("correct password should still be blocked during lockout");
+    assert!(
+        blocked_err.contains("temporarily locked"),
+        "expected temporary lockout error, got: {blocked_err}"
+    );
+
+    *lock_or_recover(&server.vault_failed_attempts, "vault_failed_attempts") =
+        (5, Some(Instant::now() - Duration::from_secs(1)));
+
+    server
+        .vault_unlock(Parameters(VaultUnlockParams {
+            password: "correct-password".to_string(),
+        }))
+        .await
+        .expect("vault_unlock should succeed after lockout expiry");
+
+    let state = *lock_or_recover(&server.vault_failed_attempts, "vault_failed_attempts");
+    assert_eq!(state.0, 0);
+    assert!(
+        state.1.is_none(),
+        "lockout should clear on successful unlock"
+    );
+}
+
+#[tokio::test]
+async fn vault_get_respects_allowed_agents() {
+    let server = make_server();
+
+    server
+        .vault_init(Parameters(VaultInitParams {
+            password: "allowed-agents-password".to_string(),
+        }))
+        .await
+        .expect("vault_init should succeed");
+
+    server
+        .vault_set(Parameters(VaultSetParams {
+            name: "SCOPED_SECRET".to_string(),
+            value: "scoped-value".to_string(),
+            secret_type: "api_key".to_string(),
+            description: "restricted secret".to_string(),
+            allowed_agents: Some(vec!["agent-a".to_string(), "agent-b".to_string()]),
+            enable_rotation: false,
+            rotation_strategy: None,
+        }))
+        .await
+        .expect("vault_set should succeed");
+
+    let missing_agent_err = server
+        .vault_get(Parameters(VaultGetParams {
+            name: "SCOPED_SECRET".to_string(),
+            agent_id: None,
+            auto_rotate: false,
+        }))
+        .await
+        .expect_err("vault_get should require agent_id for restricted secrets");
+    assert!(
+        missing_agent_err.contains("agent_id is required"),
+        "expected missing agent_id error, got: {missing_agent_err}"
+    );
+
+    let denied_err = server
+        .vault_get(Parameters(VaultGetParams {
+            name: "SCOPED_SECRET".to_string(),
+            agent_id: Some("agent-z".to_string()),
+            auto_rotate: false,
+        }))
+        .await
+        .expect_err("vault_get should reject unauthorized agents");
+    assert!(
+        denied_err.contains("Access denied"),
+        "expected access denied error, got: {denied_err}"
+    );
+
+    let allowed = server
+        .vault_get(Parameters(VaultGetParams {
+            name: "SCOPED_SECRET".to_string(),
+            agent_id: Some("agent-a".to_string()),
+            auto_rotate: false,
+        }))
+        .await
+        .expect("vault_get should succeed for allowed agent");
+    let allowed_json: serde_json::Value =
+        serde_json::from_str(&allowed).expect("vault_get response should be JSON");
+    assert_eq!(allowed_json["value"], json!("scoped-value"));
+    assert_eq!(allowed_json["allowed_agents"][0], json!("agent-a"));
+}
+
+#[tokio::test]
+async fn vault_operations_record_audit_entries() {
+    let server = make_server();
+
+    server
+        .vault_init(Parameters(VaultInitParams {
+            password: "audit-password".to_string(),
+        }))
+        .await
+        .expect("vault_init should succeed");
+
+    server
+        .vault_set(Parameters(VaultSetParams {
+            name: "AUDIT_SECRET".to_string(),
+            value: "audit-value".to_string(),
+            secret_type: "api_key".to_string(),
+            description: "audit trail secret".to_string(),
+            allowed_agents: None,
+            enable_rotation: false,
+            rotation_strategy: None,
+        }))
+        .await
+        .expect("vault_set should succeed");
+
+    server
+        .vault_get(Parameters(VaultGetParams {
+            name: "AUDIT_SECRET".to_string(),
+            agent_id: None,
+            auto_rotate: false,
+        }))
+        .await
+        .expect("vault_get should succeed");
+
+    server
+        .vault_lock()
+        .await
+        .expect("vault_lock should succeed");
+
+    let unlock_err = server
+        .vault_unlock(Parameters(VaultUnlockParams {
+            password: "wrong-audit-password".to_string(),
+        }))
+        .await
+        .expect_err("wrong password should fail");
+    assert!(unlock_err.contains("Wrong password"));
+
+    server
+        .vault_unlock(Parameters(VaultUnlockParams {
+            password: "audit-password".to_string(),
+        }))
+        .await
+        .expect("vault_unlock should succeed");
+
+    server
+        .vault_remove(Parameters(VaultRemoveParams {
+            name: "AUDIT_SECRET".to_string(),
+        }))
+        .await
+        .expect("vault_remove should succeed");
+
+    let rows = server
+        .with_global_store_read(|store| {
+            let mut stmt = store
+                .connection()
+                .prepare(
+                    "SELECT operation, secret_name, success
+                     FROM vault_audit
+                     ORDER BY id ASC",
+                )
+                .map_err(|e| format!("prepare vault audit query failed: {e}"))?;
+            let rows = stmt
+                .query_map([], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, Option<String>>(1)?,
+                        row.get::<_, i64>(2)?,
+                    ))
+                })
+                .map_err(|e| format!("query vault audit rows failed: {e}"))?;
+            let mut rows_out = Vec::new();
+            for row in rows {
+                rows_out.push(row.map_err(|e| format!("read vault audit row failed: {e}"))?);
+            }
+            Ok(rows_out)
+        })
+        .expect("vault audit query should succeed");
+
+    assert!(
+        rows.contains(&("vault_init".to_string(), None, 1)),
+        "expected vault_init audit row"
+    );
+    assert!(
+        rows.contains(&("vault_set".to_string(), Some("AUDIT_SECRET".to_string()), 1)),
+        "expected vault_set audit row"
+    );
+    assert!(
+        rows.contains(&("vault_get".to_string(), Some("AUDIT_SECRET".to_string()), 1)),
+        "expected vault_get audit row"
+    );
+    assert!(
+        rows.contains(&("vault_lock".to_string(), None, 1)),
+        "expected vault_lock audit row"
+    );
+    assert!(
+        rows.contains(&("vault_unlock".to_string(), None, 0)),
+        "expected failed vault_unlock audit row"
+    );
+    assert!(
+        rows.iter()
+            .filter(|(op, secret_name, success)| op == "vault_unlock"
+                && secret_name.is_none()
+                && *success == 1)
+            .count()
+            >= 1,
+        "expected successful vault_unlock audit row"
+    );
+    assert!(
+        rows.contains(&(
+            "vault_remove".to_string(),
+            Some("AUDIT_SECRET".to_string()),
+            1
+        )),
+        "expected vault_remove audit row"
+    );
+}
+
+#[tokio::test]
+async fn memory_gc_prunes_expired_resolved_kanban_cards() {
+    std::env::set_var("KANBAN_CLASSIFY_ENABLED", "false");
+    let server = make_server();
+
+    let post = server
+        .post_card(Parameters(PostCardParams {
+            from_agent: "hapi".to_string(),
+            to_agent: "iris".to_string(),
+            title: "Old resolved card".to_string(),
+            body: "Can be pruned".to_string(),
+            priority: "medium".to_string(),
+            card_type: "request".to_string(),
+            thread_id: None,
+            workspace_id: None,
+            project_id: None,
+            conversation_id: None,
+            agent_session_id: None,
+        }))
+        .await
+        .expect("post_card should succeed");
+    let post_json: serde_json::Value =
+        serde_json::from_str(&post).expect("post_card response should be JSON");
+    let card_id = post_json["card_id"]
+        .as_str()
+        .expect("post_card should return card_id")
+        .to_string();
+
+    server
+        .update_card(Parameters(UpdateCardParams {
+            card_id: card_id.clone(),
+            new_status: "resolved".to_string(),
+            response_text: None,
+        }))
+        .await
+        .expect("update_card should succeed");
+
+    let stale_timestamp = (Utc::now() - chrono::Duration::days(31)).to_rfc3339();
+    server
+        .with_global_store(|store| {
+            store
+                .connection()
+                .execute(
+                    "UPDATE memories SET timestamp = ?1 WHERE id = ?2",
+                    (&stale_timestamp, &card_id),
+                )
+                .map_err(|e| format!("stale kanban timestamp update failed: {e}"))?;
+            Ok(())
+        })
+        .expect("failed to age kanban card");
+
+    let gc = server.memory_gc().await.expect("memory_gc should succeed");
+    let gc_json: serde_json::Value =
+        serde_json::from_str(&gc).expect("memory_gc response should be JSON");
+    assert_eq!(gc_json["global"]["kanban_cards_pruned"], json!(1));
+
+    let remaining = server
+        .with_global_store_read(|store| {
+            store
+                .get_with_options(&card_id, true)
+                .map_err(|e| format!("failed to fetch kanban card after GC: {e}"))
+        })
+        .expect("kanban fetch after GC should succeed");
+    assert!(
+        remaining.is_none(),
+        "expired resolved kanban card should be deleted"
+    );
 }
 
 #[tokio::test]
@@ -1444,11 +1833,17 @@ async fn post_card_accepts_acpx_card_types() {
         .expect("check_inbox for ACPX cards should succeed");
     let inbox_json: serde_json::Value =
         serde_json::from_str(&inbox).expect("check_inbox response should be JSON");
-    let cards = inbox_json["cards"].as_array().expect("cards should be array");
+    let cards = inbox_json["cards"]
+        .as_array()
+        .expect("cards should be array");
 
     assert!(cards.iter().any(|card| card["card_type"] == json!("ack")));
-    assert!(cards.iter().any(|card| card["card_type"] == json!("progress")));
-    assert!(cards.iter().any(|card| card["card_type"] == json!("result")));
+    assert!(cards
+        .iter()
+        .any(|card| card["card_type"] == json!("progress")));
+    assert!(cards
+        .iter()
+        .any(|card| card["card_type"] == json!("result")));
 }
 
 // ─── Rate Limiter Tests ──────────────────────────────────────────────────────
@@ -1511,7 +1906,7 @@ async fn rate_limit_rpm_blocks_when_exceeded() {
             display_name: "RPM Test".to_string(),
             capabilities: vec![],
             tool_filter: None,
-            rate_limit_rpm: Some(5), // Override: only 5 calls/min
+            rate_limit_rpm: Some(5),   // Override: only 5 calls/min
             rate_limit_burst: Some(0), // Disable burst detection for this test
             registered_at: Utc::now().to_rfc3339(),
         });
@@ -1571,9 +1966,7 @@ async fn agent_register_and_whoami_roundtrip() {
 
     // Before registering, whoami should return unregistered
     let whoami_before = server
-        .agent_whoami(Parameters(AgentWhoamiParams {
-            _placeholder: None,
-        }))
+        .agent_whoami(Parameters(AgentWhoamiParams { _placeholder: None }))
         .await
         .expect("agent_whoami should succeed");
     let before_json: serde_json::Value =
@@ -1592,8 +1985,7 @@ async fn agent_register_and_whoami_roundtrip() {
         }))
         .await
         .expect("agent_register should succeed");
-    let reg_json: serde_json::Value =
-        serde_json::from_str(&register).expect("should be JSON");
+    let reg_json: serde_json::Value = serde_json::from_str(&register).expect("should be JSON");
     assert_eq!(reg_json["status"], json!("registered"));
     assert_eq!(reg_json["agent_id"], json!("claude-code"));
     assert_eq!(reg_json["display_name"], json!("Claude Code"));
@@ -1602,19 +1994,14 @@ async fn agent_register_and_whoami_roundtrip() {
 
     // After registering, whoami should return the profile
     let whoami_after = server
-        .agent_whoami(Parameters(AgentWhoamiParams {
-            _placeholder: None,
-        }))
+        .agent_whoami(Parameters(AgentWhoamiParams { _placeholder: None }))
         .await
         .expect("agent_whoami should succeed");
     let after_json: serde_json::Value =
         serde_json::from_str(&whoami_after).expect("should be JSON");
     assert_eq!(after_json["agent_id"], json!("claude-code"));
     assert_eq!(after_json["display_name"], json!("Claude Code"));
-    assert_eq!(
-        after_json["capabilities"],
-        json!(["code-gen", "file-edit"])
-    );
+    assert_eq!(after_json["capabilities"], json!(["code-gen", "file-edit"]));
 }
 
 // ─── Handoff Tests ───────────────────────────────────────────────────────────
@@ -1649,8 +2036,7 @@ async fn handoff_leave_and_check_roundtrip() {
         }))
         .await
         .expect("handoff_leave should succeed");
-    let leave_json: serde_json::Value =
-        serde_json::from_str(&leave).expect("should be JSON");
+    let leave_json: serde_json::Value = serde_json::from_str(&leave).expect("should be JSON");
     assert_eq!(leave_json["status"], json!("memo_left"));
     assert_eq!(leave_json["from_agent"], json!("agent-a"));
     assert!(leave_json["memo_id"].is_string());
@@ -1663,13 +2049,9 @@ async fn handoff_leave_and_check_roundtrip() {
         }))
         .await
         .expect("handoff_check for agent-b");
-    let check_b_json: serde_json::Value =
-        serde_json::from_str(&check_b).expect("should be JSON");
+    let check_b_json: serde_json::Value = serde_json::from_str(&check_b).expect("should be JSON");
     assert_eq!(check_b_json["pending_memos"], json!(1));
-    assert_eq!(
-        check_b_json["memos"][0]["from_agent"],
-        json!("agent-a")
-    );
+    assert_eq!(check_b_json["memos"][0]["from_agent"], json!("agent-a"));
 
     // Check as agent-c — should NOT see it (targeted at agent-b)
     let check_c = server
@@ -1679,8 +2061,7 @@ async fn handoff_leave_and_check_roundtrip() {
         }))
         .await
         .expect("handoff_check for agent-c");
-    let check_c_json: serde_json::Value =
-        serde_json::from_str(&check_c).expect("should be JSON");
+    let check_c_json: serde_json::Value = serde_json::from_str(&check_c).expect("should be JSON");
     assert_eq!(check_c_json["pending_memos"], json!(0));
 
     // Acknowledge as agent-b
@@ -1691,8 +2072,7 @@ async fn handoff_leave_and_check_roundtrip() {
         }))
         .await
         .expect("handoff_check with acknowledge");
-    let ack_json: serde_json::Value =
-        serde_json::from_str(&ack).expect("should be JSON");
+    let ack_json: serde_json::Value = serde_json::from_str(&ack).expect("should be JSON");
     assert_eq!(ack_json["pending_memos"], json!(1)); // Returns memos before acking
 
     // After acknowledgment, check again — should be empty
@@ -1731,8 +2111,7 @@ async fn handoff_untargeted_memo_visible_to_all() {
         }))
         .await
         .expect("handoff_check");
-    let check_json: serde_json::Value =
-        serde_json::from_str(&check).expect("should be JSON");
+    let check_json: serde_json::Value = serde_json::from_str(&check).expect("should be JSON");
     assert_eq!(check_json["pending_memos"], json!(1));
 }
 
@@ -1749,8 +2128,7 @@ async fn handoff_leave_persists_to_memory_store() {
         }))
         .await
         .expect("handoff_leave should succeed");
-    let leave_json: serde_json::Value =
-        serde_json::from_str(&leave).expect("should be JSON");
+    let leave_json: serde_json::Value = serde_json::from_str(&leave).expect("should be JSON");
     let memo_id = leave_json["memo_id"].as_str().unwrap();
 
     // Verify the memo was persisted to the global memory store
@@ -1761,8 +2139,7 @@ async fn handoff_leave_persists_to_memory_store() {
         }))
         .await
         .expect("get_memory for handoff should succeed");
-    let mem_json: serde_json::Value =
-        serde_json::from_str(&memory).expect("should be JSON");
+    let mem_json: serde_json::Value = serde_json::from_str(&memory).expect("should be JSON");
     assert_eq!(mem_json["category"], json!("handoff"));
     assert!(
         mem_json["text"]
@@ -1794,8 +2171,7 @@ async fn hub_export_skills_returns_empty_when_no_skills() {
         }))
         .await
         .expect("hub_export_skills should succeed");
-    let json: serde_json::Value =
-        serde_json::from_str(&result).expect("should be JSON");
+    let json: serde_json::Value = serde_json::from_str(&result).expect("should be JSON");
     assert_eq!(json["exported"], json!(0));
 }
 
@@ -1816,7 +2192,10 @@ async fn hub_export_skills_rejects_unknown_agent() {
     // But if we register a skill first...
     // Actually, with no skills, the early return triggers before dispatch.
     // Let's just verify it doesn't crash.
-    assert!(result.is_ok(), "should not crash with unknown agent when no skills match");
+    assert!(
+        result.is_ok(),
+        "should not crash with unknown agent when no skills match"
+    );
 }
 
 #[tokio::test]
@@ -1853,8 +2232,7 @@ async fn hub_export_skills_generic_writes_files() {
         }))
         .await
         .expect("hub_export_skills generic should succeed");
-    let json: serde_json::Value =
-        serde_json::from_str(&result).expect("should be JSON");
+    let json: serde_json::Value = serde_json::from_str(&result).expect("should be JSON");
     assert!(
         json["exported"].as_u64().unwrap_or(0) >= 1,
         "expected at least 1 skill exported, got: {json}"
@@ -2022,12 +2400,20 @@ async fn test_pack_project_with_skill_files() {
     std::fs::create_dir_all(&pack_dir).unwrap();
 
     // Root SKILL.md
-    std::fs::write(pack_dir.join("SKILL.md"), "# Root Skill\nThis is the root skill.").unwrap();
+    std::fs::write(
+        pack_dir.join("SKILL.md"),
+        "# Root Skill\nThis is the root skill.",
+    )
+    .unwrap();
 
     // Subdirectory skill
     let sub_skill = pack_dir.join("code-review");
     std::fs::create_dir_all(&sub_skill).unwrap();
-    std::fs::write(sub_skill.join("SKILL.md"), "# Code Review\nReview code carefully.").unwrap();
+    std::fs::write(
+        sub_skill.join("SKILL.md"),
+        "# Code Review\nReview code carefully.",
+    )
+    .unwrap();
 
     // Register the pack with local_path
     server
@@ -2060,7 +2446,10 @@ async fn test_pack_project_with_skill_files() {
     assert_eq!(projections[0]["status"], "projected");
 
     let skill_count = projections[0]["skill_count"].as_u64().unwrap();
-    assert_eq!(skill_count, 2, "expected exactly 2 skills to be projected, but got {skill_count}");
+    assert_eq!(
+        skill_count, 2,
+        "expected exactly 2 skills to be projected, but got {skill_count}"
+    );
 
     // Verify projection_list records it
     let result = server
@@ -2120,7 +2509,8 @@ async fn test_projection_list_filter_by_agent() {
     let server = make_server();
 
     // Create pack source
-    let pack_dir = std::env::temp_dir().join(format!("tachi-test-proj-filter-{}", uuid::Uuid::new_v4()));
+    let pack_dir =
+        std::env::temp_dir().join(format!("tachi-test-proj-filter-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(&pack_dir).unwrap();
     std::fs::write(pack_dir.join("SKILL.md"), "# Filter Test").unwrap();
 

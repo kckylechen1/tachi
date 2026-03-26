@@ -174,6 +174,8 @@ Tachi 亦化身为 OpenClaw 气海之元婴法宝。
 - **📤 仙诀外运（Skill Export）**：`hub_export_skills` 一键将万宝楼中仙诀输出为各派格式：Claude（SKILL.md + 符链）、OpenClaw（插件清单）、Cursor（.mdc 规则）、通用（原始卷轴）。支持可见性筛选、指定输出与清理旧物。
 - **🧬 仙诀进化（Skill Evolve）**：`skill_evolve` 以大模型之智审视当前仙诀、用户反馈与历史成败，自动炼化改良版本。可创版本号新诀（`skill:name/vN`），支持自动激活与试运行。
 - **🔮 虚灵法契（Virtual Capability）**：于万宝楼之上再筑一层抽象——虚灵法契（`vc:*`）。可绑定多路实体灵枢，依优先级择优调度，版本锁定，沙盒策略一处设定、各路继承。
+- **🔐 藏经密室（Tachi Vault）**：本地首储之加密宝库，专储 API 密钥与灵核秘籍。以 Argon2id 炼化主密码、AES-256-GCM 逐秘加密（每秘独立随机密钥）。九式法宝齐全（`vault_init`/`vault_unlock`/`vault_lock`/`vault_set`/`vault_get`/`vault_list`/`vault_remove`/`vault_status`/`vault_setup_rotation`）。自锁护体（30 分钟无用即锁）、暴力破解封锁（五次错入五分钟禁足）、逐秘准入名册（`allowed_agents`）、完整审计天网。更有多钥轮换之法——顺轮、乱轮、最少用轮三策可选。
+- **📧 灵核飞鸽（Kanban 全局化）**：跨灵核飞鸽传书，皆存于全局宝库。ACPX 协议扩三式传信（`ack` 确认、`progress` 进展、`result` 交割），令请求与应答有迹可循。上下文令牌（workspace、conversation）随信附带，支持精准筛选。过期飞鸽自动焚毁（30 天 GC）。
 
 ---
 

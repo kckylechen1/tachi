@@ -2,6 +2,7 @@ use super::*;
 
 pub(super) const KANBAN_CATEGORY: &str = "kanban";
 pub(super) const KANBAN_PATH_PREFIX: &str = "/kanban/";
+pub(super) const DEFAULT_KANBAN_GC_MAX_AGE_DAYS: u64 = 30;
 
 fn default_card_priority() -> String {
     "medium".to_string()
@@ -119,7 +120,10 @@ pub(super) fn normalize_card_type(value: &str) -> String {
         s if matches!(
             s.as_str(),
             "request" | "report" | "alert" | "handoff" | "ack" | "progress" | "result"
-        ) => s,
+        ) =>
+        {
+            s
+        }
         _ => default_card_type(),
     }
 }
@@ -200,8 +204,79 @@ pub(super) fn card_type(entry: &MemoryEntry) -> String {
         .unwrap_or_else(default_card_type)
 }
 
-fn add_trimmed_str_to_metadata(metadata: &mut serde_json::Value, key: &str, value: &Option<String>) {
-    if let Some(value) = value.as_deref().map(str::trim).filter(|value| !value.is_empty()) {
+pub(super) fn gc_expired_kanban_cards(
+    store: &mut MemoryStore,
+    max_age_days: u64,
+) -> Result<usize, String> {
+    let cutoff = chrono::Utc::now()
+        - chrono::Duration::days(std::cmp::min(max_age_days, i64::MAX as u64) as i64);
+    let mut stmt = store
+        .connection()
+        .prepare(
+            "SELECT id, timestamp, metadata
+             FROM memories
+             WHERE category = ?1 AND path LIKE ?2",
+        )
+        .map_err(|e| format!("prepare kanban GC query failed: {e}"))?;
+    let rows = stmt
+        .query_map((KANBAN_CATEGORY, format!("{KANBAN_PATH_PREFIX}%")), |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        })
+        .map_err(|e| format!("query expired kanban cards failed: {e}"))?;
+
+    let mut ids_to_delete = Vec::new();
+    for row in rows {
+        let (id, timestamp, metadata_json) =
+            row.map_err(|e| format!("read expired kanban card candidate failed: {e}"))?;
+        let metadata: serde_json::Value = serde_json::from_str(&metadata_json)
+            .map_err(|e| format!("parse kanban card metadata for '{id}' failed: {e}"))?;
+        let Some(status) = metadata
+            .get("status")
+            .and_then(|value| value.as_str())
+            .and_then(normalize_card_status)
+        else {
+            continue;
+        };
+        if status != "resolved" && status != "expired" {
+            continue;
+        }
+
+        let timestamp = chrono::DateTime::parse_from_rfc3339(&timestamp)
+            .map_err(|e| format!("parse kanban card timestamp for '{id}' failed: {e}"))?
+            .with_timezone(&chrono::Utc);
+        if timestamp < cutoff {
+            ids_to_delete.push(id);
+        }
+    }
+    drop(stmt);
+
+    let mut deleted = 0usize;
+    for id in ids_to_delete {
+        if store
+            .delete(&id)
+            .map_err(|e| format!("delete expired kanban card '{id}' failed: {e}"))?
+        {
+            deleted += 1;
+        }
+    }
+
+    Ok(deleted)
+}
+
+fn add_trimmed_str_to_metadata(
+    metadata: &mut serde_json::Value,
+    key: &str,
+    value: &Option<String>,
+) {
+    if let Some(value) = value
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
         metadata[key] = json!(value);
     }
 }
@@ -547,12 +622,7 @@ pub(super) async fn handle_update_card(
                 .get(&params.card_id)
                 .map_err(|e| format!("get card failed: {e}"))
         })?
-        .ok_or_else(|| {
-        format!(
-            "kanban card '{}' not found in global db",
-            params.card_id
-        )
-    })?;
+        .ok_or_else(|| format!("kanban card '{}' not found in global db", params.card_id))?;
     if entry.category != KANBAN_CATEGORY {
         return Err(format!(
             "memory '{}' is not a kanban card (category={})",
