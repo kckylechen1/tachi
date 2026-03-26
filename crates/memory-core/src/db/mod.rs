@@ -5,6 +5,7 @@ mod ghost;
 mod graph;
 mod hub_db;
 mod memory_crud;
+mod pack_db;
 mod sandbox;
 mod schema;
 mod sqlite_vec;
@@ -33,6 +34,10 @@ pub use memory_crud::{
     archive_memory, delete, fetch_by_ids, get_access_times, get_all, is_event_processed,
     list_by_path, mark_event_processed, record_access, release_event_claim, search_fts, search_vec,
     try_claim_event, update_enrichment_fields, update_with_revision, upsert,
+};
+pub use pack_db::{
+    pack_delete, pack_get, pack_list, pack_set_enabled, pack_upsert, projection_delete,
+    projection_list, projection_upsert,
 };
 pub use sandbox::{
     check_sandbox_access, get_sandbox_policy, insert_sandbox_exec_audit, list_sandbox_exec_audit,
