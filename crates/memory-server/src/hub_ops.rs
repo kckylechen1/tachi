@@ -76,9 +76,10 @@ fn signals_to_vec(value: Option<&serde_json::Value>) -> Vec<String> {
 }
 
 fn merge_findings(static_findings: &[String], llm_findings: &[String]) -> Vec<String> {
+    let mut seen = std::collections::HashSet::new();
     let mut merged = Vec::new();
     for item in static_findings.iter().chain(llm_findings.iter()) {
-        if !merged.contains(item) {
+        if seen.insert(item.as_str()) {
             merged.push(item.clone());
         }
     }
@@ -88,10 +89,18 @@ fn merge_findings(static_findings: &[String], llm_findings: &[String]) -> Vec<St
 fn scan_skill_definition(def: &serde_json::Value) -> serde_json::Value {
     let mut findings: Vec<String> = Vec::new();
     let mut signals: Vec<String> = Vec::new();
+    let mut seen_findings: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut seen_signals: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut high_hits: u32 = 0;
     let mut medium_hits: u32 = 0;
 
-    let prompt_like_fields = ["prompt", "template", "system", "instructions", "description"];
+    let prompt_like_fields = [
+        "prompt",
+        "template",
+        "system",
+        "instructions",
+        "description",
+    ];
     let mut corpus = String::new();
     for field in prompt_like_fields {
         if let Some(text) = def.get(field).and_then(|v| v.as_str()) {
@@ -104,10 +113,10 @@ fn scan_skill_definition(def: &serde_json::Value) -> serde_json::Value {
     let lower = corpus.to_ascii_lowercase();
 
     let mut record = |signal: &str, finding: &str, severity: &str| {
-        if !signals.iter().any(|s| s == signal) {
+        if seen_signals.insert(signal.to_string()) {
             signals.push(signal.to_string());
         }
-        if !findings.iter().any(|f| f == finding) {
+        if seen_findings.insert(finding.to_string()) {
             findings.push(finding.to_string());
         }
         if severity == "high" {
@@ -118,11 +127,31 @@ fn scan_skill_definition(def: &serde_json::Value) -> serde_json::Value {
     };
 
     let critical_patterns = [
-        ("rm -rf", "destructive_action", "Contains destructive shell command pattern 'rm -rf'"),
-        ("mkfs", "destructive_action", "Contains disk format pattern 'mkfs'"),
-        ("dd if=", "destructive_action", "Contains raw disk write pattern 'dd if='"),
-        ("shred ", "destructive_action", "Contains secure delete pattern 'shred'"),
-        ("sudo ", "privilege_escalation", "Contains privileged command pattern 'sudo'"),
+        (
+            "rm -rf",
+            "destructive_action",
+            "Contains destructive shell command pattern 'rm -rf'",
+        ),
+        (
+            "mkfs",
+            "destructive_action",
+            "Contains disk format pattern 'mkfs'",
+        ),
+        (
+            "dd if=",
+            "destructive_action",
+            "Contains raw disk write pattern 'dd if='",
+        ),
+        (
+            "shred ",
+            "destructive_action",
+            "Contains secure delete pattern 'shred'",
+        ),
+        (
+            "sudo ",
+            "privilege_escalation",
+            "Contains privileged command pattern 'sudo'",
+        ),
         (
             "curl | sh",
             "remote_bootstrap",
@@ -176,16 +205,36 @@ fn scan_skill_definition(def: &serde_json::Value) -> serde_json::Value {
     }
 
     let warning_patterns = [
-        ("os.system(", "unbounded_execution", "Contains os.system execution pattern"),
+        (
+            "os.system(",
+            "unbounded_execution",
+            "Contains os.system execution pattern",
+        ),
         (
             "subprocess.",
             "unbounded_execution",
             "Contains subprocess execution pattern",
         ),
-        ("eval(", "unbounded_execution", "Contains eval execution pattern"),
-        ("exec(", "unbounded_execution", "Contains exec execution pattern"),
-        ("bash -c", "unbounded_execution", "Contains shell trampoline pattern 'bash -c'"),
-        ("sh -c", "unbounded_execution", "Contains shell trampoline pattern 'sh -c'"),
+        (
+            "eval(",
+            "unbounded_execution",
+            "Contains eval execution pattern",
+        ),
+        (
+            "exec(",
+            "unbounded_execution",
+            "Contains exec execution pattern",
+        ),
+        (
+            "bash -c",
+            "unbounded_execution",
+            "Contains shell trampoline pattern 'bash -c'",
+        ),
+        (
+            "sh -c",
+            "unbounded_execution",
+            "Contains shell trampoline pattern 'sh -c'",
+        ),
         (
             "process.env",
             "secret_exposure",
@@ -301,13 +350,15 @@ async fn scan_skill_definition_with_llm(
         .await
     {
         Ok(raw) => {
-            let parsed: serde_json::Value = serde_json::from_str(llm::LlmClient::strip_code_fence(&raw))
-                .unwrap_or_else(|_| serde_json::json!({
-                    "risk": "medium",
-                    "blocked": false,
-                    "findings": ["Failed to parse LLM security scan JSON output"],
-                    "reason": raw
-                }));
+            let parsed: serde_json::Value =
+                serde_json::from_str(llm::LlmClient::strip_code_fence(&raw)).unwrap_or_else(|_| {
+                    serde_json::json!({
+                        "risk": "medium",
+                        "blocked": false,
+                        "findings": ["Failed to parse LLM security scan JSON output"],
+                        "reason": raw
+                    })
+                });
             Some(serde_json::json!({
                 "status": "ok",
                 "model": model,
@@ -357,10 +408,7 @@ fn merge_skill_scans(
 
         if llm_status == "ok" {
             if let Some(result) = scan.get("result") {
-                llm_risk = result
-                    .get("risk")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("low");
+                llm_risk = result.get("risk").and_then(|v| v.as_str()).unwrap_or("low");
                 llm_blocked = result
                     .get("blocked")
                     .and_then(|v| v.as_bool())
@@ -502,23 +550,24 @@ pub(super) async fn handle_hub_register(
     }
 
     if params.cap_type == "skill" {
-        let mut def: serde_json::Value = match serde_json::from_str::<serde_json::Value>(&cap_definition) {
-            Ok(v) if v.is_object() => v,
-            Ok(_) => {
-                append_warning(
-                    &mut resp,
-                    "Skill definition is not a JSON object; skipped static skill scan",
-                );
-                serde_json::json!({})
-            }
-            Err(_) => {
-                append_warning(
-                    &mut resp,
-                    "Skill definition is not valid JSON; skipped static skill scan",
-                );
-                serde_json::json!({})
-            }
-        };
+        let mut def: serde_json::Value =
+            match serde_json::from_str::<serde_json::Value>(&cap_definition) {
+                Ok(v) if v.is_object() => v,
+                Ok(_) => {
+                    append_warning(
+                        &mut resp,
+                        "Skill definition is not a JSON object; skipped static skill scan",
+                    );
+                    serde_json::json!({})
+                }
+                Err(_) => {
+                    append_warning(
+                        &mut resp,
+                        "Skill definition is not valid JSON; skipped static skill scan",
+                    );
+                    serde_json::json!({})
+                }
+            };
 
         if def.is_object() {
             let static_scan = scan_skill_definition(&def);

@@ -80,12 +80,12 @@ pub(super) async fn handle_sandbox_set_policy(
 
     let env_allowlist_json =
         serde_json::to_string(&params.env_allowlist).map_err(|e| format!("serialize env: {e}"))?;
-    let fs_read_roots_json =
-        serde_json::to_string(&params.fs_read_roots).map_err(|e| format!("serialize fs_read: {e}"))?;
-    let fs_write_roots_json =
-        serde_json::to_string(&params.fs_write_roots).map_err(|e| format!("serialize fs_write: {e}"))?;
-    let cwd_roots_json =
-        serde_json::to_string(&params.cwd_roots).map_err(|e| format!("serialize cwd_roots: {e}"))?;
+    let fs_read_roots_json = serde_json::to_string(&params.fs_read_roots)
+        .map_err(|e| format!("serialize fs_read: {e}"))?;
+    let fs_write_roots_json = serde_json::to_string(&params.fs_write_roots)
+        .map_err(|e| format!("serialize fs_write: {e}"))?;
+    let cwd_roots_json = serde_json::to_string(&params.cwd_roots)
+        .map_err(|e| format!("serialize cwd_roots: {e}"))?;
 
     server.with_global_store(|store| {
         store
@@ -142,7 +142,7 @@ pub(super) async fn handle_sandbox_list_policies(
 ) -> Result<String, String> {
     let policies = server.with_global_store(|store| {
         store
-            .list_sandbox_policies(params.enabled_only, params.limit.max(1))
+            .list_sandbox_policies(params.enabled_only, params.limit)
             .map_err(|e| format!("Failed to list sandbox policies: {e}"))
     })?;
 
