@@ -1192,6 +1192,139 @@ async fn check_inbox_respects_broadcast_toggle() {
     assert_eq!(with_broadcast_json["count"], json!(1));
 }
 
+#[tokio::test]
+async fn vault_init_set_get_lock_unlock_roundtrip() {
+    let server = make_server();
+
+    let init = server
+        .vault_init(Parameters(VaultInitParams {
+            password: "correct horse battery staple".to_string(),
+        }))
+        .await
+        .expect("vault_init should succeed");
+    let init_json: serde_json::Value =
+        serde_json::from_str(&init).expect("vault_init response should be JSON");
+    assert_eq!(init_json["initialized"], json!(true));
+
+    server
+        .vault_set(Parameters(VaultSetParams {
+            name: "OPENAI_API_KEY".to_string(),
+            value: "sk-test-123".to_string(),
+            secret_type: "api_key".to_string(),
+            description: "primary openai key".to_string(),
+            enable_rotation: false,
+            rotation_strategy: None,
+        }))
+        .await
+        .expect("vault_set should succeed");
+
+    let get = server
+        .vault_get(Parameters(VaultGetParams {
+            name: "OPENAI_API_KEY".to_string(),
+            auto_rotate: false,
+        }))
+        .await
+        .expect("vault_get should succeed");
+    let get_json: serde_json::Value =
+        serde_json::from_str(&get).expect("vault_get response should be JSON");
+    assert_eq!(get_json["value"], json!("sk-test-123"));
+
+    server.vault_lock().await.expect("vault_lock should succeed");
+    let locked_get = server
+        .vault_get(Parameters(VaultGetParams {
+            name: "OPENAI_API_KEY".to_string(),
+            auto_rotate: false,
+        }))
+        .await;
+    assert!(locked_get.is_err(), "vault_get should fail while locked");
+
+    let listed = server
+        .vault_list(Parameters(VaultListParams { secret_type: None }))
+        .await
+        .expect("vault_list should succeed while locked");
+    let listed_json: serde_json::Value =
+        serde_json::from_str(&listed).expect("vault_list response should be JSON");
+    assert_eq!(listed_json["count"], json!(1));
+    assert_eq!(listed_json["secrets"][0]["name"], json!("OPENAI_API_KEY"));
+
+    server
+        .vault_unlock(Parameters(VaultUnlockParams {
+            password: "correct horse battery staple".to_string(),
+        }))
+        .await
+        .expect("vault_unlock should succeed");
+
+    let status = server.vault_status().await.expect("vault_status should succeed");
+    let status_json: serde_json::Value =
+        serde_json::from_str(&status).expect("vault_status response should be JSON");
+    assert_eq!(status_json["initialized"], json!(true));
+    assert_eq!(status_json["locked"], json!(false));
+    assert_eq!(status_json["entry_count"], json!(1));
+}
+
+#[tokio::test]
+async fn vault_rotation_prefix_get_round_robin_works() {
+    let server = make_server();
+
+    server
+        .vault_init(Parameters(VaultInitParams {
+            password: "hunter2-hunter2".to_string(),
+        }))
+        .await
+        .expect("vault_init should succeed");
+
+    for (name, value) in [
+        ("GEMINI_API_KEY_1", "gemini-key-1"),
+        ("GEMINI_API_KEY_2", "gemini-key-2"),
+    ] {
+        server
+            .vault_set(Parameters(VaultSetParams {
+                name: name.to_string(),
+                value: value.to_string(),
+                secret_type: "api_key".to_string(),
+                description: "rotated key".to_string(),
+                enable_rotation: false,
+                rotation_strategy: None,
+            }))
+            .await
+            .expect("vault_set rotation key should succeed");
+    }
+
+    server
+        .vault_setup_rotation(Parameters(VaultSetupRotationParams {
+            prefix: "GEMINI_API_KEY".to_string(),
+            total_keys: 2,
+            strategy: "round_robin".to_string(),
+        }))
+        .await
+        .expect("vault_setup_rotation should succeed");
+
+    let first = server
+        .vault_get(Parameters(VaultGetParams {
+            name: "GEMINI_API_KEY".to_string(),
+            auto_rotate: false,
+        }))
+        .await
+        .expect("first rotated vault_get should succeed");
+    let first_json: serde_json::Value =
+        serde_json::from_str(&first).expect("first vault_get response should be JSON");
+
+    let second = server
+        .vault_get(Parameters(VaultGetParams {
+            name: "GEMINI_API_KEY".to_string(),
+            auto_rotate: false,
+        }))
+        .await
+        .expect("second rotated vault_get should succeed");
+    let second_json: serde_json::Value =
+        serde_json::from_str(&second).expect("second vault_get response should be JSON");
+
+    assert_eq!(first_json["name"], json!("GEMINI_API_KEY_1"));
+    assert_eq!(first_json["value"], json!("gemini-key-1"));
+    assert_eq!(second_json["name"], json!("GEMINI_API_KEY_2"));
+    assert_eq!(second_json["value"], json!("gemini-key-2"));
+}
+
 // ─── Rate Limiter Tests ──────────────────────────────────────────────────────
 
 #[tokio::test]

@@ -257,12 +257,14 @@ pub fn vault_delete_rotation(conn: &Connection, prefix: &str) -> Result<bool, Me
 }
 
 pub fn vault_entry_exists(conn: &Connection, name: &str) -> Result<bool, MemoryError> {
-    let exists: bool = conn
-        .query_row(
-            "SELECT 1 FROM vault_entries WHERE name = ?1 LIMIT 1",
-            params![name],
-            |_row| Ok(true),
-        )
-        .unwrap_or(false);
-    Ok(exists)
+    let result = conn.query_row(
+        "SELECT 1 FROM vault_entries WHERE name = ?1 LIMIT 1",
+        params![name],
+        |_row| Ok(true),
+    );
+    match result {
+        Ok(exists) => Ok(exists),
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(false),
+        Err(e) => Err(e.into()),
+    }
 }

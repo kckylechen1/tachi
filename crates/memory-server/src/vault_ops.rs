@@ -96,6 +96,20 @@ fn normalize_rotation_strategy(s: &str) -> String {
     }
 }
 
+fn rotation_index(name: &str, prefix: &str) -> Option<u32> {
+    let suffix = name.strip_prefix(prefix)?.strip_prefix('_')?;
+    suffix.parse::<u32>().ok()
+}
+
+fn collect_rotation_entries(entries: Vec<VaultEntry>, prefix: &str) -> Vec<(u32, VaultEntry)> {
+    let mut matching: Vec<(u32, VaultEntry)> = entries
+        .into_iter()
+        .filter_map(|entry| rotation_index(&entry.name, prefix).map(|index| (index, entry)))
+        .collect();
+    matching.sort_by_key(|(index, _)| *index);
+    matching
+}
+
 /// Check if vault is unlocked and return the key.
 fn get_vault_key(server: &MemoryServer) -> Result<std::sync::RwLockReadGuard<'_, Option<[u8; 32]>>, String> {
     let key_guard = server
@@ -111,7 +125,7 @@ fn get_vault_key(server: &MemoryServer) -> Result<std::sync::RwLockReadGuard<'_,
 /// Check if vault is initialized.
 fn is_vault_initialized(server: &MemoryServer) -> Result<bool, String> {
     server
-        .with_global_store(|store| store.vault_get_config().map_err(|e| e.to_string()).map_err(|e| e.to_string()))
+        .with_global_store_read(|store| store.vault_get_config().map_err(|e| e.to_string()))
         .map(|opt| opt.is_some())
 }
 
@@ -148,7 +162,7 @@ pub(super) async fn handle_vault_init(
 
     // Save config
     server
-        .with_global_store(|store| store.vault_set_config(&config).map_err(|e| e.to_string()).map_err(|e| e.to_string()))
+        .with_global_store(|store| store.vault_set_config(&config).map_err(|e| e.to_string()))
         .map_err(|e| format!("Failed to save vault config: {e}"))?;
 
     // Cache key
@@ -172,12 +186,12 @@ pub(super) async fn handle_vault_unlock(
 ) -> Result<String, String> {
     // Load config
     let config = server
-        .with_global_store(|store| store.vault_get_config().map_err(|e| e.to_string()).map_err(|e| e.to_string()))
+        .with_global_store_read(|store| store.vault_get_config().map_err(|e| e.to_string()))
         .map_err(|e| format!("Failed to load vault config: {e}"))?
         .ok_or("Vault not initialized. Call vault_init first.")?;
 
     // Decode salt
-    let salt = base64::engine::general_purpose::STANDARD
+    let salt = B64
         .decode(&config.salt)
         .map_err(|e| format!("Invalid salt in vault config: {e}"))?;
 
@@ -274,22 +288,10 @@ pub(super) async fn handle_vault_set(
                 
                 // Count existing keys with this prefix
                 let all_entries = server
-                    .with_global_store(|store| store.vault_list_entries().map_err(|e| e.to_string()))
+                    .with_global_store_read(|store| store.vault_list_entries().map_err(|e| e.to_string()))
                     .map_err(|e| format!("Failed to list entries: {e}"))?;
-                
-                let matching_keys: Vec<_> = all_entries
-                    .iter()
-                    .filter(|e| {
-                        if let Some(p) = e.name.rfind('_') {
-                            let suf = &e.name[p + 1..];
-                            e.name[..p] == *prefix && suf.parse::<u32>().is_ok()
-                        } else {
-                            false
-                        }
-                    })
-                    .collect();
-                
-                let total_keys = matching_keys.len() as i64;
+
+                let total_keys = collect_rotation_entries(all_entries, prefix).len() as i64;
                 
                 // Update or create rotation record
                 let rotation = VaultKeyRotation {
@@ -325,48 +327,36 @@ pub(super) async fn handle_vault_get(
     let key_guard = get_vault_key(server)?;
     let key = key_guard.as_ref().unwrap();
 
-    let target_name = if params.auto_rotate {
-        // Check if this is a rotation prefix
-        if let Some(rotation) = server
-            .with_global_store(|store| store.vault_get_rotation(&params.name).map_err(|e| e.to_string()))
-            .map_err(|e| format!("Failed to check rotation: {e}"))?
-        {
-            // Get all keys for this prefix
+    let exact_entry = server
+        .with_global_store_read(|store| store.vault_get_entry(&params.name).map_err(|e| e.to_string()))
+        .map_err(|e| format!("Failed to get secret: {e}"))?;
+    let rotation = server
+        .with_global_store_read(|store| store.vault_get_rotation(&params.name).map_err(|e| e.to_string()))
+        .map_err(|e| format!("Failed to check rotation: {e}"))?;
+
+    let (target_name, entry) = if let Some(rotation) = rotation {
+        if params.auto_rotate || exact_entry.is_none() {
             let all_entries = server
-                .with_global_store(|store| store.vault_list_entries().map_err(|e| e.to_string()))
+                .with_global_store_read(|store| store.vault_list_entries().map_err(|e| e.to_string()))
                 .map_err(|e| format!("Failed to list entries: {e}"))?;
-            
-            let mut matching_keys: Vec<VaultEntry> = all_entries
-                .into_iter()
-                .filter(|e| {
-                    if let Some(p) = e.name.rfind('_') {
-                        let suf = &e.name[p + 1..];
-                        e.name[..p] == rotation.prefix && suf.parse::<u32>().is_ok()
-                    } else {
-                        false
-                    }
-                })
-                .collect();
-            
+            let matching_keys = collect_rotation_entries(all_entries, &rotation.prefix);
+
             if matching_keys.is_empty() {
                 return Err(format!("No keys found for rotation prefix '{}'", params.name));
             }
 
-            // Select key based on rotation strategy
-            let selected_key = match rotation.rotation_strategy.as_str() {
+            let selected = match rotation.rotation_strategy.as_str() {
                 "round_robin" => {
                     let idx = (rotation.current_index as usize - 1) % matching_keys.len();
-                    
-                    // Update current_index
                     let new_rotation = VaultKeyRotation {
-                        current_index: (rotation.current_index % rotation.total_keys) + 1,
+                        current_index: (rotation.current_index % matching_keys.len() as i64) + 1,
+                        total_keys: matching_keys.len() as i64,
                         updated_at: Utc::now().to_rfc3339(),
-                        ..rotation
+                        ..rotation.clone()
                     };
                     server
                         .with_global_store(|store| store.vault_set_rotation(&new_rotation).map_err(|e| e.to_string()))
                         .map_err(|e| format!("Failed to update rotation: {e}"))?;
-                    
                     matching_keys.get(idx).cloned()
                 }
                 "random" => {
@@ -374,29 +364,22 @@ pub(super) async fn handle_vault_get(
                     let idx = rand::thread_rng().gen_range(0..matching_keys.len());
                     matching_keys.get(idx).cloned()
                 }
-                "least_recently_used" => {
-                    // Sort by access_count (ascending)
-                    matching_keys.sort_by_key(|k| k.access_count);
-                    matching_keys.first().cloned()
-                }
-                _ => matching_keys.first().cloned(),
-            };
+                "least_recently_used" => matching_keys
+                    .into_iter()
+                    .min_by_key(|(_, entry)| (entry.access_count, entry.accessed_at.clone())),
+                _ => matching_keys.into_iter().next(),
+            }
+            .ok_or("No key selected")?;
 
-            selected_key.map(|k| k.name)
+            (selected.1.name.clone(), selected.1)
         } else {
-            Some(params.name.clone())
+            let entry = exact_entry.ok_or_else(|| format!("Secret not found: {}", params.name))?;
+            (entry.name.clone(), entry)
         }
     } else {
-        Some(params.name.clone())
+        let entry = exact_entry.ok_or_else(|| format!("Secret not found: {}", params.name))?;
+        (entry.name.clone(), entry)
     };
-
-    let target_name = target_name.ok_or("No key selected")?;
-
-    // Get entry
-    let entry = server
-        .with_global_store(|store| store.vault_get_entry(&target_name).map_err(|e| e.to_string()))
-        .map_err(|e| format!("Failed to get secret: {e}"))?
-        .ok_or_else(|| format!("Secret not found: {}", target_name))?;
 
     // Decrypt value
     let decrypted = crypto::decrypt(key, &entry.encrypted_value, &entry.nonce)?;
@@ -430,10 +413,10 @@ pub(super) async fn handle_vault_list(
     // List entries (no need to be unlocked - only metadata)
     let entries = if let Some(ref secret_type) = params.secret_type {
         server
-            .with_global_store(|store| store.vault_list_entries_by_type(secret_type).map_err(|e| e.to_string()))
+            .with_global_store_read(|store| store.vault_list_entries_by_type(secret_type).map_err(|e| e.to_string()))
     } else {
         server
-            .with_global_store(|store| store.vault_list_entries().map_err(|e| e.to_string()))
+            .with_global_store_read(|store| store.vault_list_entries().map_err(|e| e.to_string()))
     }
     .map_err(|e| format!("Failed to list secrets: {e}"))?;
 
@@ -492,7 +475,7 @@ pub(super) async fn handle_vault_status(server: &MemoryServer) -> Result<String,
         .is_none();
     let entry_count = if initialized {
         server
-            .with_global_store(|store| store.vault_count_entries().map_err(|e| e.to_string()))
+            .with_global_store_read(|store| store.vault_count_entries().map_err(|e| e.to_string()))
             .unwrap_or(0)
     } else {
         0
@@ -521,7 +504,7 @@ pub(super) async fn handle_vault_setup_rotation(
 
     // Verify keys exist
     let all_entries = server
-        .with_global_store(|store| store.vault_list_entries().map_err(|e| e.to_string()))
+        .with_global_store_read(|store| store.vault_list_entries().map_err(|e| e.to_string()))
         .map_err(|e| format!("Failed to list entries: {e}"))?;
 
     let mut found_keys = 0;

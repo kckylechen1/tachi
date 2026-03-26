@@ -1256,9 +1256,9 @@ impl MemoryServer {
             vector: None,
             metadata: serde_json::json!({"handoff_memo_id": memo_id}),
         };
-        let _ = self.with_global_store(|store| {
+        self.with_global_store(|store| {
             store.upsert(&entry).map_err(|e| format!("{e}"))
-        });
+        })?;
 
         memos.push(memo);
 
