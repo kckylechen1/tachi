@@ -67,7 +67,7 @@ use crate::skill_chain_ops::handle_chain_skills;
 use crate::tool_params::*;
 use crate::utils::{
     find_git_root, is_active_global_rule, is_trusted_command, lock_or_recover, parse_env_bool,
-    parse_env_u64, stable_hash, value_to_template_text,
+    parse_env_u64, read_or_recover, stable_hash, value_to_template_text, write_or_recover,
 };
 
 use chrono::Utc;
@@ -89,6 +89,7 @@ use std::future::Future;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
+use std::sync::RwLock as StdRwLock;
 use std::time::{Duration, Instant};
 use tokio::io::{stdin, stdout};
 
@@ -255,6 +256,11 @@ impl Clone for CachedResult {
 struct MemoryServer {
     global_store: Arc<StdMutex<MemoryStore>>,
     project_store: Option<Arc<StdMutex<MemoryStore>>>,
+    /// Read/write gate for global DB access. Read operations share the lock,
+    /// write operations take exclusive lock.
+    global_rw_gate: Arc<StdRwLock<()>>,
+    /// Read/write gate for project DB access.
+    project_rw_gate: Option<Arc<StdRwLock<()>>>,
     global_db_path: Arc<PathBuf>,
     project_db_path: Option<Arc<PathBuf>>,
     global_vec_available: bool,
@@ -337,7 +343,7 @@ impl MemoryServer {
         let global_store = MemoryStore::open(global_db_str)?;
         let global_vec_available = global_store.vec_available;
 
-        let (project_store, project_db_path, project_vec_available) =
+        let (project_store, project_rw_gate, project_db_path, project_vec_available) =
             if let Some(ref p) = project_db_path {
                 let project_db_str = p.to_str().ok_or_else(|| {
                     std::io::Error::new(
@@ -349,11 +355,12 @@ impl MemoryServer {
                 let v = store.vec_available;
                 (
                     Some(Arc::new(StdMutex::new(store))),
+                    Some(Arc::new(StdRwLock::new(()))),
                     Some(Arc::new(p.clone())),
                     v,
                 )
             } else {
-                (None, None, false)
+                (None, None, None, false)
             };
 
         let llm = Arc::new(llm::LlmClient::new()?);
@@ -384,6 +391,8 @@ impl MemoryServer {
         Ok(Self {
             global_store: Arc::new(StdMutex::new(global_store)),
             project_store,
+            global_rw_gate: Arc::new(StdRwLock::new(())),
+            project_rw_gate,
             global_db_path: Arc::new(global_db_path),
             project_db_path,
             global_vec_available,
