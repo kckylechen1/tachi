@@ -469,7 +469,7 @@ pub(super) async fn handle_check_inbox(
             .map(|entry| (entry, DbScope::Global)),
     );
 
-    if server.project_db_path.is_some() {
+    if server.has_project_db() {
         let project_cards = server.with_project_store(|store| {
             store
                 .list_by_path(KANBAN_PATH_PREFIX, limit * 4, false)
@@ -530,7 +530,7 @@ pub(super) async fn handle_update_card(
     })?;
 
     let mut found: Option<(DbScope, MemoryEntry)> = None;
-    if server.project_db_path.is_some() {
+    if server.has_project_db() {
         if let Ok(Some(entry)) = server.with_project_store(|store| {
             store
                 .get(&params.card_id)

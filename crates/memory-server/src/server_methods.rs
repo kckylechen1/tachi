@@ -1,6 +1,82 @@
 use super::*;
 
+pub(super) struct ResolvedCallTarget {
+    pub requested_id: String,
+    pub resolved_id: String,
+    pub requested_kind: String,
+    pub resolution: Value,
+}
+
 impl MemoryServer {
+    /// Check if a project DB is available (static startup or hot-swapped).
+    pub(super) fn has_project_db(&self) -> bool {
+        if self.project_db_path.is_some() {
+            return true;
+        }
+        // Check hot-swapped project DB
+        self.hot_project_db
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .is_some()
+    }
+
+    /// Hot-activate a project database on a running server.
+    /// Called by `tachi_init_project_db` to make the created DB immediately usable.
+    pub(super) fn activate_project_db(
+        &self,
+        db_path: PathBuf,
+    ) -> Result<bool, String> {
+        let db_str = db_path.to_str().ok_or_else(|| {
+            format!("Project DB path contains invalid UTF-8: {}", db_path.display())
+        })?;
+        let store = MemoryStore::open(db_str).map_err(|e| format!("open project db: {e}"))?;
+        let vec_available = store.vec_available;
+
+        let state = ProjectDbState {
+            store: Arc::new(StdMutex::new(store)),
+            rw_gate: Arc::new(StdRwLock::new(())),
+            db_path: Arc::new(db_path),
+            vec_available,
+        };
+
+        let mut guard = self.hot_project_db
+            .write()
+            .unwrap_or_else(|e| e.into_inner());
+        let was_none = guard.is_none();
+        *guard = Some(state);
+        Ok(was_none)
+    }
+
+    /// Run a write closure against the hot-swapped project DB.
+    pub(super) fn with_hot_project_store<T>(
+        &self,
+        f: impl FnOnce(&mut MemoryStore) -> Result<T, String>,
+    ) -> Result<T, String> {
+        let guard = self.hot_project_db
+            .read()
+            .unwrap_or_else(|e| e.into_inner());
+        let state = guard.as_ref()
+            .ok_or_else(|| "No hot-swapped project database available".to_string())?;
+        let _gate = write_or_recover(&state.rw_gate, "hot_project_rw_gate");
+        let mut store = lock_or_recover(&state.store, "hot_project_store");
+        f(&mut store)
+    }
+
+    /// Run a read closure against the hot-swapped project DB.
+    pub(super) fn with_hot_project_store_read<T>(
+        &self,
+        f: impl FnOnce(&mut MemoryStore) -> Result<T, String>,
+    ) -> Result<T, String> {
+        let guard = self.hot_project_db
+            .read()
+            .unwrap_or_else(|e| e.into_inner());
+        let state = guard.as_ref()
+            .ok_or_else(|| "No hot-swapped project database available".to_string())?;
+        let _gate = read_or_recover(&state.rw_gate, "hot_project_rw_gate");
+        let mut store = Self::open_read_store(state.db_path.as_ref(), "hot_project")?;
+        f(&mut store)
+    }
+
     fn open_read_store(db_path: &PathBuf, label: &str) -> Result<MemoryStore, String> {
         let db_str = db_path.to_str().ok_or_else(|| {
             format!(
@@ -34,34 +110,36 @@ impl MemoryServer {
         &self,
         f: impl FnOnce(&mut MemoryStore) -> Result<T, String>,
     ) -> Result<T, String> {
-        let store_arc = self
-            .project_store
-            .as_ref()
-            .ok_or_else(|| "No project database available (not in a git repository)".to_string())?;
-        let gate = self
-            .project_rw_gate
-            .as_ref()
-            .ok_or_else(|| "No project lock available".to_string())?;
-        let _gate = write_or_recover(gate, "project_rw_gate");
-        let mut store = lock_or_recover(store_arc, "project_store");
-        f(&mut store)
+        // Try static project store first
+        if let Some(ref store_arc) = self.project_store {
+            let gate = self
+                .project_rw_gate
+                .as_ref()
+                .ok_or_else(|| "No project lock available".to_string())?;
+            let _gate = write_or_recover(gate, "project_rw_gate");
+            let mut store = lock_or_recover(store_arc, "project_store");
+            return f(&mut store);
+        }
+        // Fall back to hot-swapped project DB
+        self.with_hot_project_store(f)
     }
 
     pub(super) fn with_project_store_read<T>(
         &self,
         f: impl FnOnce(&mut MemoryStore) -> Result<T, String>,
     ) -> Result<T, String> {
-        let db_path = self
-            .project_db_path
-            .as_ref()
-            .ok_or_else(|| "No project database available (not in a git repository)".to_string())?;
-        let gate = self
-            .project_rw_gate
-            .as_ref()
-            .ok_or_else(|| "No project lock available".to_string())?;
-        let _gate = read_or_recover(gate, "project_rw_gate");
-        let mut store = Self::open_read_store(db_path.as_ref(), "project")?;
-        f(&mut store)
+        // Try static project store first
+        if let Some(ref db_path) = self.project_db_path {
+            let gate = self
+                .project_rw_gate
+                .as_ref()
+                .ok_or_else(|| "No project lock available".to_string())?;
+            let _gate = read_or_recover(gate, "project_rw_gate");
+            let mut store = Self::open_read_store(db_path.as_ref(), "project")?;
+            return f(&mut store);
+        }
+        // Fall back to hot-swapped project DB
+        self.with_hot_project_store_read(f)
     }
 
     pub(super) fn with_store_for_scope<T>(
@@ -78,7 +156,7 @@ impl MemoryServer {
     pub(super) fn resolve_write_scope(&self, requested: &str) -> (DbScope, Option<String>) {
         if requested == "global" {
             (DbScope::Global, None)
-        } else if self.project_db_path.is_some() {
+        } else if self.has_project_db() {
             (DbScope::Project, None)
         } else {
             (
@@ -90,7 +168,7 @@ impl MemoryServer {
 
     pub(super) fn get_capability(&self, cap_id: &str) -> Result<HubCapability, rmcp::ErrorData> {
         let mut found = None;
-        if self.project_db_path.is_some() {
+        if self.has_project_db() {
             found = self
                 .with_project_store_read(|store| {
                     store
@@ -117,7 +195,7 @@ impl MemoryServer {
         &self,
         cap_id: &str,
     ) -> Result<String, rmcp::ErrorData> {
-        if self.project_db_path.is_some() {
+        if self.has_project_db() {
             let route = self
                 .with_project_store_read(|store| {
                     store
@@ -141,6 +219,162 @@ impl MemoryServer {
         Ok(route.unwrap_or_else(|| cap_id.to_string()))
     }
 
+    pub(super) fn get_virtual_capability_bindings(
+        &self,
+        vc_id: &str,
+    ) -> Result<(Vec<VirtualCapabilityBinding>, &'static str), String> {
+        if self.has_project_db() {
+            let bindings = self.with_project_store_read(|store| {
+                store
+                    .vc_list_bindings(vc_id)
+                    .map_err(|e| format!("vc bindings project: {e}"))
+            })?;
+            if !bindings.is_empty() {
+                return Ok((bindings, "project"));
+            }
+        }
+
+        let bindings = self.with_global_store_read(|store| {
+            store
+                .vc_list_bindings(vc_id)
+                .map_err(|e| format!("vc bindings global: {e}"))
+        })?;
+        Ok((bindings, "global"))
+    }
+
+    pub(super) fn resolve_virtual_capability_target(
+        &self,
+        vc_id: &str,
+    ) -> Result<(String, Value), String> {
+        let vc_cap = self.get_capability(vc_id).map_err(|e| format!("{e}"))?;
+
+        if !vc_cap.cap_type.eq_ignore_ascii_case("virtual") {
+            return Err(format!("Capability '{vc_id}' is not type 'virtual'"));
+        }
+        if !capability_callable(&vc_cap) {
+            return Err(format!(
+                "Virtual Capability '{}' is not callable (enabled={}, review_status={}, health_status={}).",
+                vc_id, vc_cap.enabled, vc_cap.review_status, vc_cap.health_status
+            ));
+        }
+
+        let (bindings, binding_db) = self.get_virtual_capability_bindings(vc_id)?;
+        if bindings.is_empty() {
+            return Err(format!("Virtual Capability '{vc_id}' has no bindings"));
+        }
+
+        let mut chosen: Option<String> = None;
+        let mut candidates = Vec::new();
+
+        for binding in bindings {
+            let mut reason = None;
+            let mut version = None;
+            let mut cap_type = None;
+
+            if !binding.enabled {
+                reason = Some("binding_disabled".to_string());
+            }
+
+            let target_cap = match self.get_capability(&binding.capability_id) {
+                Ok(cap) => {
+                    version = Some(cap.version);
+                    cap_type = Some(cap.cap_type.clone());
+                    Some(cap)
+                }
+                Err(_) => {
+                    reason = Some("target_missing".to_string());
+                    None
+                }
+            };
+
+            if reason.is_none() {
+                if let Some(cap) = target_cap.as_ref() {
+                    if !cap.cap_type.eq_ignore_ascii_case("mcp") {
+                        reason = Some("target_not_mcp".to_string());
+                    } else if let Some(pin) = binding.version_pin {
+                        if cap.version != pin {
+                            reason = Some("version_pin_mismatch".to_string());
+                        }
+                    }
+
+                    if reason.is_none() && !capability_callable(cap) {
+                        reason = Some("target_not_callable".to_string());
+                    }
+                }
+            }
+
+            if chosen.is_none() && reason.is_none() {
+                chosen = Some(binding.capability_id.clone());
+            }
+
+            candidates.push(json!({
+                "vc_id": binding.vc_id,
+                "capability_id": binding.capability_id,
+                "priority": binding.priority,
+                "version_pin": binding.version_pin,
+                "enabled": binding.enabled,
+                "target_version": version,
+                "target_type": cap_type,
+                "selected": reason.is_none() && chosen.as_deref() == Some(binding.capability_id.as_str()),
+                "status": reason.unwrap_or_else(|| "ok".to_string()),
+                "metadata": binding.metadata,
+            }));
+        }
+
+        let selected = chosen.ok_or_else(|| {
+            format!(
+                "Virtual Capability '{vc_id}' has no callable MCP binding. Inspect vc_resolve for candidate status."
+            )
+        })?;
+
+        Ok((
+            selected.clone(),
+            json!({
+                "id": vc_id,
+                "binding_db": binding_db,
+                "selected": selected,
+                "candidates": candidates,
+            }),
+        ))
+    }
+
+    pub(super) fn resolve_call_target(
+        &self,
+        requested_id: &str,
+    ) -> Result<ResolvedCallTarget, String> {
+        if let Ok(cap) = self.get_capability(requested_id) {
+            if cap.cap_type.eq_ignore_ascii_case("virtual") {
+                let (resolved_id, resolution) =
+                    self.resolve_virtual_capability_target(requested_id)?;
+                return Ok(ResolvedCallTarget {
+                    requested_id: requested_id.to_string(),
+                    resolved_id,
+                    requested_kind: "virtual".to_string(),
+                    resolution,
+                });
+            }
+        }
+
+        let resolved_id = self
+            .resolve_active_capability_id(requested_id)
+            .map_err(|e| format!("{e}"))?;
+        let requested_kind = if requested_id == resolved_id {
+            "concrete"
+        } else {
+            "alias"
+        };
+        Ok(ResolvedCallTarget {
+            requested_id: requested_id.to_string(),
+            requested_kind: requested_kind.to_string(),
+            resolved_id: resolved_id.clone(),
+            resolution: json!({
+                "id": requested_id,
+                "selected": resolved_id,
+                "kind": requested_kind,
+            }),
+        })
+    }
+
     pub(super) fn record_capability_call_outcome(
         &self,
         cap_id: &str,
@@ -149,7 +383,7 @@ impl MemoryServer {
     ) -> Result<(), String> {
         const OPEN_THRESHOLD: u32 = 3;
 
-        if self.project_db_path.is_some() {
+        if self.has_project_db() {
             let in_project = self.with_project_store_read(|store| {
                 store
                     .hub_get(cap_id)
@@ -188,7 +422,7 @@ impl MemoryServer {
     }
 
     pub(super) fn get_sandbox_policy_for_capability(&self, capability_id: &str) -> Option<Value> {
-        if self.project_db_path.is_some() {
+        if self.has_project_db() {
             match self.with_project_store(|store| {
                 store
                     .get_sandbox_policy(capability_id)
@@ -219,6 +453,26 @@ impl MemoryServer {
                 None
             }
         }
+    }
+
+    pub(super) fn get_effective_sandbox_policy(
+        &self,
+        requested_capability_id: Option<&str>,
+        resolved_capability_id: &str,
+    ) -> (Option<Value>, String) {
+        if let Some(policy) = self.get_sandbox_policy_for_capability(resolved_capability_id) {
+            return (Some(policy), resolved_capability_id.to_string());
+        }
+
+        if let Some(requested_id) = requested_capability_id {
+            if requested_id != resolved_capability_id {
+                if let Some(policy) = self.get_sandbox_policy_for_capability(requested_id) {
+                    return (Some(policy), requested_id.to_string());
+                }
+            }
+        }
+
+        (None, String::new())
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -410,5 +664,119 @@ impl MemoryServer {
             ),
             None,
         ))
+    }
+
+    // ─── Rate Limiter ────────────────────────────────────────────────────────
+
+    /// Check rate limits before dispatching a tool call.
+    /// Returns `Ok(())` if the call is allowed, or `Err(ErrorData)` if rate limited.
+    ///
+    /// Two independent checks:
+    /// 1. **RPM limit**: sliding window of all calls per session (if RATE_LIMIT_RPM > 0)
+    /// 2. **Burst limit**: detects repeated identical calls (same tool+args) within a
+    ///    60-second window, indicating an agent is stuck in a loop
+    pub(super) fn check_rate_limit(
+        &self,
+        tool_name: &str,
+        args_hash: &str,
+        session_id: &str,
+    ) -> Result<(), rmcp::ErrorData> {
+        let now = Instant::now();
+
+        // Read agent profile overrides (if registered)
+        let (effective_rpm, effective_burst) = {
+            let profile = self
+                .agent_profile
+                .read()
+                .unwrap_or_else(|e| e.into_inner());
+            match profile.as_ref() {
+                Some(p) => (
+                    p.rate_limit_rpm.unwrap_or(self.rate_limit_rpm),
+                    p.rate_limit_burst.unwrap_or(self.rate_limit_burst),
+                ),
+                None => (self.rate_limit_rpm, self.rate_limit_burst),
+            }
+        };
+
+        // ── RPM check ────────────────────────────────────────────────────
+        if effective_rpm > 0 {
+            let mut windows = self
+                .rate_limit_windows
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            let window = windows
+                .entry(session_id.to_string())
+                .or_insert_with(VecDeque::new);
+
+            // Evict entries older than 60 seconds
+            let cutoff = now - Duration::from_secs(60);
+            while let Some(&front) = window.front() {
+                if front < cutoff {
+                    window.pop_front();
+                } else {
+                    break;
+                }
+            }
+
+            if window.len() as u64 >= effective_rpm {
+                let oldest = window.front().copied().unwrap_or(now);
+                let retry_after = Duration::from_secs(60)
+                    .checked_sub(now.duration_since(oldest))
+                    .unwrap_or(Duration::from_secs(1));
+                return Err(rmcp::ErrorData::new(
+                    rmcp::model::ErrorCode::INVALID_REQUEST,
+                    format!(
+                        "Rate limited: {} calls/min exceeded (limit={}). Retry in {:.0}s.",
+                        window.len(),
+                        effective_rpm,
+                        retry_after.as_secs_f64()
+                    ),
+                    None,
+                ));
+            }
+
+            window.push_back(now);
+        }
+
+        // ── Burst / loop detection ───────────────────────────────────────
+        if effective_burst > 0 {
+            let burst_key = format!("{}:{}:{}", session_id, tool_name, args_hash);
+            let mut bursts = self
+                .rate_limit_bursts
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            let stamps = bursts
+                .entry(burst_key)
+                .or_insert_with(VecDeque::new);
+
+            // Evict entries outside the burst window
+            let cutoff = now - RATE_LIMIT_BURST_WINDOW;
+            while let Some(&front) = stamps.front() {
+                if front < cutoff {
+                    stamps.pop_front();
+                } else {
+                    break;
+                }
+            }
+
+            if stamps.len() as u64 >= effective_burst {
+                return Err(rmcp::ErrorData::new(
+                    rmcp::model::ErrorCode::INVALID_REQUEST,
+                    format!(
+                        "Loop detected: tool '{}' called {} times with identical arguments within {}s (burst_limit={}). \
+                         Break the loop by varying your approach or arguments.",
+                        tool_name,
+                        stamps.len() + 1,
+                        RATE_LIMIT_BURST_WINDOW.as_secs(),
+                        effective_burst
+                    ),
+                    None,
+                ));
+            }
+
+            stamps.push_back(now);
+        }
+
+        Ok(())
     }
 }

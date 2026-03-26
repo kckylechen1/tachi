@@ -214,7 +214,7 @@ pub(super) async fn handle_get_pipeline_status(server: &MemoryServer) -> Result<
             .map_err(|e| format!("Failed to get global stats: {}", e))
     })?;
 
-    let project_stats = if server.project_db_path.is_some() {
+    let project_stats = if server.has_project_db() {
         Some(server.with_project_store(|store| {
             store
                 .stats(false)
@@ -305,7 +305,7 @@ pub(super) async fn handle_sync_memories(
     })?;
     all_entries.extend(global_entries.into_iter().map(|e| (e, DbScope::Global)));
 
-    if server.project_db_path.is_some() {
+    if server.has_project_db() {
         let project_entries = server.with_project_store(|store| {
             store
                 .list_by_path(path_prefix, limit, false)

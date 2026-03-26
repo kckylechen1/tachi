@@ -4,6 +4,7 @@
 // that are registered, discovered, and tracked through the Hub.
 
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 fn default_review_status() -> String {
     "approved".to_string()
@@ -15,6 +16,18 @@ fn default_health_status() -> String {
 
 fn default_exposure_mode() -> String {
     "direct".to_string()
+}
+
+fn default_virtual_binding_priority() -> i32 {
+    100
+}
+
+fn default_enabled() -> bool {
+    true
+}
+
+fn default_virtual_binding_metadata() -> Value {
+    Value::Object(Default::default())
 }
 
 /// A registered capability in the Sigil Hub.
@@ -100,5 +113,39 @@ pub struct HubCapability {
     pub created_at: String,
 
     /// ISO 8601 timestamp of last update
+    pub updated_at: String,
+}
+
+/// One binding from a virtual capability to a concrete backend capability.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VirtualCapabilityBinding {
+    /// Virtual capability id, e.g. "vc:web_search"
+    pub vc_id: String,
+
+    /// Concrete target capability id, e.g. "mcp:exa"
+    pub capability_id: String,
+
+    /// Lower numbers win during deterministic resolution.
+    #[serde(default = "default_virtual_binding_priority")]
+    pub priority: i32,
+
+    /// Optional version pin. If set, target capability.version must match.
+    #[serde(default)]
+    pub version_pin: Option<u32>,
+
+    /// Whether this binding is eligible for routing.
+    #[serde(default = "default_enabled")]
+    pub enabled: bool,
+
+    /// Free-form binding metadata for agents / app layer.
+    #[serde(default = "default_virtual_binding_metadata")]
+    pub metadata: Value,
+
+    /// ISO 8601 timestamp of creation
+    #[serde(default)]
+    pub created_at: String,
+
+    /// ISO 8601 timestamp of last update
+    #[serde(default)]
     pub updated_at: String,
 }

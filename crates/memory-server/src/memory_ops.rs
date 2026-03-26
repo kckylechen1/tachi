@@ -4,7 +4,7 @@ pub(super) async fn handle_get_memory(
     server: &MemoryServer,
     params: GetMemoryParams,
 ) -> Result<String, String> {
-    if server.project_db_path.is_some() {
+    if server.has_project_db() {
         let project_entry = server.with_project_store_read(|store| {
             store
                 .get_with_options(&params.id, params.include_archived)
@@ -46,7 +46,7 @@ pub(super) async fn handle_list_memories(
     })?;
     combined_entries.extend(global_entries.into_iter().map(|e| (e, DbScope::Global)));
 
-    if server.project_db_path.is_some() {
+    if server.has_project_db() {
         let project_entries = server.with_project_store_read(|store| {
             store
                 .list_by_path(&params.path_prefix, params.limit, params.include_archived)
@@ -72,7 +72,7 @@ pub(super) async fn handle_memory_stats(server: &MemoryServer) -> Result<String,
             .map_err(|e| format!("Failed to get global stats: {}", e))
     })?;
 
-    let project_stats = if server.project_db_path.is_some() {
+    let project_stats = if server.has_project_db() {
         Some(server.with_project_store_read(|store| {
             store
                 .stats(false)
@@ -139,7 +139,7 @@ pub(super) async fn handle_delete_memory(
     server: &MemoryServer,
     params: DeleteMemoryParams,
 ) -> Result<String, String> {
-    if server.project_db_path.is_some() {
+    if server.has_project_db() {
         let deleted = server.with_project_store(|store| {
             store
                 .delete(&params.id)
@@ -171,7 +171,7 @@ pub(super) async fn handle_archive_memory(
     server: &MemoryServer,
     params: ArchiveMemoryParams,
 ) -> Result<String, String> {
-    if server.project_db_path.is_some() {
+    if server.has_project_db() {
         let archived = server.with_project_store(|store| {
             store
                 .archive_memory(&params.id)
@@ -209,7 +209,7 @@ pub(super) async fn handle_memory_gc(server: &MemoryServer) -> Result<String, St
     })?;
     results.insert("global".into(), global_gc);
 
-    if server.project_db_path.is_some() {
+    if server.has_project_db() {
         let project_gc = server.with_project_store(|store| {
             store
                 .gc_tables()

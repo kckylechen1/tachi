@@ -174,6 +174,12 @@ Please install the Tachi memory extension for OpenClaw:
 - **⏰ Background Garbage Collection**: Periodic background GC timer (default: every 6 hours, configurable via `MEMORY_GC_INTERVAL_SECS`). Keeps growing tables bounded without manual intervention.
 - **🕸️ Knowledge Graph Tools**: Direct graph manipulation via `add_edge` and `get_edges` MCP tools. Create causal, temporal, and entity relationship edges with metadata and weights.
 - **🔗 Auto-Link on Save**: `save_memory` automatically discovers existing memories sharing the same entities and creates graph edges between them (async, non-blocking). Enabled by default, disable with `auto_link=false`.
+- **👤 Agent Profiles**: Each agent session can register its identity via `agent_register` — declaring an agent ID, display name, capabilities, tool allowlist (glob patterns), and per-agent rate limit overrides. Query the current profile with `agent_whoami`. Profiles are session-scoped and in-memory.
+- **🤝 Cross-Agent Handoff**: When an agent session ends, it can leave a structured handoff memo via `handoff_leave` (summary, next steps, target agent, context). The next agent calls `handoff_check` at startup to pick up pending work. Memos are persisted both in-memory and to the global store (`category="handoff"`) for cross-restart durability.
+- **⚡ Rate Limiter & Loop Detection**: Per-session sliding window RPM enforcement and identical-call burst detection (same tool + args within 60s). Default: RPM unlimited, burst limit 8. Configurable via `RATE_LIMIT_RPM` and `RATE_LIMIT_BURST` env vars, or per-agent via `agent_register`.
+- **📤 Skill Export**: `hub_export_skills` exports Hub skills to agent-specific formats — Claude (SKILL.md + symlinks), OpenClaw (plugin manifest), Cursor (.mdc rules), and generic (raw markdown). Supports visibility filtering, skill ID selection, agent-local scope filtering, and clean mode.
+- **🧬 Skill Evolution**: `skill_evolve` uses LLM analysis of the current prompt, usage feedback, and success/failure metrics to generate an improved skill version. Creates versioned capabilities (`skill:name/vN`) with optional auto-activation and dry-run mode.
+- **🔮 Virtual Capabilities**: An abstraction layer above Hub capabilities. Register VCs (`vc:*`), bind to multiple concrete MCP backends with priority ordering, resolve at call time with deterministic priority + version pinning. Sandbox policies inherit from VC to concrete backend.
 
 ---
 

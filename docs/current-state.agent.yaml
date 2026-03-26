@@ -1,0 +1,134 @@
+version: 2026-03-26
+release: v0.11.0
+
+status:
+  phase_1_hub_governance: done
+  phase_2_sandbox_executor: done
+  phase_3_ghost_persistence: done
+  phase_4_virtual_capability: done
+  phase_5_multi_agent_ops: done
+  app_installer_loop: not_done
+  electron_shell: not_done
+
+why:
+  - callers should target logical capabilities instead of provider-specific ids
+  - routing, audit, policy, and version pinning should move into platform side
+  - app layer needs a single install/governance/runtime loop for MCP/plugin assembly
+  - multi-agent coordination needs first-class primitives (handoff, identity, rate limiting)
+
+implemented_now:
+  virtual_capability:
+    tools:
+      - vc_register
+      - vc_bind
+      - vc_list
+      - vc_resolve
+    routing:
+      - hub_call accepts vc ids
+      - resolves to concrete mcp capability
+      - returns requested and resolved ids
+    policy:
+      - concrete policy preferred
+      - requested virtual capability policy used as fallback
+    storage:
+      - hub_capabilities.type=virtual
+      - virtual_capability_bindings
+    guards:
+      - cross-scope VC shadowing check on register
+
+  project_db:
+    tools:
+      - tachi_init_project_db
+    default_path: .tachi/memory.db
+    hot_swap:
+      - activate_project_db() on MemoryServer
+      - has_project_db() / with_hot_project_store()
+      - no daemon restart required
+      - ~30 callsites migrated from static check
+
+  hub_export_skills:
+    tools:
+      - hub_export_skills
+    agents:
+      - claude: SKILL.md + symlinks
+      - openclaw: plugin manifest JSON
+      - cursor: .mdc rules
+      - generic: raw files
+    features:
+      - visibility filtering
+      - agent-local scope filtering
+      - clean mode (wipe before export)
+
+  rate_limiter:
+    type: per-session sliding window
+    features:
+      - RPM limit (default 0 = unlimited)
+      - burst/loop detection (same tool+args, default threshold 8)
+      - configurable via RATE_LIMIT_RPM / RATE_LIMIT_BURST env vars
+      - agent profile overrides
+
+  skill_evolve:
+    tools:
+      - skill_evolve
+    features:
+      - LLM-powered prompt improvement
+      - creates versioned capability (skill:name/vN)
+      - optional auto-activation via hub_version_routes
+      - feedback recording in handle_run_skill
+
+  agent_profile:
+    tools:
+      - agent_register
+      - agent_whoami
+    features:
+      - per-session AgentProfile (name, role, capabilities)
+      - rate limit overrides per agent
+      - stored in Arc<RwLock<Option<AgentProfile>>>
+
+  cross_agent_handoff:
+    tools:
+      - handoff_leave
+      - handoff_check
+    features:
+      - target filtering by agent name
+      - acknowledgment tracking
+      - priority levels (low, normal, high, critical)
+      - memory persistence (handoff: category)
+      - LRU eviction at 50 memos
+
+desktop:
+  base_url_default: http://127.0.0.1:6919/mcp
+  dev_proxy: /tachi/mcp
+  status: runnable_prototype
+  missing:
+    - installer_plan
+    - review_queue
+    - vc_mapping_ui
+    - smoke_test_rollback_flow
+    - electron_shell_daemon_lifecycle
+
+sandbox:
+  current_behavior:
+    - cwd_roots enforced with canonicalized path comparison
+    - fs_read_roots and fs_write_roots are fail_closed for stdio process runtime
+  rationale:
+    - do not claim isolation stronger than runtime can actually enforce
+
+tests:
+  total: 32
+  new_in_v0.11.0: 11
+  all_passing: true
+
+code_review:
+  source: docs/code-review-superpowers.md
+  addressed:
+    - C-1: subsumed by hot-activation
+    - I-1: metadata error propagation
+    - I-2: cross-scope VC shadowing guard
+    - M-1: safe version_pin cast
+    - M-2: auto-approval comment
+    - M-3: hub_discover_inner refactor
+    - M-6: handled by configuredBaseUrls
+  deferred:
+    - M-4: tempfile for test cleanup (minor)
+    - M-5: end-to-end hub_call through VC test
