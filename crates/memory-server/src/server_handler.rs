@@ -13,7 +13,21 @@ impl ServerHandler for MemoryServer {
     ) -> impl Future<Output = Result<rmcp::model::ListToolsResult, rmcp::ErrorData>> + Send + '_
     {
         async move {
-            let mut tools = self.tool_router.list_all();
+            let all_native = self.tool_router.list_all();
+
+            // Filter native tools by TACHI_EXPOSED_TOOLS whitelist (comma-separated).
+            // If not set, all native tools are exposed (backward compatible).
+            let mut tools: Vec<rmcp::model::Tool> =
+                if let Ok(whitelist) = std::env::var("TACHI_EXPOSED_TOOLS") {
+                    let allowed: std::collections::HashSet<&str> =
+                        whitelist.split(',').map(|s| s.trim()).collect();
+                    all_native
+                        .into_iter()
+                        .filter(|t| allowed.contains(t.name.as_ref()))
+                        .collect()
+                } else {
+                    all_native
+                };
 
             // Add proxy tools from registered MCP servers
             let proxy_snapshot = match self.proxy_tools.lock() {

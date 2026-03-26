@@ -5,7 +5,7 @@ pub(super) async fn handle_get_memory(
     params: GetMemoryParams,
 ) -> Result<String, String> {
     if server.project_db_path.is_some() {
-        let project_entry = server.with_project_store(|store| {
+        let project_entry = server.with_project_store_read(|store| {
             store
                 .get_with_options(&params.id, params.include_archived)
                 .map_err(|e| format!("Failed to get memory from project DB: {}", e))
@@ -17,7 +17,7 @@ pub(super) async fn handle_get_memory(
         }
     }
 
-    let global_entry = server.with_global_store(|store| {
+    let global_entry = server.with_global_store_read(|store| {
         store
             .get_with_options(&params.id, params.include_archived)
             .map_err(|e| format!("Failed to get memory from global DB: {}", e))
@@ -39,7 +39,7 @@ pub(super) async fn handle_list_memories(
 ) -> Result<String, String> {
     let mut combined_entries: Vec<(MemoryEntry, DbScope)> = Vec::new();
 
-    let global_entries = server.with_global_store(|store| {
+    let global_entries = server.with_global_store_read(|store| {
         store
             .list_by_path(&params.path_prefix, params.limit, params.include_archived)
             .map_err(|e| format!("Failed to list memories from global DB: {}", e))
@@ -47,7 +47,7 @@ pub(super) async fn handle_list_memories(
     combined_entries.extend(global_entries.into_iter().map(|e| (e, DbScope::Global)));
 
     if server.project_db_path.is_some() {
-        let project_entries = server.with_project_store(|store| {
+        let project_entries = server.with_project_store_read(|store| {
             store
                 .list_by_path(&params.path_prefix, params.limit, params.include_archived)
                 .map_err(|e| format!("Failed to list memories from project DB: {}", e))
@@ -66,14 +66,14 @@ pub(super) async fn handle_list_memories(
 }
 
 pub(super) async fn handle_memory_stats(server: &MemoryServer) -> Result<String, String> {
-    let global_stats = server.with_global_store(|store| {
+    let global_stats = server.with_global_store_read(|store| {
         store
             .stats(false)
             .map_err(|e| format!("Failed to get global stats: {}", e))
     })?;
 
     let project_stats = if server.project_db_path.is_some() {
-        Some(server.with_project_store(|store| {
+        Some(server.with_project_store_read(|store| {
             store
                 .stats(false)
                 .map_err(|e| format!("Failed to get project stats: {}", e))

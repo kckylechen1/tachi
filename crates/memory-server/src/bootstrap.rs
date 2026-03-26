@@ -1,5 +1,237 @@
 use super::*;
 
+fn open_cli_store(db_path: &PathBuf) -> Result<MemoryStore, Box<dyn std::error::Error>> {
+    let db_str = db_path.to_str().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("DB path contains invalid UTF-8: {}", db_path.display()),
+        )
+    })?;
+    Ok(MemoryStore::open(db_str)?)
+}
+
+fn print_pretty_json(value: &serde_json::Value) -> Result<(), Box<dyn std::error::Error>> {
+    println!("{}", serde_json::to_string_pretty(value)?);
+    Ok(())
+}
+
+fn build_cli_memory_entry(
+    id: String,
+    text: String,
+    path: Option<String>,
+    importance: Option<f64>,
+    timestamp: String,
+) -> MemoryEntry {
+    MemoryEntry {
+        id,
+        path: path.unwrap_or_else(|| "/".to_string()),
+        summary: text.chars().take(100).collect(),
+        text,
+        importance: importance.unwrap_or(0.7).clamp(0.0, 1.0),
+        timestamp,
+        category: "fact".to_string(),
+        topic: String::new(),
+        keywords: vec![],
+        persons: vec![],
+        entities: vec![],
+        location: String::new(),
+        source: "cli".to_string(),
+        scope: "general".to_string(),
+        archived: false,
+        access_count: 0,
+        last_access: None,
+        revision: 1,
+        metadata: json!({}),
+        vector: None,
+    }
+}
+
+fn evaluate_cli_capability_enabled(
+    cap_type: &str,
+    definition: &str,
+) -> Result<(bool, Option<String>), Box<dyn std::error::Error>> {
+    if cap_type != "mcp" {
+        return Ok((true, None));
+    }
+
+    let def: serde_json::Value = serde_json::from_str(definition)?;
+    let transport_type = def["transport"].as_str().unwrap_or("stdio");
+    if transport_type != "stdio" {
+        return Ok((true, None));
+    }
+
+    match def["command"].as_str() {
+        Some(cmd) if is_trusted_command(cmd) => Ok((true, None)),
+        Some(cmd) => Ok((
+            false,
+            Some(format!(
+                "Command '{}' is not in the trusted allowlist. Capability registered but disabled.",
+                cmd
+            )),
+        )),
+        None => Ok((
+            false,
+            Some(
+                "mcp definition missing 'command' for stdio transport. Capability registered but disabled."
+                    .to_string(),
+            ),
+        )),
+    }
+}
+
+fn run_cli_command(command: Commands, db_path: &PathBuf) -> Result<(), Box<dyn std::error::Error>> {
+    match command {
+        Commands::Serve => Ok(()),
+        Commands::Search { query, path, top_k } => {
+            let mut store = open_cli_store(db_path)?;
+            let path_prefix = path.clone();
+            let results = store.search(
+                &query,
+                Some(SearchOptions {
+                    top_k,
+                    path_prefix,
+                    ..Default::default()
+                }),
+            )?;
+            print_pretty_json(&json!({
+                "query": query,
+                "path": path,
+                "top_k": top_k,
+                "vector": store.vec_available,
+                "results": results,
+            }))
+        }
+        Commands::Save {
+            text,
+            path,
+            importance,
+        } => {
+            if memory_core::is_noise_text(&text) {
+                return print_pretty_json(&json!({
+                    "saved": false,
+                    "noise": true,
+                    "reason": "Text detected as noise (greeting, denial, or meta-question). Not saved.",
+                    "hint": "Retry with a non-noise sentence.",
+                }));
+            }
+
+            let mut store = open_cli_store(db_path)?;
+            let id = uuid::Uuid::new_v4().to_string();
+            let timestamp = Utc::now().to_rfc3339();
+            let entry =
+                build_cli_memory_entry(id.clone(), text, path, importance, timestamp.clone());
+
+            store.upsert(&entry)?;
+            print_pretty_json(&json!({
+                "saved": true,
+                "id": id,
+                "timestamp": timestamp,
+                "path": entry.path,
+                "importance": entry.importance,
+            }))
+        }
+        Commands::Stats => {
+            let store = open_cli_store(db_path)?;
+            let stats = store.stats(false)?;
+            print_pretty_json(&json!({
+                "total": stats.total,
+                "by_scope": stats.by_scope,
+                "by_category": stats.by_category,
+                "by_root_path": stats.by_root_path,
+                "database": {
+                    "path": db_path.display().to_string(),
+                    "vec_available": store.vec_available,
+                }
+            }))
+        }
+        Commands::Gc => {
+            let mut store = open_cli_store(db_path)?;
+            print_pretty_json(&store.gc_tables()?)
+        }
+        Commands::Hub { action } => {
+            let store = open_cli_store(db_path)?;
+            match action {
+                HubAction::List { cap_type } => {
+                    let caps = store.hub_list(cap_type.as_deref(), false)?;
+                    print_pretty_json(&serde_json::to_value(caps)?)
+                }
+                HubAction::Register {
+                    id,
+                    cap_type,
+                    name,
+                    definition,
+                    description,
+                } => {
+                    let (enabled, warning) =
+                        evaluate_cli_capability_enabled(&cap_type, &definition)?;
+                    let cap = HubCapability {
+                        id: id.clone(),
+                        cap_type,
+                        name,
+                        version: 1,
+                        description: description.unwrap_or_default(),
+                        definition,
+                        enabled,
+                        uses: 0,
+                        successes: 0,
+                        failures: 0,
+                        avg_rating: 0.0,
+                        last_used: None,
+                        created_at: String::new(),
+                        updated_at: String::new(),
+                    };
+                    store.hub_register(&cap)?;
+                    let saved = store.hub_get(&id)?.ok_or_else(|| {
+                        std::io::Error::other(format!(
+                            "capability '{}' registered but failed to reload from DB",
+                            id
+                        ))
+                    })?;
+                    let mut output = serde_json::to_value(saved)?;
+                    if let Some(w) = warning {
+                        if let Some(obj) = output.as_object_mut() {
+                            obj.insert("warning".to_string(), json!(w));
+                        }
+                    }
+                    print_pretty_json(&output)
+                }
+                HubAction::Enable { id } => {
+                    let updated = store.hub_set_enabled(&id, true)?;
+                    print_pretty_json(&json!({
+                        "updated": updated,
+                        "id": id,
+                        "enabled": true,
+                    }))
+                }
+                HubAction::Disable { id } => {
+                    let updated = store.hub_set_enabled(&id, false)?;
+                    print_pretty_json(&json!({
+                        "updated": updated,
+                        "id": id,
+                        "enabled": false,
+                    }))
+                }
+                HubAction::Stats => {
+                    let caps = store.hub_list(None, false)?;
+                    let mut by_type: HashMap<String, usize> = HashMap::new();
+                    for cap in &caps {
+                        *by_type.entry(cap.cap_type.clone()).or_insert(0) += 1;
+                    }
+                    let total_uses: u64 = caps.iter().map(|c| c.uses).sum();
+                    let total_successes: u64 = caps.iter().map(|c| c.successes).sum();
+                    print_pretty_json(&json!({
+                        "total_capabilities": caps.len(),
+                        "by_type": by_type,
+                        "total_uses": total_uses,
+                        "total_successes": total_successes,
+                        "success_rate": if total_uses > 0 { total_successes as f64 / total_uses as f64 } else { 0.0 },
+                    }))
+                }
+            }
+        }
+    }
+}
+
 pub(super) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     tokio_main(cli)
 }
@@ -45,22 +277,7 @@ async fn tokio_main(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    let gc_enabled = cli
-        .gc_enabled
-        .or_else(|| parse_env_bool("MEMORY_GC_ENABLED"))
-        .unwrap_or(true);
-    let gc_initial_delay_secs = cli
-        .gc_initial_delay_secs
-        .or_else(|| parse_env_u64("MEMORY_GC_INITIAL_DELAY_SECS"))
-        .unwrap_or(300);
-    let mut gc_interval_secs = cli
-        .gc_interval_secs
-        .or_else(|| parse_env_u64("MEMORY_GC_INTERVAL_SECS"))
-        .unwrap_or(6 * 3600);
-    if gc_interval_secs == 0 {
-        eprintln!("MEMORY_GC_INTERVAL_SECS/--gc-interval-secs must be >= 1; using 1 second");
-        gc_interval_secs = 1;
-    }
+    let command = cli.command.clone().unwrap_or(Commands::Serve);
 
     // Resolve global DB path
     let global_db_path = if let Some(p) = cli.global_db.as_ref() {
@@ -93,6 +310,31 @@ async fn tokio_main(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         }
         default_global
     };
+
+    if let Some(parent) = global_db_path.parent() {
+        tokio::fs::create_dir_all(parent).await?;
+    }
+
+    if !matches!(command, Commands::Serve) {
+        return run_cli_command(command, &global_db_path);
+    }
+
+    let gc_enabled = cli
+        .gc_enabled
+        .or_else(|| parse_env_bool("MEMORY_GC_ENABLED"))
+        .unwrap_or(true);
+    let gc_initial_delay_secs = cli
+        .gc_initial_delay_secs
+        .or_else(|| parse_env_u64("MEMORY_GC_INITIAL_DELAY_SECS"))
+        .unwrap_or(300);
+    let mut gc_interval_secs = cli
+        .gc_interval_secs
+        .or_else(|| parse_env_u64("MEMORY_GC_INTERVAL_SECS"))
+        .unwrap_or(6 * 3600);
+    if gc_interval_secs == 0 {
+        eprintln!("MEMORY_GC_INTERVAL_SECS/--gc-interval-secs must be >= 1; using 1 second");
+        gc_interval_secs = 1;
+    }
 
     // Resolve project DB path
     let explicit_project_db = cli.project_db.is_some();
