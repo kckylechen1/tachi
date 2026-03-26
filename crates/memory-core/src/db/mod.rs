@@ -18,7 +18,9 @@ pub use graph::{
     remove_edge, remove_edges_for_memory,
 };
 pub use hub_db::{
-    hub_delete, hub_get, hub_list, hub_record_feedback, hub_search, hub_set_enabled, hub_upsert,
+    hub_delete, hub_get, hub_get_active_version_route, hub_list, hub_record_call_outcome,
+    hub_record_feedback, hub_search, hub_set_active_version_route, hub_set_enabled, hub_set_review,
+    hub_upsert,
 };
 pub use memory_crud::{
     archive_memory, delete, fetch_by_ids, get_access_times, get_all, is_event_processed,

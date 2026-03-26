@@ -1,21 +1,5 @@
 use super::*;
-
-fn capability_callable(cap: &HubCapability) -> bool {
-    if !cap.enabled {
-        return false;
-    }
-    if !cap.cap_type.eq_ignore_ascii_case("mcp") {
-        return true;
-    }
-    match serde_json::from_str::<serde_json::Value>(&cap.definition) {
-        Ok(def) => def
-            .get("discovery_status")
-            .and_then(|v| v.as_str())
-            .map(|s| s == "ready")
-            .unwrap_or(true),
-        Err(_) => cap.enabled,
-    }
-}
+use crate::hub_helpers::health_status_allows_call;
 
 fn risk_rank(risk: &str) -> u8 {
     match risk.trim().to_ascii_lowercase().as_str() {
@@ -30,6 +14,15 @@ fn normalize_risk(risk: &str) -> &'static str {
         3 => "high",
         2 => "medium",
         _ => "low",
+    }
+}
+
+fn normalize_review_status(status: &str) -> Option<&'static str> {
+    match status.trim().to_ascii_lowercase().as_str() {
+        "pending" => Some("pending"),
+        "approved" => Some("approved"),
+        "rejected" => Some("rejected"),
+        _ => None,
     }
 }
 
@@ -460,12 +453,14 @@ pub(super) async fn handle_hub_register(
 
     let mut cap_definition = params.definition.clone();
     let mut enabled = true;
+    let mut exposure_mode = "direct".to_string();
 
     if params.cap_type == "mcp" {
         let mut def: serde_json::Value = serde_json::from_str(&params.definition)
             .map_err(|e| format!("invalid mcp definition JSON: {e}"))?;
         let transport_type = def["transport"].as_str().unwrap_or("stdio").to_string();
         let tool_exposure_mode = resolve_mcp_tool_exposure(&def, server.mcp_tool_exposure_mode);
+        exposure_mode = tool_exposure_mode.as_str().to_string();
         def["tool_exposure"] = json!(tool_exposure_mode.as_str());
         resp.insert("tool_exposure".into(), json!(tool_exposure_mode.as_str()));
 
@@ -488,7 +483,6 @@ pub(super) async fn handle_hub_register(
         server.clear_proxy_tools(&server_name);
 
         if !auto_enabled {
-            enabled = false;
             clear_mcp_discovery_metadata(&mut def);
             let cmd = def["command"].as_str().unwrap_or("unknown");
             append_warning(
@@ -531,7 +525,6 @@ pub(super) async fn handle_hub_register(
                     }
                 }
                 Err(discovery_error) => {
-                    enabled = false;
                     set_mcp_discovery_failure(&mut def, &discovery_error);
                     server.clear_proxy_tools(&server_name);
 
@@ -547,6 +540,15 @@ pub(super) async fn handle_hub_register(
 
         cap_definition = serde_json::to_string(&def)
             .map_err(|e| format!("Failed to serialize MCP definition: {e}"))?;
+
+        // Governance gate: MCP capabilities must be reviewed before activation.
+        enabled = false;
+        resp.insert("enabled".into(), json!(false));
+        resp.insert("review_status".into(), json!("pending"));
+        append_warning(
+            &mut resp,
+            "MCP capability registered in pending review state; use hub_review to approve before hub_call.",
+        );
     }
 
     if params.cap_type == "skill" {
@@ -608,6 +610,22 @@ pub(super) async fn handle_hub_register(
         description: params.description.clone(),
         definition: cap_definition,
         enabled,
+        review_status: if params.cap_type == "mcp" {
+            "pending".to_string()
+        } else {
+            "approved".to_string()
+        },
+        health_status: if params.cap_type == "mcp" {
+            "unknown".to_string()
+        } else {
+            "healthy".to_string()
+        },
+        last_error: None,
+        last_success_at: None,
+        last_failure_at: None,
+        fail_streak: 0,
+        active_version: None,
+        exposure_mode,
         uses: 0,
         successes: 0,
         failures: 0,
@@ -916,6 +934,163 @@ pub(super) async fn handle_hub_stats(server: &MemoryServer) -> Result<String, St
     .map_err(|e| format!("serialize: {e}"))
 }
 
+pub(super) async fn handle_hub_review(
+    server: &MemoryServer,
+    params: HubReviewParams,
+) -> Result<String, String> {
+    let review_status = normalize_review_status(&params.review_status)
+        .ok_or_else(|| "review_status must be one of: pending, approved, rejected".to_string())?;
+
+    let enabled_override = params.enabled.or_else(|| match review_status {
+        "approved" => Some(true),
+        "rejected" => Some(false),
+        _ => None,
+    });
+
+    let mut updated = false;
+    let mut target_db = "not_found";
+    let mut cap: Option<HubCapability> = None;
+
+    if server.project_db_path.is_some() {
+        let in_project = server.with_project_store_read(|store| {
+            store
+                .hub_get(&params.id)
+                .map(|c| c.is_some())
+                .map_err(|e| format!("hub get project: {e}"))
+        })?;
+        if in_project {
+            updated = server.with_project_store(|store| {
+                store
+                    .hub_set_review(&params.id, review_status, enabled_override)
+                    .map_err(|e| format!("hub review project: {e}"))
+            })?;
+            if updated {
+                target_db = "project";
+                cap = server.with_project_store_read(|store| {
+                    store
+                        .hub_get(&params.id)
+                        .map_err(|e| format!("hub get project: {e}"))
+                })?;
+            }
+        }
+    }
+
+    if !updated {
+        updated = server.with_global_store(|store| {
+            store
+                .hub_set_review(&params.id, review_status, enabled_override)
+                .map_err(|e| format!("hub review global: {e}"))
+        })?;
+        if updated {
+            target_db = "global";
+            cap = server.with_global_store_read(|store| {
+                store
+                    .hub_get(&params.id)
+                    .map_err(|e| format!("hub get global: {e}"))
+            })?;
+        }
+    }
+
+    if let Some(cap) = cap.as_ref() {
+        if let Some(server_name) = cap.id.strip_prefix("mcp:") {
+            if capability_callable(cap) {
+                match serde_json::from_str::<serde_json::Value>(&cap.definition) {
+                    Ok(def) => {
+                        if let Some(tools_json) = def.get("discovered_tools") {
+                            if let Ok(tools) =
+                                serde_json::from_value::<Vec<rmcp::model::Tool>>(tools_json.clone())
+                            {
+                                server.cache_proxy_tools(
+                                    server_name,
+                                    filter_mcp_tools_by_permissions(&def, tools),
+                                );
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!(
+                            "[hub_review] invalid definition JSON for '{}': {}",
+                            cap.id, e
+                        );
+                    }
+                }
+            } else {
+                server.clear_proxy_tools(server_name);
+            }
+        }
+
+        if cap.id.starts_with("skill:") {
+            if capability_callable(cap) && should_expose_skill_tool(cap) {
+                let _ = server.register_skill_tool(cap);
+            } else {
+                let _ = server.unregister_skill_tool(&cap.id);
+            }
+        }
+    }
+
+    serde_json::to_string(&json!({
+        "updated": updated,
+        "db": target_db,
+        "id": params.id,
+        "review_status": review_status,
+        "enabled": cap.as_ref().map(|c| c.enabled),
+        "health_status": cap.as_ref().map(|c| c.health_status.clone()),
+        "callable": cap.as_ref().map(capability_callable),
+    }))
+    .map_err(|e| format!("serialize: {e}"))
+}
+
+pub(super) async fn handle_hub_set_active_version(
+    server: &MemoryServer,
+    params: HubSetActiveVersionParams,
+) -> Result<String, String> {
+    if params.alias_id.trim().is_empty() || params.active_capability_id.trim().is_empty() {
+        return Err("alias_id and active_capability_id must be non-empty".to_string());
+    }
+
+    let active_cap = server
+        .get_capability(&params.active_capability_id)
+        .map_err(|e| format!("{e}"))?;
+
+    let target_db = if server.project_db_path.is_some()
+        && server.with_project_store_read(|store| {
+            store
+                .hub_get(&params.alias_id)
+                .map(|cap| cap.is_some())
+                .map_err(|e| format!("hub get project alias: {e}"))
+        })? {
+        DbScope::Project
+    } else {
+        DbScope::Global
+    };
+
+    server.with_store_for_scope(target_db, |store| {
+        store
+            .hub_set_active_version_route(&params.alias_id, &params.active_capability_id)
+            .map_err(|e| format!("hub route set: {e}"))?;
+
+        if let Some(mut alias_cap) = store
+            .hub_get(&params.alias_id)
+            .map_err(|e| format!("hub get alias: {e}"))?
+        {
+            alias_cap.active_version = Some(params.active_capability_id.clone());
+            store
+                .hub_register(&alias_cap)
+                .map_err(|e| format!("hub update alias metadata: {e}"))?;
+        }
+        Ok(())
+    })?;
+
+    serde_json::to_string(&json!({
+        "updated": true,
+        "db": target_db.as_str(),
+        "alias_id": params.alias_id,
+        "active_capability_id": params.active_capability_id,
+        "active_capability_type": active_cap.cap_type,
+    }))
+    .map_err(|e| format!("serialize: {e}"))
+}
+
 pub(super) async fn handle_hub_set_enabled(
     server: &MemoryServer,
     params: HubSetEnabledParams,
@@ -1084,29 +1259,61 @@ pub(super) async fn handle_hub_call(
     server: &MemoryServer,
     params: HubCallParams,
 ) -> Result<String, String> {
-    // Check enabled status before calling
-    let cap = server
-        .get_capability(&params.server_id)
+    let resolved_server_id = server
+        .resolve_active_capability_id(&params.server_id)
         .map_err(|e| format!("{e}"))?;
+    let cap = server
+        .get_capability(&resolved_server_id)
+        .map_err(|e| format!("{e}"))?;
+
     if !cap.enabled {
         return Err(format!(
             "MCP server '{}' is disabled. Use hub_set_enabled to activate after review.",
-            params.server_id
+            resolved_server_id
+        ));
+    }
+    if !review_status_allows_call(&cap.review_status) {
+        return Err(format!(
+            "Capability '{}' is not approved (review_status={}). Use hub_review first.",
+            resolved_server_id, cap.review_status
+        ));
+    }
+    if !health_status_allows_call(&cap.health_status) {
+        return Err(format!(
+            "Capability '{}' is circuit-open (health_status={}).",
+            resolved_server_id, cap.health_status
+        ));
+    }
+    if !cap.cap_type.eq_ignore_ascii_case("mcp") {
+        return Err(format!(
+            "Capability '{}' is type '{}', expected MCP.",
+            resolved_server_id, cap.cap_type
         ));
     }
 
-    let server_name = params
-        .server_id
+    let server_name = resolved_server_id
         .strip_prefix("mcp:")
-        .unwrap_or(&params.server_id);
+        .unwrap_or(&resolved_server_id);
     let result = server
         .proxy_call_internal(
             server_name,
             &params.tool_name,
             params.arguments.as_object().cloned(),
         )
-        .await
-        .map_err(|e| format!("{e}"))?;
+        .await;
+
+    let success = result.is_ok();
+    let error_kind = result.as_ref().err().map(|e| format!("{e}"));
+    if let Err(e) =
+        server.record_capability_call_outcome(&resolved_server_id, success, error_kind.as_deref())
+    {
+        eprintln!(
+            "[hub_call] failed to persist governance health for '{}': {}",
+            resolved_server_id, e
+        );
+    }
+
+    let result = result.map_err(|e| format!("{e}"))?;
 
     let content_texts: Vec<String> = result
         .content
@@ -1119,6 +1326,7 @@ pub(super) async fn handle_hub_call(
         .collect();
     serde_json::to_string(&json!({
         "server": params.server_id,
+        "resolved_server": resolved_server_id,
         "tool": params.tool_name,
         "content": content_texts,
         "is_error": result.is_error.unwrap_or(false),

@@ -64,6 +64,37 @@ pub(super) fn should_expose_mcp_tools(cap: &HubCapability) -> bool {
         && capability_visibility_for_cap(cap) == CapabilityVisibility::Listed
 }
 
+pub(super) fn review_status_allows_call(review_status: &str) -> bool {
+    review_status.eq_ignore_ascii_case("approved")
+}
+
+pub(super) fn health_status_allows_call(health_status: &str) -> bool {
+    !health_status.eq_ignore_ascii_case("open")
+}
+
+pub(super) fn capability_callable(cap: &HubCapability) -> bool {
+    if !cap.enabled {
+        return false;
+    }
+    if !review_status_allows_call(&cap.review_status) {
+        return false;
+    }
+    if !health_status_allows_call(&cap.health_status) {
+        return false;
+    }
+    if !cap.cap_type.eq_ignore_ascii_case("mcp") {
+        return true;
+    }
+    match serde_json::from_str::<serde_json::Value>(&cap.definition) {
+        Ok(def) => def
+            .get("discovery_status")
+            .and_then(|v| v.as_str())
+            .map(|s| s == "ready")
+            .unwrap_or(true),
+        Err(_) => cap.enabled,
+    }
+}
+
 pub(super) fn sanitize_skill_tool_name(skill_id: &str) -> Option<String> {
     let raw = skill_id.strip_prefix("skill:")?;
     let mut output = String::from("tachi_skill_");

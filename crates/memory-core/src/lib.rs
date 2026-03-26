@@ -375,6 +375,44 @@ impl MemoryStore {
         db::hub_set_enabled(&self.conn, id, enabled)
     }
 
+    /// Set governance review status for a capability.
+    pub fn hub_set_review(
+        &self,
+        id: &str,
+        review_status: &str,
+        enabled: Option<bool>,
+    ) -> Result<bool, MemoryError> {
+        db::hub_set_review(&self.conn, id, review_status, enabled)
+    }
+
+    /// Map an alias capability id to an active concrete capability id.
+    pub fn hub_set_active_version_route(
+        &self,
+        alias_id: &str,
+        active_capability_id: &str,
+    ) -> Result<(), MemoryError> {
+        db::hub_set_active_version_route(&self.conn, alias_id, active_capability_id)
+    }
+
+    /// Resolve an alias capability id to concrete active capability id.
+    pub fn hub_get_active_version_route(
+        &self,
+        alias_id: &str,
+    ) -> Result<Option<String>, MemoryError> {
+        db::hub_get_active_version_route(&self.conn, alias_id)
+    }
+
+    /// Record invocation outcome for governance health tracking.
+    pub fn hub_record_call_outcome(
+        &self,
+        id: &str,
+        success: bool,
+        error_kind: Option<&str>,
+        open_threshold: u32,
+    ) -> Result<(), MemoryError> {
+        db::hub_record_call_outcome(&self.conn, id, success, error_kind, open_threshold)
+    }
+
     /// Record feedback for a hub capability invocation.
     pub fn hub_record_feedback(
         &self,

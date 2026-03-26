@@ -113,6 +113,65 @@ impl MemoryServer {
         })
     }
 
+    pub(super) fn resolve_active_capability_id(
+        &self,
+        cap_id: &str,
+    ) -> Result<String, rmcp::ErrorData> {
+        if self.project_db_path.is_some() {
+            let route = self
+                .with_project_store_read(|store| {
+                    store
+                        .hub_get_active_version_route(cap_id)
+                        .map_err(|e| format!("hub route project: {e}"))
+                })
+                .map_err(|e| rmcp::ErrorData::internal_error(e, None))?;
+            if let Some(target) = route {
+                return Ok(target);
+            }
+        }
+
+        let route = self
+            .with_global_store_read(|store| {
+                store
+                    .hub_get_active_version_route(cap_id)
+                    .map_err(|e| format!("hub route global: {e}"))
+            })
+            .map_err(|e| rmcp::ErrorData::internal_error(e, None))?;
+
+        Ok(route.unwrap_or_else(|| cap_id.to_string()))
+    }
+
+    pub(super) fn record_capability_call_outcome(
+        &self,
+        cap_id: &str,
+        success: bool,
+        error_kind: Option<&str>,
+    ) -> Result<(), String> {
+        const OPEN_THRESHOLD: u32 = 3;
+
+        if self.project_db_path.is_some() {
+            let in_project = self.with_project_store_read(|store| {
+                store
+                    .hub_get(cap_id)
+                    .map(|cap| cap.is_some())
+                    .map_err(|e| format!("hub get project: {e}"))
+            })?;
+            if in_project {
+                return self.with_project_store(|store| {
+                    store
+                        .hub_record_call_outcome(cap_id, success, error_kind, OPEN_THRESHOLD)
+                        .map_err(|e| format!("hub call outcome project: {e}"))
+                });
+            }
+        }
+
+        self.with_global_store(|store| {
+            store
+                .hub_record_call_outcome(cap_id, success, error_kind, OPEN_THRESHOLD)
+                .map_err(|e| format!("hub call outcome global: {e}"))
+        })
+    }
+
     pub(super) fn proxy_tool_exposure_mode_for_server(
         &self,
         server_name: &str,
@@ -128,10 +187,7 @@ impl MemoryServer {
         Ok(resolve_mcp_tool_exposure(&def, self.mcp_tool_exposure_mode))
     }
 
-    pub(super) fn get_sandbox_policy_for_capability(
-        &self,
-        capability_id: &str,
-    ) -> Option<Value> {
+    pub(super) fn get_sandbox_policy_for_capability(&self, capability_id: &str) -> Option<Value> {
         if self.project_db_path.is_some() {
             match self.with_project_store(|store| {
                 store

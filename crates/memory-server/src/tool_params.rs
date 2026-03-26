@@ -398,6 +398,11 @@ fn default_hub_version() -> u32 {
 }
 
 #[allow(dead_code)]
+fn default_hub_review_status() -> String {
+    "approved".to_string()
+}
+
+#[allow(dead_code)]
 fn default_true() -> bool {
     true
 }
@@ -494,6 +499,28 @@ pub(super) struct HubSetEnabledParams {
     pub id: String,
     /// Whether to enable (true) or disable (false)
     pub enabled: bool,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub(super) struct HubReviewParams {
+    /// Capability ID
+    pub id: String,
+    /// Governance review status: pending | approved | rejected
+    #[serde(default = "default_hub_review_status")]
+    pub review_status: String,
+    /// Optional explicit enabled state override
+    #[serde(default)]
+    pub enabled: Option<bool>,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub(super) struct HubSetActiveVersionParams {
+    /// Alias capability id (logical entrypoint)
+    pub alias_id: String,
+    /// Concrete capability id routed by this alias
+    pub active_capability_id: String,
 }
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
