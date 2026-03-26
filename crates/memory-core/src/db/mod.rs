@@ -11,6 +11,7 @@ mod schema;
 mod sqlite_vec;
 mod state;
 mod stats_gc;
+mod vault_db;
 mod virtual_capability;
 
 pub use agent_state::{get_agent_known_revisions, update_agent_known_state};
@@ -49,6 +50,12 @@ pub use state::{
     count_derived_by_source, get_state, list_derived_by_source, save_derived, set_state,
 };
 pub use stats_gc::{gc_tables, stats};
+pub use vault_db::{
+    vault_count_entries, vault_delete_entry, vault_delete_rotation, vault_entry_exists,
+    vault_get_config, vault_get_entry, vault_get_rotation, vault_list_entries,
+    vault_list_entries_by_type, vault_list_rotations, vault_set_config, vault_set_rotation,
+    vault_touch_entry, vault_upsert_entry,
+};
 pub use virtual_capability::{vc_list_bindings, vc_upsert_binding};
 
 #[cfg(test)]
