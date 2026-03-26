@@ -128,6 +128,43 @@ impl MemoryServer {
         Ok(resolve_mcp_tool_exposure(&def, self.mcp_tool_exposure_mode))
     }
 
+    pub(super) fn get_sandbox_policy_for_capability(
+        &self,
+        capability_id: &str,
+    ) -> Option<Value> {
+        if self.project_db_path.is_some() {
+            match self.with_project_store(|store| {
+                store
+                    .get_sandbox_policy(capability_id)
+                    .map_err(|e| format!("sandbox policy project: {e}"))
+            }) {
+                Ok(Some(policy)) => return Some(policy),
+                Ok(None) => {}
+                Err(e) => {
+                    eprintln!(
+                        "[sandbox] failed to read project policy for '{}': {}",
+                        capability_id, e
+                    );
+                }
+            }
+        }
+
+        match self.with_global_store(|store| {
+            store
+                .get_sandbox_policy(capability_id)
+                .map_err(|e| format!("sandbox policy global: {e}"))
+        }) {
+            Ok(policy) => policy,
+            Err(e) => {
+                eprintln!(
+                    "[sandbox] failed to read global policy for '{}': {}",
+                    capability_id, e
+                );
+                None
+            }
+        }
+    }
+
     pub(super) fn register_skill_tool(&self, cap: &HubCapability) -> Result<String, String> {
         let _ = self.unregister_skill_tool(&cap.id);
         let (tool_name, tool) = build_skill_tool_from_cap(cap)?;

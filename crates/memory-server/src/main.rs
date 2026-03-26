@@ -58,7 +58,10 @@ use crate::memory_search_ops::{
 use crate::pipeline_ops::{
     handle_extract_facts, handle_get_pipeline_status, handle_ingest_event, handle_sync_memories,
 };
-use crate::sandbox_ops::{handle_sandbox_check, handle_sandbox_set_rule};
+use crate::sandbox_ops::{
+    handle_sandbox_check, handle_sandbox_get_policy, handle_sandbox_list_policies,
+    handle_sandbox_set_policy, handle_sandbox_set_rule,
+};
 use crate::shared_defs::{
     categorize_error, slim_entry, slim_l0_rule, slim_search_result, DeadLetter, DLQ_MAX_ENTRIES,
     DLQ_TTL_SECS,
@@ -235,6 +238,8 @@ const CACHE_INVALIDATING_TOOLS: &[&str] = &[
     "set_state",
     "hub_register",
     "hub_feedback",
+    "sandbox_set_rule",
+    "sandbox_set_policy",
 ];
 
 struct CachedResult {
@@ -803,6 +808,32 @@ impl MemoryServer {
     ) -> Result<String, String> {
         handle_sandbox_check(self, params).await
     }
+
+    #[tool(
+        description = "Set runtime sandbox policy for a capability (timeouts, concurrency, env allowlist, fs/cwd roots)."
+    )]
+    async fn sandbox_set_policy(
+        &self,
+        Parameters(params): Parameters<SandboxSetPolicyParams>,
+    ) -> Result<String, String> {
+        handle_sandbox_set_policy(self, params).await
+    }
+
+    #[tool(description = "Get runtime sandbox policy for a capability.")]
+    async fn sandbox_get_policy(
+        &self,
+        Parameters(params): Parameters<SandboxGetPolicyParams>,
+    ) -> Result<String, String> {
+        handle_sandbox_get_policy(self, params).await
+    }
+
+    #[tool(description = "List runtime sandbox policies.")]
+    async fn sandbox_list_policies(
+        &self,
+        Parameters(params): Parameters<SandboxListPoliciesParams>,
+    ) -> Result<String, String> {
+        handle_sandbox_list_policies(self, params).await
+    }
 }
 
 impl MemoryServer {
@@ -854,7 +885,7 @@ impl MemoryServer {
         let startup_timeout_ms = def["startup_timeout_ms"].as_u64().unwrap_or(30_000);
         let startup_timeout = Duration::from_millis(startup_timeout_ms.max(1));
         let client = self
-            .connect_mcp_service(&def, startup_timeout)
+            .connect_mcp_service(&server_id, &def, startup_timeout)
             .await
             .map_err(|e| rmcp::ErrorData::internal_error(e, None))?;
 
@@ -888,6 +919,22 @@ impl MemoryServer {
         }
         let cap_def: serde_json::Value = serde_json::from_str(&cap.definition)
             .map_err(|e| rmcp::ErrorData::internal_error(format!("bad definition: {e}"), None))?;
+        let sandbox_policy = self.get_sandbox_policy_for_capability(&server_id);
+        if let Some(policy) = sandbox_policy.as_ref() {
+            let policy_enabled = policy
+                .get("enabled")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(true);
+            if !policy_enabled {
+                return Err(rmcp::ErrorData::invalid_params(
+                    format!(
+                        "Capability '{}' blocked by sandbox policy (enabled=false)",
+                        server_id
+                    ),
+                    None,
+                ));
+            }
+        }
 
         // 1. Check allow/deny permissions
         if let Some(allow_list) = cap_def["permissions"]["allow"].as_array() {
@@ -939,7 +986,15 @@ impl MemoryServer {
         // 3. Acquire per-child concurrency permit (rebuild if max_concurrency changed)
         let semaphore = {
             let mut sems = self.pool.semaphores.lock().unwrap();
-            let max_conc = cap_def["max_concurrency"].as_u64().unwrap_or(1) as usize;
+            let mut max_conc = cap_def["max_concurrency"].as_u64().unwrap_or(1);
+            if let Some(policy_cap) = sandbox_policy
+                .as_ref()
+                .and_then(|v| v.get("max_concurrency"))
+                .and_then(|v| v.as_u64())
+            {
+                max_conc = std::cmp::min(max_conc.max(1), policy_cap.max(1));
+            }
+            let max_conc = max_conc.max(1) as usize;
             let needs_rebuild = sems
                 .get(server_name)
                 .map(|(_, cached_max)| *cached_max != max_conc)
@@ -976,7 +1031,14 @@ impl MemoryServer {
             }
         };
 
-        let timeout_ms = cap_def["tool_timeout_ms"].as_u64().unwrap_or(30000);
+        let mut timeout_ms = cap_def["tool_timeout_ms"].as_u64().unwrap_or(30000);
+        if let Some(policy_tool_ms) = sandbox_policy
+            .as_ref()
+            .and_then(|v| v.get("max_tool_ms"))
+            .and_then(|v| v.as_u64())
+        {
+            timeout_ms = std::cmp::min(timeout_ms.max(1), policy_tool_ms.max(1));
+        }
         let start = Instant::now();
 
         let result = tokio::time::timeout(

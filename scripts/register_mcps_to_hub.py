@@ -70,6 +70,7 @@ MCP_SERVERS = [
 ]
 
 REQUEST_ID = 0
+AGENT_CHOICES = ["antigravity", "claude-desktop", "cursor", "all"]
 
 
 def parse_args():
@@ -86,6 +87,25 @@ def parse_args():
         "--disable-hidden",
         action="store_true",
         help="Set enabled=false for policy.visibility=hidden capabilities",
+    )
+    parser.add_argument(
+        "--sync-agent-config",
+        dest="sync_agent_config",
+        action="store_true",
+        default=True,
+        help="Auto-update local agent MCP config files after Hub registration (default: enabled)",
+    )
+    parser.add_argument(
+        "--no-sync-agent-config",
+        dest="sync_agent_config",
+        action="store_false",
+        help="Skip local agent MCP config auto-update",
+    )
+    parser.add_argument(
+        "--agent",
+        action="append",
+        choices=AGENT_CHOICES,
+        help="Agent target(s) for auto config sync. Repeatable. Defaults to all.",
     )
     return parser.parse_args()
 
@@ -141,6 +161,83 @@ def call_tool(proc, name, arguments):
 
 def parse_csv_list(raw_value):
     return [item.strip() for item in raw_value.split(",") if item.strip()]
+
+
+def dedupe_items(items):
+    seen = set()
+    out = []
+    for item in items:
+        if item in seen:
+            continue
+        seen.add(item)
+        out.append(item)
+    return out
+
+
+def resolve_selected_agents(agent_args):
+    if not agent_args or "all" in agent_args:
+        return ["all"]
+    return dedupe_items(agent_args)
+
+
+def list_hub_mcp_server_keys(proc):
+    resp = call_tool(
+        proc,
+        "hub_discover",
+        {
+            "cap_type": "mcp",
+            "enabled_only": False,
+        },
+    )
+
+    if not resp or "error" in resp:
+        return []
+
+    try:
+        result_text = resp["result"]["content"][0]["text"]
+        items = json.loads(result_text)
+    except (KeyError, TypeError, json.JSONDecodeError):
+        return []
+
+    if not isinstance(items, list):
+        return []
+
+    keys = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        if item.get("callable") is False:
+            continue
+        cap_id = item.get("id")
+        if not isinstance(cap_id, str) or not cap_id.startswith("mcp:"):
+            continue
+        key = cap_id.split(":", 1)[1].strip()
+        if not key or key == "tachi":
+            continue
+        keys.append(key)
+
+    return dedupe_items(keys)
+
+
+def sync_agent_configs(args, remove_server_keys):
+    script_path = os.path.join(os.path.dirname(__file__), "setup_agent_mcp.py")
+    cmd = [sys.executable, script_path, "--apply", "--command", SERVER_BIN]
+
+    for agent_name in resolve_selected_agents(args.agent):
+        cmd.extend(["--agent", agent_name])
+
+    for key in dedupe_items(remove_server_keys):
+        cmd.extend(["--remove-server", key])
+
+    print("\nSyncing local agent MCP configs...")
+    if remove_server_keys:
+        print(f"Consolidating direct MCP keys under tachi: {', '.join(remove_server_keys)}")
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    if result.stdout:
+        print(result.stdout.strip())
+    if result.returncode != 0:
+        err_text = result.stderr.strip() if result.stderr else "unknown error"
+        raise RuntimeError(f"setup_agent_mcp.py failed (exit={result.returncode}): {err_text}")
 
 
 def apply_tool_filters(mcp):
@@ -337,6 +434,22 @@ def main():
             pass
 
         print(f"\nRegistered: {registered}")
+        if args.sync_agent_config:
+            try:
+                remove_server_keys = list_hub_mcp_server_keys(proc)
+                if not remove_server_keys:
+                    remove_server_keys = dedupe_items(
+                        [
+                            mcp["id"].split(":", 1)[1]
+                            for mcp in MCP_SERVERS
+                            if mcp.get("id", "").startswith("mcp:")
+                        ]
+                    )
+                sync_agent_configs(args, remove_server_keys)
+            except RuntimeError as e:
+                print(f"\n⚠ agent config sync failed: {e}")
+                errors += 1
+
         print(f"Errors: {errors}")
         return errors == 0
 
