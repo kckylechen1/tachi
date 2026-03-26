@@ -1801,7 +1801,7 @@ async fn test_pack_project_with_skill_files() {
     assert_eq!(projections[0]["status"], "projected");
 
     let skill_count = projections[0]["skill_count"].as_u64().unwrap();
-    assert!(skill_count >= 2, "expected at least 2 skills projected, got {skill_count}");
+    assert_eq!(skill_count, 2, "expected exactly 2 skills to be projected, but got {skill_count}");
 
     // Verify projection_list records it
     let result = server

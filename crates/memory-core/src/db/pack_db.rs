@@ -93,11 +93,8 @@ pub fn pack_list(conn: &Connection, enabled_only: bool) -> Result<Vec<Pack>, Mem
             updated_at: row.get(10)?,
         })
     })?;
-    let mut result = Vec::new();
-    for row in rows {
-        result.push(row?);
-    }
-    Ok(result)
+    rows.collect::<rusqlite::Result<Vec<Pack>>>()
+        .map_err(Into::into)
 }
 
 /// Delete a pack by ID. Returns true if found and deleted.
@@ -152,29 +149,36 @@ pub fn projection_list(
     agent: Option<&str>,
     pack_id: Option<&str>,
 ) -> Result<Vec<AgentProjection>, MemoryError> {
-    let (sql, params_vec): (String, Vec<Box<dyn rusqlite::types::ToSql>>) = match (agent, pack_id)
-    {
-        (Some(a), Some(p)) => (
-            "SELECT agent, pack_id, enabled, projected_path, skill_count, synced_at FROM agent_projections WHERE agent = ?1 AND pack_id = ?2 ORDER BY agent, pack_id".to_string(),
-            vec![Box::new(a.to_string()), Box::new(p.to_string())],
-        ),
-        (Some(a), None) => (
-            "SELECT agent, pack_id, enabled, projected_path, skill_count, synced_at FROM agent_projections WHERE agent = ?1 ORDER BY pack_id".to_string(),
-            vec![Box::new(a.to_string())],
-        ),
-        (None, Some(p)) => (
-            "SELECT agent, pack_id, enabled, projected_path, skill_count, synced_at FROM agent_projections WHERE pack_id = ?1 ORDER BY agent".to_string(),
-            vec![Box::new(p.to_string())],
-        ),
-        (None, None) => (
-            "SELECT agent, pack_id, enabled, projected_path, skill_count, synced_at FROM agent_projections ORDER BY agent, pack_id".to_string(),
-            vec![],
-        ),
+    let mut sql = "SELECT agent, pack_id, enabled, projected_path, skill_count, synced_at FROM agent_projections".to_string();
+    let mut where_clauses = Vec::new();
+
+    if agent.is_some() {
+        where_clauses.push("agent = ?1");
+    }
+    if pack_id.is_some() {
+        where_clauses.push(if agent.is_some() {
+            "pack_id = ?2"
+        } else {
+            "pack_id = ?1"
+        });
+    }
+
+    if !where_clauses.is_empty() {
+        sql.push_str(" WHERE ");
+        sql.push_str(&where_clauses.join(" AND "));
+    }
+
+    let order_by = match (agent, pack_id) {
+        (Some(_), None) => " ORDER BY pack_id ASC",
+        (None, Some(_)) => " ORDER BY agent ASC",
+        _ => " ORDER BY agent ASC, pack_id ASC",
     };
-    let params_refs: Vec<&dyn rusqlite::types::ToSql> =
-        params_vec.iter().map(|p| p.as_ref()).collect();
+    sql.push_str(order_by);
+
     let mut stmt = conn.prepare(&sql)?;
-    let rows = stmt.query_map(params_refs.as_slice(), |row| {
+    let params = rusqlite::params_from_iter(agent.into_iter().chain(pack_id.into_iter()));
+
+    let rows = stmt.query_map(params, |row| {
         Ok(AgentProjection {
             agent: row.get(0)?,
             pack_id: row.get(1)?,
@@ -184,11 +188,9 @@ pub fn projection_list(
             synced_at: row.get(5)?,
         })
     })?;
-    let mut result = Vec::new();
-    for row in rows {
-        result.push(row?);
-    }
-    Ok(result)
+
+    rows.collect::<rusqlite::Result<Vec<AgentProjection>>>()
+        .map_err(Into::into)
 }
 
 /// Delete a projection.

@@ -6,6 +6,8 @@ use super::*;
 use memory_core::{AgentKind, AgentProjection, Pack};
 use std::path::PathBuf;
 
+const SKIPPED_DIRS: &[&str] = &["node_modules", "browse", "scripts", "test", "benchmark", "docs", "lib", "bin"];
+
 /// List installed packs.
 pub(super) async fn handle_pack_list(
     server: &MemoryServer,
@@ -342,7 +344,7 @@ fn copy_skill_tree(source: &PathBuf, target: &PathBuf) -> Result<u32, String> {
                     .to_string_lossy()
                     .to_string();
                 // Skip hidden directories and non-skill directories
-                if dir_name.starts_with('.') || dir_name == "node_modules" || dir_name == "browse" || dir_name == "scripts" || dir_name == "test" || dir_name == "benchmark" || dir_name == "docs" || dir_name == "lib" || dir_name == "bin" {
+                if dir_name.starts_with('.') || SKIPPED_DIRS.contains(&dir_name.as_str()) {
                     continue;
                 }
                 let sub_target = target.join(&dir_name);
@@ -388,7 +390,7 @@ fn project_skills_as_cursor_rules(
             if skill_file.exists() {
                 let dir_name = p
                     .file_name()
-                    .unwrap_or_default()
+                    .ok_or_else(|| format!("Could not get file name from path: {}", p.display()))?
                     .to_string_lossy()
                     .to_string();
                 if dir_name.starts_with('.') || dir_name == "node_modules" {
