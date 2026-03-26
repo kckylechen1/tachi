@@ -1,11 +1,32 @@
 use super::*;
 
 impl MemoryServer {
+    fn open_read_store(db_path: &PathBuf, label: &str) -> Result<MemoryStore, String> {
+        let db_str = db_path.to_str().ok_or_else(|| {
+            format!(
+                "{} DB path contains invalid UTF-8: {}",
+                label,
+                db_path.display()
+            )
+        })?;
+        MemoryStore::open(db_str).map_err(|e| format!("open {label} read store: {e}"))
+    }
+
     pub(super) fn with_global_store<T>(
         &self,
         f: impl FnOnce(&mut MemoryStore) -> Result<T, String>,
     ) -> Result<T, String> {
+        let _gate = write_or_recover(&self.global_rw_gate, "global_rw_gate");
         let mut store = lock_or_recover(&self.global_store, "global_store");
+        f(&mut store)
+    }
+
+    pub(super) fn with_global_store_read<T>(
+        &self,
+        f: impl FnOnce(&mut MemoryStore) -> Result<T, String>,
+    ) -> Result<T, String> {
+        let _gate = read_or_recover(&self.global_rw_gate, "global_rw_gate");
+        let mut store = Self::open_read_store(self.global_db_path.as_ref(), "global")?;
         f(&mut store)
     }
 
@@ -17,7 +38,29 @@ impl MemoryServer {
             .project_store
             .as_ref()
             .ok_or_else(|| "No project database available (not in a git repository)".to_string())?;
+        let gate = self
+            .project_rw_gate
+            .as_ref()
+            .ok_or_else(|| "No project lock available".to_string())?;
+        let _gate = write_or_recover(gate, "project_rw_gate");
         let mut store = lock_or_recover(store_arc, "project_store");
+        f(&mut store)
+    }
+
+    pub(super) fn with_project_store_read<T>(
+        &self,
+        f: impl FnOnce(&mut MemoryStore) -> Result<T, String>,
+    ) -> Result<T, String> {
+        let db_path = self
+            .project_db_path
+            .as_ref()
+            .ok_or_else(|| "No project database available (not in a git repository)".to_string())?;
+        let gate = self
+            .project_rw_gate
+            .as_ref()
+            .ok_or_else(|| "No project lock available".to_string())?;
+        let _gate = read_or_recover(gate, "project_rw_gate");
+        let mut store = Self::open_read_store(db_path.as_ref(), "project")?;
         f(&mut store)
     }
 
@@ -49,7 +92,7 @@ impl MemoryServer {
         let mut found = None;
         if self.project_db_path.is_some() {
             found = self
-                .with_project_store(|store| {
+                .with_project_store_read(|store| {
                     store
                         .hub_get(cap_id)
                         .map_err(|e| format!("hub get project: {e}"))
@@ -58,7 +101,7 @@ impl MemoryServer {
         }
         if found.is_none() {
             found = self
-                .with_global_store(|store| {
+                .with_global_store_read(|store| {
                     store
                         .hub_get(cap_id)
                         .map_err(|e| format!("hub get global: {e}"))
@@ -83,6 +126,43 @@ impl MemoryServer {
             )
         })?;
         Ok(resolve_mcp_tool_exposure(&def, self.mcp_tool_exposure_mode))
+    }
+
+    pub(super) fn get_sandbox_policy_for_capability(
+        &self,
+        capability_id: &str,
+    ) -> Option<Value> {
+        if self.project_db_path.is_some() {
+            match self.with_project_store(|store| {
+                store
+                    .get_sandbox_policy(capability_id)
+                    .map_err(|e| format!("sandbox policy project: {e}"))
+            }) {
+                Ok(Some(policy)) => return Some(policy),
+                Ok(None) => {}
+                Err(e) => {
+                    eprintln!(
+                        "[sandbox] failed to read project policy for '{}': {}",
+                        capability_id, e
+                    );
+                }
+            }
+        }
+
+        match self.with_global_store(|store| {
+            store
+                .get_sandbox_policy(capability_id)
+                .map_err(|e| format!("sandbox policy global: {e}"))
+        }) {
+            Ok(policy) => policy,
+            Err(e) => {
+                eprintln!(
+                    "[sandbox] failed to read global policy for '{}': {}",
+                    capability_id, e
+                );
+                None
+            }
+        }
     }
 
     pub(super) fn register_skill_tool(&self, cap: &HubCapability) -> Result<String, String> {

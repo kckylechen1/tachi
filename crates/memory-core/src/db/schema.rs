@@ -164,6 +164,23 @@ pub fn init_schema(conn: &Connection) -> Result<(), MemoryError> {
             PRIMARY KEY (agent_role, path_pattern)
         );
         CREATE INDEX IF NOT EXISTS idx_sandbox_role ON sandbox_rules(agent_role);
+
+        -- Sandbox runtime policies for MCP capability execution control
+        CREATE TABLE IF NOT EXISTS sandbox_policies (
+            capability_id    TEXT PRIMARY KEY,
+            runtime_type     TEXT NOT NULL DEFAULT 'process',
+            env_allowlist    TEXT NOT NULL DEFAULT '[]',
+            fs_read_roots    TEXT NOT NULL DEFAULT '[]',
+            fs_write_roots   TEXT NOT NULL DEFAULT '[]',
+            cwd_roots        TEXT NOT NULL DEFAULT '[]',
+            max_startup_ms   INTEGER NOT NULL DEFAULT 30000,
+            max_tool_ms      INTEGER NOT NULL DEFAULT 30000,
+            max_concurrency  INTEGER NOT NULL DEFAULT 1,
+            enabled          INTEGER NOT NULL DEFAULT 1,
+            created_at       TEXT NOT NULL DEFAULT '',
+            updated_at       TEXT NOT NULL DEFAULT ''
+        );
+        CREATE INDEX IF NOT EXISTS idx_sandbox_policy_enabled ON sandbox_policies(enabled);
     "#)?;
 
     // Forward-compatible migrations for existing DB files created before

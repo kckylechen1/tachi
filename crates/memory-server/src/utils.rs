@@ -122,3 +122,29 @@ pub(super) fn lock_or_recover<'a, T>(
         }
     }
 }
+
+pub(super) fn read_or_recover<'a, T>(
+    rwlock: &'a StdRwLock<T>,
+    label: &str,
+) -> std::sync::RwLockReadGuard<'a, T> {
+    match rwlock.read() {
+        Ok(guard) => guard,
+        Err(poisoned) => {
+            eprintln!("WARNING: rwlock poisoned (read): {label}; recovering with inner state");
+            poisoned.into_inner()
+        }
+    }
+}
+
+pub(super) fn write_or_recover<'a, T>(
+    rwlock: &'a StdRwLock<T>,
+    label: &str,
+) -> std::sync::RwLockWriteGuard<'a, T> {
+    match rwlock.write() {
+        Ok(guard) => guard,
+        Err(poisoned) => {
+            eprintln!("WARNING: rwlock poisoned (write): {label}; recovering with inner state");
+            poisoned.into_inner()
+        }
+    }
+}

@@ -37,6 +37,58 @@ fn apply_sanitized_child_env(cmd: &mut tokio::process::Command, env_map: &HashMa
     }
 }
 
+fn parse_string_array(value: Option<&serde_json::Value>) -> Vec<String> {
+    value
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|item| item.as_str().map(|s| s.to_string()))
+                .collect::<Vec<String>>()
+        })
+        .unwrap_or_default()
+}
+
+fn apply_env_allowlist(
+    env_map: HashMap<String, String>,
+    allowlist: &[String],
+) -> HashMap<String, String> {
+    if allowlist.is_empty() {
+        return env_map;
+    }
+    let allowed: std::collections::HashSet<&str> = allowlist.iter().map(String::as_str).collect();
+    env_map
+        .into_iter()
+        .filter(|(k, _)| allowed.contains(k.as_str()))
+        .collect()
+}
+
+fn normalize_path(path: &str) -> std::path::PathBuf {
+    if let Some(rest) = path.strip_prefix("~/") {
+        if let Ok(home) = std::env::var("HOME") {
+            return std::path::PathBuf::from(home).join(rest);
+        }
+    }
+    std::path::PathBuf::from(path)
+}
+
+fn path_within_roots(path: &std::path::Path, roots: &[String]) -> bool {
+    if roots.is_empty() {
+        return true;
+    }
+    let candidate = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        match std::env::current_dir() {
+            Ok(cwd) => cwd.join(path),
+            Err(_) => path.to_path_buf(),
+        }
+    };
+    roots.iter().any(|root| {
+        let root_path = normalize_path(root);
+        candidate.starts_with(&root_path)
+    })
+}
+
 fn resolve_env_map(def: &serde_json::Value) -> Result<HashMap<String, String>, String> {
     let mut result = HashMap::new();
     if let Some(obj) = def.get("env").and_then(|v| v.as_object()) {
@@ -79,9 +131,45 @@ impl MemoryServer {
 
     pub(super) async fn connect_mcp_service(
         &self,
+        capability_id: &str,
         def: &serde_json::Value,
         timeout: Duration,
     ) -> Result<rmcp::service::RunningService<rmcp::service::RoleClient, ()>, String> {
+        let policy = self.get_sandbox_policy_for_capability(capability_id);
+        let policy_enabled = policy
+            .as_ref()
+            .and_then(|v| v.get("enabled"))
+            .and_then(|v| v.as_bool())
+            .unwrap_or(true);
+        if !policy_enabled {
+            return Err(format!(
+                "Sandbox policy disabled capability '{}'",
+                capability_id
+            ));
+        }
+
+        let policy_runtime = policy
+            .as_ref()
+            .and_then(|v| v.get("runtime_type"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("process");
+        if policy_runtime != "process" && policy_runtime != "wasm" {
+            return Err(format!(
+                "Invalid sandbox runtime_type '{}' for '{}'",
+                policy_runtime, capability_id
+            ));
+        }
+
+        let policy_startup_ms = policy
+            .as_ref()
+            .and_then(|v| v.get("max_startup_ms"))
+            .and_then(|v| v.as_u64())
+            .unwrap_or(timeout.as_millis() as u64)
+            .max(1);
+        let effective_timeout = Duration::from_millis(
+            std::cmp::min(timeout.as_millis() as u64, policy_startup_ms).max(1),
+        );
+
         let transport_type = match def.get("transport") {
             Some(v) => match v.as_str() {
                 Some(raw) => raw,
@@ -96,6 +184,13 @@ impl MemoryServer {
         };
         match transport_type {
             "stdio" => {
+                if policy_runtime == "wasm" {
+                    return Err(format!(
+                        "Capability '{}' requires runtime_type=wasm but stdio transport was requested",
+                        capability_id
+                    ));
+                }
+
                 let command = def["command"]
                     .as_str()
                     .ok_or_else(|| "missing command".to_string())?;
@@ -117,18 +212,53 @@ impl MemoryServer {
                     None => Vec::new(),
                 };
                 let env_map = resolve_env_map(def)?;
+                let env_allowlist = parse_string_array(
+                    policy
+                        .as_ref()
+                        .and_then(|v| v.get("env_allowlist")),
+                );
+                let env_map = apply_env_allowlist(env_map, &env_allowlist);
+
+                let cwd_roots = parse_string_array(
+                    policy
+                        .as_ref()
+                        .and_then(|v| v.get("cwd_roots")),
+                );
+                let cwd = def.get("cwd").and_then(|v| v.as_str());
+                if !cwd_roots.is_empty() {
+                    let cwd_str = cwd.ok_or_else(|| {
+                        format!(
+                            "Sandbox policy for '{}' requires cwd within allowed roots, but definition has no cwd",
+                            capability_id
+                        )
+                    })?;
+                    let cwd_path = normalize_path(cwd_str);
+                    if !path_within_roots(&cwd_path, &cwd_roots) {
+                        return Err(format!(
+                            "Sandbox policy denied cwd '{}' for '{}'",
+                            cwd_path.display(),
+                            capability_id
+                        ));
+                    }
+                }
 
                 let mut cmd = tokio::process::Command::new(command);
                 cmd.args(&args);
                 cmd.kill_on_drop(true);
                 apply_sanitized_child_env(&mut cmd, &env_map);
+                if let Some(cwd_str) = cwd {
+                    cmd.current_dir(normalize_path(cwd_str));
+                }
 
                 let transport = rmcp::transport::TokioChildProcess::new(cmd)
                     .map_err(|e| format!("spawn failed: {e}"))?;
-                tokio::time::timeout(timeout, rmcp::ServiceExt::serve((), transport))
+                tokio::time::timeout(effective_timeout, rmcp::ServiceExt::serve((), transport))
                     .await
                     .map_err(|_| {
-                        format!("MCP handshake timed out after {}ms", timeout.as_millis())
+                        format!(
+                            "MCP handshake timed out after {}ms",
+                            effective_timeout.as_millis()
+                        )
                     })?
                     .map_err(|e| format!("MCP handshake failed: {e}"))
             }
@@ -137,10 +267,13 @@ impl MemoryServer {
                     .as_str()
                     .ok_or_else(|| "missing url for SSE".to_string())?;
                 let transport = StreamableHttpClientTransport::from_uri(url);
-                tokio::time::timeout(timeout, rmcp::ServiceExt::serve((), transport))
+                tokio::time::timeout(effective_timeout, rmcp::ServiceExt::serve((), transport))
                     .await
                     .map_err(|_| {
-                        format!("SSE handshake timed out after {}ms", timeout.as_millis())
+                        format!(
+                            "SSE handshake timed out after {}ms",
+                            effective_timeout.as_millis()
+                        )
                     })?
                     .map_err(|e| format!("SSE handshake failed: {e}"))
             }
@@ -150,10 +283,11 @@ impl MemoryServer {
 
     pub(super) async fn discover_mcp_tools(
         &self,
+        capability_id: &str,
         def: &serde_json::Value,
     ) -> Result<Vec<rmcp::model::Tool>, String> {
         let client = self
-            .connect_mcp_service(def, self.mcp_discovery_timeout)
+            .connect_mcp_service(capability_id, def, self.mcp_discovery_timeout)
             .await?;
         let list_result =
             tokio::time::timeout(self.mcp_discovery_timeout, client.peer().list_all_tools()).await;

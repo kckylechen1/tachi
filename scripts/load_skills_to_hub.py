@@ -216,7 +216,10 @@ def plan_visibility(all_skill_ids, args):
     listed |= force_listed
     discoverable |= force_discoverable
 
+    # Explicit overrides take precedence: demote/promote as requested
+    listed -= force_discoverable
     listed -= force_hidden
+    discoverable -= force_listed
     discoverable -= force_hidden
 
     discoverable -= listed

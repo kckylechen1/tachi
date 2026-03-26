@@ -25,7 +25,10 @@ pub use memory_crud::{
     list_by_path, mark_event_processed, record_access, release_event_claim, search_fts, search_vec,
     try_claim_event, update_enrichment_fields, update_with_revision, upsert,
 };
-pub use sandbox::{check_sandbox_access, set_sandbox_rule};
+pub use sandbox::{
+    check_sandbox_access, get_sandbox_policy, list_sandbox_policies, set_sandbox_policy,
+    set_sandbox_rule,
+};
 pub use schema::init_schema;
 pub use sqlite_vec::{register_sqlite_vec, serialize_f32, try_load_sqlite_vec};
 pub use state::{

@@ -16,7 +16,7 @@ from pathlib import Path
 AGENT_TARGETS = {
     "antigravity": {
         "path": Path("~/.gemini/antigravity/mcp_config.json"),
-        "server_key": "memory",
+        "server_key": "tachi",
     },
     "claude-desktop": {
         "path": Path("~/Library/Application Support/Claude/claude_desktop_config.json"),
@@ -26,6 +26,10 @@ AGENT_TARGETS = {
         "path": Path("~/.cursor/mcp.json"),
         "server_key": "tachi",
     },
+}
+
+LEGACY_SERVER_KEYS = {
+    "antigravity": ["memory"],
 }
 
 
@@ -64,6 +68,12 @@ def parse_args():
         choices=["true", "false"],
         help="Optional ENABLE_PIPELINE value stored in MCP env",
     )
+    parser.add_argument(
+        "--remove-server",
+        action="append",
+        default=[],
+        help="Remove direct MCP server key from mcpServers (repeatable), e.g. --remove-server exa",
+    )
     return parser.parse_args()
 
 
@@ -100,6 +110,8 @@ def merge_entry(existing, desired):
             env_map = {}
         env_map.update(desired["env"])
         merged["env"] = env_map
+    if "disabled" in desired:
+        merged["disabled"] = desired["disabled"]
     return merged
 
 
@@ -120,9 +132,21 @@ def select_agents(agent_args):
     return seen
 
 
+def dedupe_items(items):
+    seen = set()
+    out = []
+    for item in items:
+        if item in seen:
+            continue
+        seen.add(item)
+        out.append(item)
+    return out
+
+
 def main():
     args = parse_args()
     selected_agents = select_agents(args.agent)
+    remove_servers = dedupe_items(args.remove_server)
 
     env_overrides = {}
     if args.memory_db_path:
@@ -154,26 +178,67 @@ def main():
                 cfg["mcpServers"] = {}
 
             server_key = target["server_key"]
+            mcp_servers = cfg["mcpServers"]
+
+            # Backward compatibility: migrate legacy key (e.g. antigravity "memory") to "tachi".
+            migrated_from = None
+            for legacy_key in LEGACY_SERVER_KEYS.get(agent_name, []):
+                if server_key in mcp_servers:
+                    break
+                if legacy_key in mcp_servers:
+                    mcp_servers[server_key] = mcp_servers[legacy_key]
+                    migrated_from = legacy_key
+                    break
+
             desired_entry = build_entry(
                 agent_name, args.command, args.arg, env_overrides
             )
-            existing_entry = cfg["mcpServers"].get(server_key, {})
+            existing_entry = mcp_servers.get(server_key, {})
             merged_entry = merge_entry(existing_entry, desired_entry)
+            entry_changed = existing_entry != merged_entry
+            removed_keys = []
 
-            if existing_entry == merged_entry:
+            mcp_servers[server_key] = merged_entry
+
+            for legacy_key in LEGACY_SERVER_KEYS.get(agent_name, []):
+                if legacy_key != server_key and legacy_key in mcp_servers:
+                    del mcp_servers[legacy_key]
+                    if legacy_key not in removed_keys:
+                        removed_keys.append(legacy_key)
+
+            for key in remove_servers:
+                if key == server_key:
+                    continue
+                if key in mcp_servers:
+                    del mcp_servers[key]
+                    if key not in removed_keys:
+                        removed_keys.append(key)
+
+            if not entry_changed and not removed_keys:
                 print(f"[ok]   {agent_name}: already configured ({server_key})")
                 continue
 
-            cfg["mcpServers"][server_key] = merged_entry
             changed += 1
 
             if args.apply:
                 backup = backup_file(path)
                 path.write_text(json.dumps(cfg, indent=2, ensure_ascii=False) + "\n")
-                print(f"[edit] {agent_name}: updated {path} (backup: {backup.name})")
-            else:
+                detail_parts = [f"mcpServers.{server_key}"]
+                if migrated_from:
+                    detail_parts.append(f"migrated from '{migrated_from}'")
+                if removed_keys:
+                    detail_parts.append(f"removed: {', '.join(removed_keys)}")
                 print(
-                    f"[plan] {agent_name}: would update {path} with mcpServers.{server_key}"
+                    f"[edit] {agent_name}: updated {path} ({'; '.join(detail_parts)}; backup: {backup.name})"
+                )
+            else:
+                detail_parts = [f"mcpServers.{server_key}"]
+                if migrated_from:
+                    detail_parts.append(f"migrated from '{migrated_from}'")
+                if removed_keys:
+                    detail_parts.append(f"removed: {', '.join(removed_keys)}")
+                print(
+                    f"[plan] {agent_name}: would update {path} ({'; '.join(detail_parts)})"
                 )
         except Exception as exc:
             failures += 1

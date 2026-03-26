@@ -15,20 +15,91 @@ fn print_pretty_json(value: &serde_json::Value) -> Result<(), Box<dyn std::error
     Ok(())
 }
 
+fn build_cli_memory_entry(
+    id: String,
+    text: String,
+    path: Option<String>,
+    importance: Option<f64>,
+    timestamp: String,
+) -> MemoryEntry {
+    MemoryEntry {
+        id,
+        path: path.unwrap_or_else(|| "/".to_string()),
+        summary: text.chars().take(100).collect(),
+        text,
+        importance: importance.unwrap_or(0.7).clamp(0.0, 1.0),
+        timestamp,
+        category: "fact".to_string(),
+        topic: String::new(),
+        keywords: vec![],
+        persons: vec![],
+        entities: vec![],
+        location: String::new(),
+        source: "cli".to_string(),
+        scope: "general".to_string(),
+        archived: false,
+        access_count: 0,
+        last_access: None,
+        revision: 1,
+        metadata: json!({}),
+        vector: None,
+    }
+}
+
+fn evaluate_cli_capability_enabled(
+    cap_type: &str,
+    definition: &str,
+) -> Result<(bool, Option<String>), Box<dyn std::error::Error>> {
+    if cap_type != "mcp" {
+        return Ok((true, None));
+    }
+
+    let def: serde_json::Value = serde_json::from_str(definition)?;
+    let transport_type = def["transport"].as_str().unwrap_or("stdio");
+    if transport_type != "stdio" {
+        return Ok((true, None));
+    }
+
+    match def["command"].as_str() {
+        Some(cmd) if is_trusted_command(cmd) => Ok((true, None)),
+        Some(cmd) => Ok((
+            false,
+            Some(format!(
+                "Command '{}' is not in the trusted allowlist. Capability registered but disabled.",
+                cmd
+            )),
+        )),
+        None => Ok((
+            false,
+            Some(
+                "mcp definition missing 'command' for stdio transport. Capability registered but disabled."
+                    .to_string(),
+            ),
+        )),
+    }
+}
+
 fn run_cli_command(command: Commands, db_path: &PathBuf) -> Result<(), Box<dyn std::error::Error>> {
     match command {
         Commands::Serve => Ok(()),
         Commands::Search { query, path, top_k } => {
             let mut store = open_cli_store(db_path)?;
+            let path_prefix = path.clone();
             let results = store.search(
                 &query,
                 Some(SearchOptions {
                     top_k,
-                    path_prefix: path,
+                    path_prefix,
                     ..Default::default()
                 }),
             )?;
-            print_pretty_json(&serde_json::to_value(results)?)
+            print_pretty_json(&json!({
+                "query": query,
+                "path": path,
+                "top_k": top_k,
+                "vector": store.vec_available,
+                "results": results,
+            }))
         }
         Commands::Save {
             text,
@@ -47,28 +118,8 @@ fn run_cli_command(command: Commands, db_path: &PathBuf) -> Result<(), Box<dyn s
             let mut store = open_cli_store(db_path)?;
             let id = uuid::Uuid::new_v4().to_string();
             let timestamp = Utc::now().to_rfc3339();
-            let entry = MemoryEntry {
-                id: id.clone(),
-                path: path.unwrap_or_else(|| "/".to_string()),
-                summary: text.chars().take(100).collect(),
-                text,
-                importance: importance.unwrap_or(0.7).clamp(0.0, 1.0),
-                timestamp: timestamp.clone(),
-                category: "fact".to_string(),
-                topic: String::new(),
-                keywords: vec![],
-                persons: vec![],
-                entities: vec![],
-                location: String::new(),
-                source: "cli".to_string(),
-                scope: "general".to_string(),
-                archived: false,
-                access_count: 0,
-                last_access: None,
-                revision: 1,
-                metadata: json!({}),
-                vector: None,
-            };
+            let entry =
+                build_cli_memory_entry(id.clone(), text, path, importance, timestamp.clone());
 
             store.upsert(&entry)?;
             print_pretty_json(&json!({
@@ -111,6 +162,8 @@ fn run_cli_command(command: Commands, db_path: &PathBuf) -> Result<(), Box<dyn s
                     definition,
                     description,
                 } => {
+                    let (enabled, warning) =
+                        evaluate_cli_capability_enabled(&cap_type, &definition)?;
                     let cap = HubCapability {
                         id: id.clone(),
                         cap_type,
@@ -118,7 +171,7 @@ fn run_cli_command(command: Commands, db_path: &PathBuf) -> Result<(), Box<dyn s
                         version: 1,
                         description: description.unwrap_or_default(),
                         definition,
-                        enabled: true,
+                        enabled,
                         uses: 0,
                         successes: 0,
                         failures: 0,
@@ -128,8 +181,19 @@ fn run_cli_command(command: Commands, db_path: &PathBuf) -> Result<(), Box<dyn s
                         updated_at: String::new(),
                     };
                     store.hub_register(&cap)?;
-                    let saved = store.hub_get(&id)?.unwrap_or(cap);
-                    print_pretty_json(&serde_json::to_value(saved)?)
+                    let saved = store.hub_get(&id)?.ok_or_else(|| {
+                        std::io::Error::other(format!(
+                            "capability '{}' registered but failed to reload from DB",
+                            id
+                        ))
+                    })?;
+                    let mut output = serde_json::to_value(saved)?;
+                    if let Some(w) = warning {
+                        if let Some(obj) = output.as_object_mut() {
+                            obj.insert("warning".to_string(), json!(w));
+                        }
+                    }
+                    print_pretty_json(&output)
                 }
                 HubAction::Enable { id } => {
                     let updated = store.hub_set_enabled(&id, true)?;

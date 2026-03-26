@@ -58,7 +58,10 @@ use crate::memory_search_ops::{
 use crate::pipeline_ops::{
     handle_extract_facts, handle_get_pipeline_status, handle_ingest_event, handle_sync_memories,
 };
-use crate::sandbox_ops::{handle_sandbox_check, handle_sandbox_set_rule};
+use crate::sandbox_ops::{
+    handle_sandbox_check, handle_sandbox_get_policy, handle_sandbox_list_policies,
+    handle_sandbox_set_policy, handle_sandbox_set_rule,
+};
 use crate::shared_defs::{
     categorize_error, slim_entry, slim_l0_rule, slim_search_result, DeadLetter, DLQ_MAX_ENTRIES,
     DLQ_TTL_SECS,
@@ -67,7 +70,7 @@ use crate::skill_chain_ops::handle_chain_skills;
 use crate::tool_params::*;
 use crate::utils::{
     find_git_root, is_active_global_rule, is_trusted_command, lock_or_recover, parse_env_bool,
-    parse_env_u64, stable_hash, value_to_template_text,
+    parse_env_u64, read_or_recover, stable_hash, value_to_template_text, write_or_recover,
 };
 
 use chrono::Utc;
@@ -89,6 +92,7 @@ use std::future::Future;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
+use std::sync::RwLock as StdRwLock;
 use std::time::{Duration, Instant};
 use tokio::io::{stdin, stdout};
 
@@ -234,6 +238,8 @@ const CACHE_INVALIDATING_TOOLS: &[&str] = &[
     "set_state",
     "hub_register",
     "hub_feedback",
+    "sandbox_set_rule",
+    "sandbox_set_policy",
 ];
 
 struct CachedResult {
@@ -255,6 +261,11 @@ impl Clone for CachedResult {
 struct MemoryServer {
     global_store: Arc<StdMutex<MemoryStore>>,
     project_store: Option<Arc<StdMutex<MemoryStore>>>,
+    /// Read/write gate for global DB access. Read operations share the lock,
+    /// write operations take exclusive lock.
+    global_rw_gate: Arc<StdRwLock<()>>,
+    /// Read/write gate for project DB access.
+    project_rw_gate: Option<Arc<StdRwLock<()>>>,
     global_db_path: Arc<PathBuf>,
     project_db_path: Option<Arc<PathBuf>>,
     global_vec_available: bool,
@@ -337,7 +348,7 @@ impl MemoryServer {
         let global_store = MemoryStore::open(global_db_str)?;
         let global_vec_available = global_store.vec_available;
 
-        let (project_store, project_db_path, project_vec_available) =
+        let (project_store, project_rw_gate, project_db_path, project_vec_available) =
             if let Some(ref p) = project_db_path {
                 let project_db_str = p.to_str().ok_or_else(|| {
                     std::io::Error::new(
@@ -349,11 +360,12 @@ impl MemoryServer {
                 let v = store.vec_available;
                 (
                     Some(Arc::new(StdMutex::new(store))),
+                    Some(Arc::new(StdRwLock::new(()))),
                     Some(Arc::new(p.clone())),
                     v,
                 )
             } else {
-                (None, None, false)
+                (None, None, None, false)
             };
 
         let llm = Arc::new(llm::LlmClient::new()?);
@@ -384,6 +396,8 @@ impl MemoryServer {
         Ok(Self {
             global_store: Arc::new(StdMutex::new(global_store)),
             project_store,
+            global_rw_gate: Arc::new(StdRwLock::new(())),
+            project_rw_gate,
             global_db_path: Arc::new(global_db_path),
             project_db_path,
             global_vec_available,
@@ -794,6 +808,32 @@ impl MemoryServer {
     ) -> Result<String, String> {
         handle_sandbox_check(self, params).await
     }
+
+    #[tool(
+        description = "Set runtime sandbox policy for a capability (timeouts, concurrency, env allowlist, fs/cwd roots)."
+    )]
+    async fn sandbox_set_policy(
+        &self,
+        Parameters(params): Parameters<SandboxSetPolicyParams>,
+    ) -> Result<String, String> {
+        handle_sandbox_set_policy(self, params).await
+    }
+
+    #[tool(description = "Get runtime sandbox policy for a capability.")]
+    async fn sandbox_get_policy(
+        &self,
+        Parameters(params): Parameters<SandboxGetPolicyParams>,
+    ) -> Result<String, String> {
+        handle_sandbox_get_policy(self, params).await
+    }
+
+    #[tool(description = "List runtime sandbox policies.")]
+    async fn sandbox_list_policies(
+        &self,
+        Parameters(params): Parameters<SandboxListPoliciesParams>,
+    ) -> Result<String, String> {
+        handle_sandbox_list_policies(self, params).await
+    }
 }
 
 impl MemoryServer {
@@ -845,7 +885,7 @@ impl MemoryServer {
         let startup_timeout_ms = def["startup_timeout_ms"].as_u64().unwrap_or(30_000);
         let startup_timeout = Duration::from_millis(startup_timeout_ms.max(1));
         let client = self
-            .connect_mcp_service(&def, startup_timeout)
+            .connect_mcp_service(&server_id, &def, startup_timeout)
             .await
             .map_err(|e| rmcp::ErrorData::internal_error(e, None))?;
 
@@ -879,6 +919,22 @@ impl MemoryServer {
         }
         let cap_def: serde_json::Value = serde_json::from_str(&cap.definition)
             .map_err(|e| rmcp::ErrorData::internal_error(format!("bad definition: {e}"), None))?;
+        let sandbox_policy = self.get_sandbox_policy_for_capability(&server_id);
+        if let Some(policy) = sandbox_policy.as_ref() {
+            let policy_enabled = policy
+                .get("enabled")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(true);
+            if !policy_enabled {
+                return Err(rmcp::ErrorData::invalid_params(
+                    format!(
+                        "Capability '{}' blocked by sandbox policy (enabled=false)",
+                        server_id
+                    ),
+                    None,
+                ));
+            }
+        }
 
         // 1. Check allow/deny permissions
         if let Some(allow_list) = cap_def["permissions"]["allow"].as_array() {
@@ -930,7 +986,15 @@ impl MemoryServer {
         // 3. Acquire per-child concurrency permit (rebuild if max_concurrency changed)
         let semaphore = {
             let mut sems = self.pool.semaphores.lock().unwrap();
-            let max_conc = cap_def["max_concurrency"].as_u64().unwrap_or(1) as usize;
+            let mut max_conc = cap_def["max_concurrency"].as_u64().unwrap_or(1);
+            if let Some(policy_cap) = sandbox_policy
+                .as_ref()
+                .and_then(|v| v.get("max_concurrency"))
+                .and_then(|v| v.as_u64())
+            {
+                max_conc = std::cmp::min(max_conc.max(1), policy_cap.max(1));
+            }
+            let max_conc = max_conc.max(1) as usize;
             let needs_rebuild = sems
                 .get(server_name)
                 .map(|(_, cached_max)| *cached_max != max_conc)
@@ -967,7 +1031,14 @@ impl MemoryServer {
             }
         };
 
-        let timeout_ms = cap_def["tool_timeout_ms"].as_u64().unwrap_or(30000);
+        let mut timeout_ms = cap_def["tool_timeout_ms"].as_u64().unwrap_or(30000);
+        if let Some(policy_tool_ms) = sandbox_policy
+            .as_ref()
+            .and_then(|v| v.get("max_tool_ms"))
+            .and_then(|v| v.as_u64())
+        {
+            timeout_ms = std::cmp::min(timeout_ms.max(1), policy_tool_ms.max(1));
+        }
         let start = Instant::now();
 
         let result = tokio::time::timeout(

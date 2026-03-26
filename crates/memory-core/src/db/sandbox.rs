@@ -102,3 +102,138 @@ fn path_matches_pattern(path: &str, pattern: &str) -> bool {
         path == pattern || path.starts_with(&format!("{}/", pattern))
     }
 }
+
+fn parse_json_text(text: &str, fallback: serde_json::Value) -> serde_json::Value {
+    serde_json::from_str(text).unwrap_or(fallback)
+}
+
+/// Upsert sandbox runtime policy for a capability (typically an MCP server).
+#[allow(clippy::too_many_arguments)]
+pub fn set_sandbox_policy(
+    conn: &Connection,
+    capability_id: &str,
+    runtime_type: &str,
+    env_allowlist_json: &str,
+    fs_read_roots_json: &str,
+    fs_write_roots_json: &str,
+    cwd_roots_json: &str,
+    max_startup_ms: u64,
+    max_tool_ms: u64,
+    max_concurrency: u32,
+    enabled: bool,
+) -> Result<(), MemoryError> {
+    let now = now_utc_iso();
+    conn.execute(
+        "INSERT INTO sandbox_policies
+         (capability_id, runtime_type, env_allowlist, fs_read_roots, fs_write_roots, cwd_roots,
+          max_startup_ms, max_tool_ms, max_concurrency, enabled, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?11)
+         ON CONFLICT(capability_id) DO UPDATE SET
+           runtime_type = excluded.runtime_type,
+           env_allowlist = excluded.env_allowlist,
+           fs_read_roots = excluded.fs_read_roots,
+           fs_write_roots = excluded.fs_write_roots,
+           cwd_roots = excluded.cwd_roots,
+           max_startup_ms = excluded.max_startup_ms,
+           max_tool_ms = excluded.max_tool_ms,
+           max_concurrency = excluded.max_concurrency,
+           enabled = excluded.enabled,
+           updated_at = excluded.updated_at",
+        params![
+            capability_id,
+            runtime_type,
+            env_allowlist_json,
+            fs_read_roots_json,
+            fs_write_roots_json,
+            cwd_roots_json,
+            max_startup_ms as i64,
+            max_tool_ms as i64,
+            max_concurrency as i64,
+            enabled as i32,
+            &now,
+        ],
+    )?;
+    Ok(())
+}
+
+/// Fetch sandbox runtime policy by capability id.
+pub fn get_sandbox_policy(
+    conn: &Connection,
+    capability_id: &str,
+) -> Result<Option<serde_json::Value>, MemoryError> {
+    let mut stmt = conn.prepare(
+        "SELECT capability_id, runtime_type, env_allowlist, fs_read_roots, fs_write_roots,
+                cwd_roots, max_startup_ms, max_tool_ms, max_concurrency, enabled, created_at, updated_at
+         FROM sandbox_policies
+         WHERE capability_id = ?1",
+    )?;
+    let result = stmt.query_row(params![capability_id], |row| {
+        let env_allowlist: String = row.get(2)?;
+        let fs_read_roots: String = row.get(3)?;
+        let fs_write_roots: String = row.get(4)?;
+        let cwd_roots: String = row.get(5)?;
+        Ok(serde_json::json!({
+            "capability_id": row.get::<_, String>(0)?,
+            "runtime_type": row.get::<_, String>(1)?,
+            "env_allowlist": parse_json_text(&env_allowlist, serde_json::json!([])),
+            "fs_read_roots": parse_json_text(&fs_read_roots, serde_json::json!([])),
+            "fs_write_roots": parse_json_text(&fs_write_roots, serde_json::json!([])),
+            "cwd_roots": parse_json_text(&cwd_roots, serde_json::json!([])),
+            "max_startup_ms": row.get::<_, i64>(6)?,
+            "max_tool_ms": row.get::<_, i64>(7)?,
+            "max_concurrency": row.get::<_, i64>(8)?,
+            "enabled": row.get::<_, i32>(9)? != 0,
+            "created_at": row.get::<_, String>(10)?,
+            "updated_at": row.get::<_, String>(11)?,
+        }))
+    });
+    match result {
+        Ok(v) => Ok(Some(v)),
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+        Err(e) => Err(MemoryError::from(e)),
+    }
+}
+
+/// List sandbox runtime policies.
+pub fn list_sandbox_policies(
+    conn: &Connection,
+    enabled_only: bool,
+    limit: usize,
+) -> Result<Vec<serde_json::Value>, MemoryError> {
+    let mut sql = String::from(
+        "SELECT capability_id, runtime_type, env_allowlist, fs_read_roots, fs_write_roots,
+                cwd_roots, max_startup_ms, max_tool_ms, max_concurrency, enabled, created_at, updated_at
+         FROM sandbox_policies",
+    );
+    if enabled_only {
+        sql.push_str(" WHERE enabled = 1");
+    }
+    sql.push_str(" ORDER BY capability_id ASC LIMIT ?1");
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map(params![limit as i64], |row| {
+            let env_allowlist: String = row.get(2)?;
+            let fs_read_roots: String = row.get(3)?;
+            let fs_write_roots: String = row.get(4)?;
+            let cwd_roots: String = row.get(5)?;
+            Ok(serde_json::json!({
+                "capability_id": row.get::<_, String>(0)?,
+                "runtime_type": row.get::<_, String>(1)?,
+                "env_allowlist": parse_json_text(&env_allowlist, serde_json::json!([])),
+                "fs_read_roots": parse_json_text(&fs_read_roots, serde_json::json!([])),
+                "fs_write_roots": parse_json_text(&fs_write_roots, serde_json::json!([])),
+                "cwd_roots": parse_json_text(&cwd_roots, serde_json::json!([])),
+                "max_startup_ms": row.get::<_, i64>(6)?,
+                "max_tool_ms": row.get::<_, i64>(7)?,
+                "max_concurrency": row.get::<_, i64>(8)?,
+                "enabled": row.get::<_, i32>(9)? != 0,
+                "created_at": row.get::<_, String>(10)?,
+                "updated_at": row.get::<_, String>(11)?,
+            }))
+        })?;
+
+    let mut out = Vec::new();
+    for r in rows {
+        out.push(r?);
+    }
+    Ok(out)
+}
