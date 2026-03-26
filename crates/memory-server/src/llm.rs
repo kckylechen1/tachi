@@ -29,8 +29,8 @@ impl LlmClient {
         let siliconflow_api_key = std::env::var("SILICONFLOW_API_KEY")
             .map_err(|_| "SILICONFLOW_API_KEY environment variable not set".to_string())?;
 
-        let siliconflow_model = std::env::var("SILICONFLOW_MODEL")
-            .unwrap_or_else(|_| "Qwen/Qwen3.5-27B".to_string());
+        let siliconflow_model =
+            std::env::var("SILICONFLOW_MODEL").unwrap_or_else(|_| "Qwen/Qwen3.5-27B".to_string());
 
         let summary_model =
             std::env::var("SUMMARY_MODEL").unwrap_or_else(|_| siliconflow_model.clone());
@@ -49,49 +49,92 @@ impl LlmClient {
         })
     }
 
-    /// Call Voyage-4 embedding API and return 1024-dim f32 vector
+    /// Call Voyage-4 embedding API and return 1024-dim f32 vector.
+    /// Convenience wrapper around embed_voyage_batch for single-item use.
+    #[allow(dead_code)]
     pub async fn embed_voyage(&self, text: &str, input_type: &str) -> Result<Vec<f32>, String> {
-        let body = serde_json::json!({
-            "model": "voyage-4",
-            "input": [text],
-            "input_type": input_type
-        });
+        let results = self
+            .embed_voyage_batch(&[text.to_string()], input_type)
+            .await?;
+        results
+            .into_iter()
+            .next()
+            .ok_or_else(|| "Empty batch result".to_string())
+    }
 
-        let response = self
-            .http
-            .post("https://api.voyageai.com/v1/embeddings")
-            .header(CONTENT_TYPE, "application/json")
-            .header(AUTHORIZATION, format!("Bearer {}", self.voyage_api_key))
-            .json(&body)
-            .send()
-            .await
-            .map_err(|e| format!("Voyage API request failed: {}", e))?;
-
-        if !response.status().is_success() {
-            let status = response.status();
-            let text = response.text().await.unwrap_or_default();
-            return Err(format!("Voyage API error: {} - {}", status, text));
+    /// Batch call Voyage-4 embedding API. Returns one 1024-dim f32 vector per input text.
+    /// Voyage supports up to 128 inputs per request; this method handles chunking internally.
+    pub async fn embed_voyage_batch(
+        &self,
+        texts: &[String],
+        input_type: &str,
+    ) -> Result<Vec<Vec<f32>>, String> {
+        if texts.is_empty() {
+            return Ok(vec![]);
         }
 
-        let json: Value = response
-            .json()
-            .await
-            .map_err(|e| format!("Failed to parse Voyage response: {}", e))?;
+        const VOYAGE_MAX_BATCH: usize = 128;
+        let mut all_embeddings: Vec<Vec<f32>> = Vec::with_capacity(texts.len());
 
-        let embedding = json["data"][0]["embedding"]
-            .as_array()
-            .ok_or("Invalid Voyage response: missing embedding")?;
+        for chunk in texts.chunks(VOYAGE_MAX_BATCH) {
+            let body = serde_json::json!({
+                "model": "voyage-4",
+                "input": chunk,
+                "input_type": input_type
+            });
 
-        let vec: Vec<f32> = embedding
-            .iter()
-            .filter_map(|v| v.as_f64().map(|f| f as f32))
-            .collect();
+            let response = self
+                .http
+                .post("https://api.voyageai.com/v1/embeddings")
+                .header(CONTENT_TYPE, "application/json")
+                .header(AUTHORIZATION, format!("Bearer {}", self.voyage_api_key))
+                .json(&body)
+                .send()
+                .await
+                .map_err(|e| format!("Voyage batch API request failed: {}", e))?;
 
-        if vec.len() != 1024 {
-            return Err(format!("Expected 1024-dim embedding, got {}", vec.len()));
+            if !response.status().is_success() {
+                let status = response.status();
+                let text = response.text().await.unwrap_or_default();
+                return Err(format!("Voyage batch API error: {} - {}", status, text));
+            }
+
+            let json: Value = response
+                .json()
+                .await
+                .map_err(|e| format!("Failed to parse Voyage batch response: {}", e))?;
+
+            let data = json["data"]
+                .as_array()
+                .ok_or("Invalid Voyage batch response: missing data array")?;
+
+            for item in data {
+                let embedding = item["embedding"]
+                    .as_array()
+                    .ok_or("Invalid Voyage batch response: missing embedding in item")?;
+
+                let vec: Vec<f32> = embedding
+                    .iter()
+                    .filter_map(|v| v.as_f64().map(|f| f as f32))
+                    .collect();
+
+                if vec.len() != 1024 {
+                    return Err(format!("Expected 1024-dim embedding, got {}", vec.len()));
+                }
+
+                all_embeddings.push(vec);
+            }
         }
 
-        Ok(vec)
+        if all_embeddings.len() != texts.len() {
+            return Err(format!(
+                "Voyage batch returned {} embeddings for {} inputs",
+                all_embeddings.len(),
+                texts.len()
+            ));
+        }
+
+        Ok(all_embeddings)
     }
 
     /// Call SiliconFlow chat API via raw reqwest.
@@ -183,17 +226,15 @@ impl LlmClient {
             })?;
 
             // Extract content from first choice
-            let content = json["choices"]
-                .as_array()
-                .and_then(|choices| {
-                    choices.iter().find_map(|choice| {
-                        choice["message"]["content"]
-                            .as_str()
-                            .map(str::trim)
-                            .filter(|s| !s.is_empty())
-                            .map(String::from)
-                    })
-                });
+            let content = json["choices"].as_array().and_then(|choices| {
+                choices.iter().find_map(|choice| {
+                    choice["message"]["content"]
+                        .as_str()
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty())
+                        .map(String::from)
+                })
+            });
 
             if let Some(text) = content {
                 return Ok(text);
@@ -257,8 +298,12 @@ impl LlmClient {
             return Err("LLM returned empty facts payload after stripping fences".to_string());
         }
 
-        serde_json::from_str(json_str)
-            .map_err(|e| format!("Failed to parse facts JSON: {} - response was: {}", e, json_str))
+        serde_json::from_str(json_str).map_err(|e| {
+            format!(
+                "Failed to parse facts JSON: {} - response was: {}",
+                e, json_str
+            )
+        })
     }
 
     fn retry_delay(attempt: usize) -> Duration {

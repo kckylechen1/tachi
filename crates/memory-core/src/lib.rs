@@ -13,10 +13,12 @@ pub mod types;
 
 pub use error::MemoryError;
 pub use hub::HubCapability;
-pub use types::{HybridScore, MemoryEntry, MemoryEdge, GraphExpandResult, SearchResult, StatsResult};
-pub use search::{SearchOptions, hybrid_search};
-pub use scorer::HybridWeights;
 pub use noise::{is_noise_text, should_skip_query};
+pub use scorer::HybridWeights;
+pub use search::{hybrid_search, SearchOptions};
+pub use types::{
+    GraphExpandResult, HybridScore, MemoryEdge, MemoryEntry, SearchResult, StatsResult,
+};
 
 use rusqlite::Connection;
 use std::time::Duration;
@@ -39,7 +41,10 @@ impl MemoryStore {
         conn.busy_timeout(Duration::from_millis(5_000))?;
         db::init_schema(&conn)?;
         let vec_available = db::try_load_sqlite_vec(&conn);
-        Ok(Self { conn, vec_available })
+        Ok(Self {
+            conn,
+            vec_available,
+        })
     }
 
     /// In-memory database (useful for tests and scripts).
@@ -51,7 +56,10 @@ impl MemoryStore {
         conn.busy_timeout(Duration::from_millis(5_000))?;
         db::init_schema(&conn)?;
         let vec_available = db::try_load_sqlite_vec(&conn);
-        Ok(Self { conn, vec_available })
+        Ok(Self {
+            conn,
+            vec_available,
+        })
     }
 
     /// Insert or update a memory entry (with optional embedding vector).
@@ -65,13 +73,23 @@ impl MemoryStore {
     }
 
     /// Mark an event hash as processed by a worker.
-    pub fn mark_event_processed(&self, event_hash: &str, event_id: &str, worker: &str) -> Result<(), MemoryError> {
+    pub fn mark_event_processed(
+        &self,
+        event_hash: &str,
+        event_id: &str,
+        worker: &str,
+    ) -> Result<(), MemoryError> {
         db::mark_event_processed(&self.conn, event_hash, event_id, worker)
     }
 
     /// Atomically try to claim an event for processing.
     /// Returns true if claimed (first processor), false if already processed.
-    pub fn try_claim_event(&self, event_hash: &str, event_id: &str, worker: &str) -> Result<bool, MemoryError> {
+    pub fn try_claim_event(
+        &self,
+        event_hash: &str,
+        event_id: &str,
+        worker: &str,
+    ) -> Result<bool, MemoryError> {
         db::try_claim_event(&self.conn, event_hash, event_id, worker)
     }
 
@@ -135,13 +153,13 @@ impl MemoryStore {
 
     /// Hybrid search: Text + FTS5 + optional vector channel.
     pub fn search(
-        &mut self,
+        &self,
         query: &str,
         opts: Option<SearchOptions>,
     ) -> Result<Vec<SearchResult>, MemoryError> {
         let mut options = opts.unwrap_or_default();
         options.vec_available = self.vec_available;
-        hybrid_search(&mut self.conn, query, &options)
+        hybrid_search(&self.conn, query, &options)
     }
 
     /// Fetch a single entry by ID.
@@ -197,19 +215,16 @@ impl MemoryStore {
     /// Run PRAGMA quick_check to detect database corruption early.
     /// Returns Ok(true) if healthy, Ok(false) if corrupt.
     pub fn quick_check(&self) -> Result<bool, MemoryError> {
-        let result: String = self.conn.query_row(
-            "PRAGMA quick_check",
-            [],
-            |row| row.get(0),
-        )?;
+        let result: String = self
+            .conn
+            .query_row("PRAGMA quick_check", [], |row| row.get(0))?;
         Ok(result == "ok")
     }
 
     /// Flush SQLite state before process shutdown.
     pub fn prepare_shutdown(&self) -> Result<(), MemoryError> {
-        self.conn.execute_batch(
-            "PRAGMA optimize;\nPRAGMA wal_checkpoint(PASSIVE);",
-        )?;
+        self.conn
+            .execute_batch("PRAGMA optimize;\nPRAGMA wal_checkpoint(PASSIVE);")?;
         Ok(())
     }
 
@@ -268,11 +283,17 @@ impl MemoryStore {
         scope: &str,
         metadata: &serde_json::Value,
     ) -> Result<String, MemoryError> {
-        db::save_derived(&self.conn, text, path, summary, importance, source, scope, metadata)
+        db::save_derived(
+            &self.conn, text, path, summary, importance, source, scope, metadata,
+        )
     }
 
     /// Count derived items by source and path prefix.
-    pub fn count_derived_by_source(&self, source: &str, path_prefix: &str) -> Result<u64, MemoryError> {
+    pub fn count_derived_by_source(
+        &self,
+        source: &str,
+        path_prefix: &str,
+    ) -> Result<u64, MemoryError> {
         db::count_derived_by_source(&self.conn, source, path_prefix)
     }
 
@@ -301,12 +322,21 @@ impl MemoryStore {
     // ─── Hard State Operations ────────────────────────────────────────────────
 
     /// Set a deterministic key-value state.
-    pub fn set_state(&self, namespace: &str, key: &str, value_json: &str) -> Result<u32, MemoryError> {
+    pub fn set_state(
+        &self,
+        namespace: &str,
+        key: &str,
+        value_json: &str,
+    ) -> Result<u32, MemoryError> {
         db::set_state(&self.conn, namespace, key, value_json)
     }
 
     /// Get a deterministic key-value state.
-    pub fn get_state_kv(&self, namespace: &str, key: &str) -> Result<Option<(String, u32)>, MemoryError> {
+    pub fn get_state_kv(
+        &self,
+        namespace: &str,
+        key: &str,
+    ) -> Result<Option<(String, u32)>, MemoryError> {
         db::get_state(&self.conn, namespace, key)
     }
 
@@ -323,12 +353,20 @@ impl MemoryStore {
     }
 
     /// List hub capabilities, optionally filtered by type and enabled status.
-    pub fn hub_list(&self, cap_type: Option<&str>, enabled_only: bool) -> Result<Vec<HubCapability>, MemoryError> {
+    pub fn hub_list(
+        &self,
+        cap_type: Option<&str>,
+        enabled_only: bool,
+    ) -> Result<Vec<HubCapability>, MemoryError> {
         db::hub_list(&self.conn, cap_type, enabled_only)
     }
 
     /// Search hub capabilities by name/description.
-    pub fn hub_search(&self, query: &str, cap_type: Option<&str>) -> Result<Vec<HubCapability>, MemoryError> {
+    pub fn hub_search(
+        &self,
+        query: &str,
+        cap_type: Option<&str>,
+    ) -> Result<Vec<HubCapability>, MemoryError> {
         db::hub_search(&self.conn, query, cap_type)
     }
 
@@ -338,7 +376,12 @@ impl MemoryStore {
     }
 
     /// Record feedback for a hub capability invocation.
-    pub fn hub_record_feedback(&self, id: &str, success: bool, rating: Option<f64>) -> Result<(), MemoryError> {
+    pub fn hub_record_feedback(
+        &self,
+        id: &str,
+        success: bool,
+        rating: Option<f64>,
+    ) -> Result<(), MemoryError> {
         db::hub_record_feedback(&self.conn, id, success, rating)
     }
 
@@ -360,11 +403,24 @@ impl MemoryStore {
         duration_ms: u64,
         error_kind: Option<&str>,
     ) -> Result<(), MemoryError> {
-        db::audit_log_insert(&self.conn, timestamp, server_id, tool_name, args_hash, success, duration_ms, error_kind)
+        db::audit_log_insert(
+            &self.conn,
+            timestamp,
+            server_id,
+            tool_name,
+            args_hash,
+            success,
+            duration_ms,
+            error_kind,
+        )
     }
 
     /// List recent audit log entries.
-    pub fn audit_log_list(&self, limit: usize, server_filter: Option<&str>) -> Result<Vec<serde_json::Value>, MemoryError> {
+    pub fn audit_log_list(
+        &self,
+        limit: usize,
+        server_filter: Option<&str>,
+    ) -> Result<Vec<serde_json::Value>, MemoryError> {
         db::audit_log_list(&self.conn, limit, server_filter)
     }
 
@@ -402,8 +458,7 @@ impl MemoryStore {
 
     /// Check if an agent role can access a path for a given operation.
     /// Returns (allowed, matching_rule_description).
-    /// Advisory mode — not enforced in search_memory yet.
-    // TODO: Integrate enforcement into search_memory by filtering results based on agent role
+    // Sandbox enforcement is implemented in memory-server's handle_search_memory
     pub fn check_sandbox_access(
         &self,
         agent_role: &str,

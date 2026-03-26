@@ -95,6 +95,24 @@ use std::sync::Mutex as StdMutex;
 use std::sync::RwLock as StdRwLock;
 use std::time::{Duration, Instant};
 use tokio::io::{stdin, stdout};
+use tokio::sync::mpsc;
+
+// ─── Enrichment Batcher ──────────────────────────────────────────────────────
+
+/// An item queued for background embedding + summary enrichment.
+#[derive(Debug, Clone)]
+struct EnrichmentItem {
+    id: String,
+    text: String,
+    needs_embedding: bool,
+    needs_summary: bool,
+    target_db: DbScope,
+    revision: i64,
+}
+
+/// Batch enrichment queue configuration.
+const ENRICH_BATCH_MAX: usize = 32;
+const ENRICH_FLUSH_INTERVAL_MS: u64 = 500;
 
 // ─── CLI Arguments ────────────────────────────────────────────────────────────
 
@@ -288,6 +306,8 @@ struct MemoryServer {
     dead_letters: Arc<StdMutex<VecDeque<DeadLetter>>>,
     mcp_discovery_timeout: Duration,
     mcp_tool_exposure_mode: McpToolExposureMode,
+    // ─── Enrichment Batcher ──────────────────────────────────────────────────
+    enrich_tx: mpsc::UnboundedSender<EnrichmentItem>,
 }
 
 // ─── MCP Client Connection Pool ──────────────────────────────────────────────
@@ -393,7 +413,10 @@ impl MemoryServer {
                 }
             })
             .unwrap_or(McpToolExposureMode::Flatten);
-        Ok(Self {
+
+        let (enrich_tx, enrich_rx) = mpsc::unbounded_channel::<EnrichmentItem>();
+
+        let server = Self {
             global_store: Arc::new(StdMutex::new(global_store)),
             project_store,
             global_rw_gate: Arc::new(StdRwLock::new(())),
@@ -402,7 +425,7 @@ impl MemoryServer {
             project_db_path,
             global_vec_available,
             project_vec_available,
-            llm,
+            llm: llm.clone(),
             pipeline_enabled,
             proxy_tools: Arc::new(StdMutex::new(HashMap::new())),
             skill_tools: Arc::new(StdMutex::new(HashMap::new())),
@@ -416,7 +439,156 @@ impl MemoryServer {
             dead_letters: Arc::new(StdMutex::new(VecDeque::new())),
             mcp_discovery_timeout: Duration::from_millis(mcp_discovery_timeout_ms),
             mcp_tool_exposure_mode,
-        })
+            enrich_tx,
+        };
+
+        // Spawn the enrichment batcher worker
+        {
+            let batcher_server = server.clone();
+            tokio::spawn(Self::run_enrichment_batcher(batcher_server, enrich_rx));
+        }
+
+        Ok(server)
+    }
+
+    /// Background worker that batches enrichment requests (embedding + summary).
+    /// Flushes every ENRICH_FLUSH_INTERVAL_MS or when ENRICH_BATCH_MAX items accumulate.
+    async fn run_enrichment_batcher(
+        server: MemoryServer,
+        mut rx: mpsc::UnboundedReceiver<EnrichmentItem>,
+    ) {
+        let mut batch: Vec<EnrichmentItem> = Vec::with_capacity(ENRICH_BATCH_MAX);
+        let flush_interval = Duration::from_millis(ENRICH_FLUSH_INTERVAL_MS);
+
+        loop {
+            // Wait for first item or channel close
+            let item = if batch.is_empty() {
+                match rx.recv().await {
+                    Some(item) => Some(item),
+                    None => break, // channel closed
+                }
+            } else {
+                None
+            };
+
+            if let Some(item) = item {
+                batch.push(item);
+            }
+
+            // Drain more items until batch is full or timeout expires
+            let deadline = tokio::time::Instant::now() + flush_interval;
+            while batch.len() < ENRICH_BATCH_MAX {
+                match tokio::time::timeout_at(deadline, rx.recv()).await {
+                    Ok(Some(item)) => batch.push(item),
+                    Ok(None) => {
+                        // Channel closed; flush remaining and exit
+                        if !batch.is_empty() {
+                            server.flush_enrichment_batch(&mut batch).await;
+                        }
+                        return;
+                    }
+                    Err(_timeout) => break, // timer expired, flush what we have
+                }
+            }
+
+            if !batch.is_empty() {
+                server.flush_enrichment_batch(&mut batch).await;
+            }
+        }
+
+        eprintln!("[enrichment-batcher] channel closed, worker exiting");
+    }
+
+    /// Flush a batch: batch-embed all texts needing embedding, then update DB.
+    async fn flush_enrichment_batch(&self, batch: &mut Vec<EnrichmentItem>) {
+        let items: Vec<EnrichmentItem> = batch.drain(..).collect();
+        let batch_size = items.len();
+        eprintln!("[enrichment-batcher] flushing batch of {batch_size} items");
+
+        // 1. Batch embedding for items that need it
+        let embed_indices: Vec<usize> = items
+            .iter()
+            .enumerate()
+            .filter(|(_, item)| item.needs_embedding)
+            .map(|(i, _)| i)
+            .collect();
+
+        let embed_texts: Vec<String> = embed_indices
+            .iter()
+            .map(|&i| items[i].text.clone())
+            .collect();
+
+        let mut embed_results: Vec<Option<Vec<f32>>> = vec![None; items.len()];
+
+        if !embed_texts.is_empty() {
+            match self.llm.embed_voyage_batch(&embed_texts, "document").await {
+                Ok(vecs) => {
+                    for (vec_idx, &item_idx) in embed_indices.iter().enumerate() {
+                        if vec_idx < vecs.len() {
+                            embed_results[item_idx] = Some(vecs[vec_idx].clone());
+                        }
+                    }
+                    eprintln!(
+                        "[enrichment-batcher] batch embedded {} texts in 1 API call",
+                        embed_texts.len()
+                    );
+                }
+                Err(e) => {
+                    eprintln!("[enrichment-batcher] batch embedding failed: {e}");
+                }
+            }
+        }
+
+        // 2. Generate summaries concurrently for items that need them
+        let summary_futures: Vec<_> = items
+            .iter()
+            .enumerate()
+            .filter(|(_, item)| item.needs_summary)
+            .map(|(i, item)| {
+                let llm = self.llm.clone();
+                let text = item.text.clone();
+                async move { (i, llm.generate_summary(&text).await) }
+            })
+            .collect();
+
+        let summary_results: Vec<(usize, Result<String, String>)> =
+            futures::future::join_all(summary_futures).await;
+
+        let mut summaries: Vec<Option<String>> = vec![None; items.len()];
+        for (idx, result) in summary_results {
+            match result {
+                Ok(s) => summaries[idx] = Some(s),
+                Err(e) => eprintln!(
+                    "[enrichment-batcher] summary failed for {}: {e}",
+                    items[idx].id
+                ),
+            }
+        }
+
+        // 3. Write results back to DB
+        for (i, item) in items.iter().enumerate() {
+            let new_vec = embed_results[i].as_deref();
+            let new_summary = summaries[i].as_deref();
+
+            if new_vec.is_some() || new_summary.is_some() {
+                match self.with_store_for_scope(item.target_db, |store| {
+                    store
+                        .update_enrichment_fields(&item.id, new_summary, new_vec, item.revision)
+                        .map_err(|e| format!("Failed to update enriched entry: {e}"))
+                }) {
+                    Ok(true) => {}
+                    Ok(false) => eprintln!(
+                        "[enrichment-batcher] discarded {} (revision changed)",
+                        item.id
+                    ),
+                    Err(e) => {
+                        eprintln!("[enrichment-batcher] DB update failed for {}: {e}", item.id)
+                    }
+                }
+            }
+        }
+
+        eprintln!("[enrichment-batcher] batch of {batch_size} complete");
     }
 }
 
