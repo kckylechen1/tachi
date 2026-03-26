@@ -1,7 +1,7 @@
 const MCP_PROTOCOL_VERSION = '2024-11-05';
 const REQUEST_TIMEOUT_MS = 5000;
-export const DEFAULT_TACHI_DAEMON_PORT = 8099;
-export const DEFAULT_TACHI_DAEMON_HOST = `localhost:${DEFAULT_TACHI_DAEMON_PORT}`;
+export const DEFAULT_TACHI_DAEMON_PORT = 6919;
+export const DEFAULT_TACHI_DAEMON_HOST = `localhost:${DEFAULT_TACHI_DAEMON_PORT}/mcp`;
 
 type JsonRpcId = number;
 
@@ -162,9 +162,9 @@ function configuredBaseUrls(): string[] {
 
   return uniqueUrls([
     ...configured,
-    '/tachi',
-    `http://127.0.0.1:${DEFAULT_TACHI_DAEMON_PORT}`,
-    `http://localhost:${DEFAULT_TACHI_DAEMON_PORT}`,
+    '/tachi/mcp',
+    `http://127.0.0.1:${DEFAULT_TACHI_DAEMON_PORT}/mcp`,
+    `http://localhost:${DEFAULT_TACHI_DAEMON_PORT}/mcp`,
   ]);
 }
 

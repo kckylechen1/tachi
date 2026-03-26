@@ -16,6 +16,7 @@ mod mcp_proxy;
 mod memory_ops;
 mod memory_search_ops;
 mod pipeline_ops;
+mod project_db_ops;
 mod prompts;
 mod sandbox_ops;
 mod server_handler;
@@ -35,13 +36,15 @@ use crate::graph_state_ops::{
 };
 use crate::hub_helpers::{
     build_skill_tool_from_cap, capability_callable, capability_visibility_for_cap,
-    make_text_tool_result, review_status_allows_call, should_expose_mcp_tools,
-    should_expose_skill_tool,
+    CapabilityVisibility, make_text_tool_result, review_status_allows_call,
+    should_expose_mcp_tools, should_expose_skill_tool,
 };
 use crate::hub_ops::{
-    handle_hub_call, handle_hub_disconnect, handle_hub_discover, handle_hub_feedback,
-    handle_hub_get, handle_hub_register, handle_hub_review, handle_hub_set_active_version,
-    handle_hub_set_enabled, handle_hub_stats, handle_run_skill, handle_tachi_audit_log,
+    handle_hub_call, handle_hub_disconnect, handle_hub_discover, handle_export_skills,
+    handle_hub_feedback, handle_hub_get, handle_hub_register, handle_hub_review,
+    handle_hub_set_active_version, handle_hub_set_enabled, handle_hub_stats, handle_run_skill,
+    handle_skill_evolve, handle_tachi_audit_log, handle_vc_bind, handle_vc_list,
+    handle_vc_register, handle_vc_resolve,
 };
 use crate::kanban::{
     handle_check_inbox, handle_post_card, handle_update_card, CheckInboxParams, PostCardParams,
@@ -62,6 +65,7 @@ use crate::memory_search_ops::{
 use crate::pipeline_ops::{
     handle_extract_facts, handle_get_pipeline_status, handle_ingest_event, handle_sync_memories,
 };
+use crate::project_db_ops::handle_tachi_init_project_db;
 use crate::sandbox_ops::{
     handle_sandbox_check, handle_sandbox_exec_audit, handle_sandbox_get_policy,
     handle_sandbox_list_policies, handle_sandbox_set_policy, handle_sandbox_set_rule,
@@ -79,7 +83,9 @@ use crate::utils::{
 
 use chrono::Utc;
 use clap::{Parser, Subcommand};
-use memory_core::{HubCapability, HybridWeights, MemoryEntry, MemoryStore, SearchOptions};
+use memory_core::{
+    HubCapability, HybridWeights, MemoryEntry, MemoryStore, SearchOptions, VirtualCapabilityBinding,
+};
 use rmcp::{
     handler::server::{tool::ToolRouter, wrapper::Parameters},
     model::{ServerCapabilities, ServerInfo},
@@ -238,6 +244,14 @@ impl DbScope {
 const TOOL_CACHE_TTL: Duration = Duration::from_secs(30);
 const DEFAULT_MCP_DISCOVERY_TIMEOUT_MS: u64 = 10_000;
 
+// ─── Rate Limiter Constants ──────────────────────────────────────────────────
+/// Default requests-per-minute limit per session (0 = unlimited)
+const DEFAULT_RATE_LIMIT_RPM: u64 = 0;
+/// Default max identical (tool+args) calls within the burst window (0 = unlimited)
+const DEFAULT_RATE_LIMIT_BURST: u64 = 8;
+/// Burst detection window
+const RATE_LIMIT_BURST_WINDOW: Duration = Duration::from_secs(60);
+
 /// Tools whose results can be cached (read-only, no side effects)
 const CACHEABLE_TOOLS: &[&str] = &[
     "search_memory",
@@ -250,6 +264,8 @@ const CACHEABLE_TOOLS: &[&str] = &[
     "hub_discover",
     "hub_get",
     "hub_stats",
+    "vc_list",
+    "vc_resolve",
     "get_pipeline_status",
 ];
 
@@ -264,10 +280,15 @@ const CACHE_INVALIDATING_TOOLS: &[&str] = &[
     "hub_review",
     "section9_review",
     "hub_set_active_version",
+    "hub_export_skills",
+    "skill_evolve",
+    "vc_register",
+    "vc_bind",
     "hub_feedback",
     "sandbox_set_rule",
     "sandbox_set_policy",
     "shell_set_policy",
+    "tachi_init_project_db",
     "ghost_reflect",
     "ghost_promote",
 ];
@@ -288,6 +309,40 @@ impl Clone for CachedResult {
 
 #[derive(Clone)]
 #[allow(dead_code)]
+struct ProjectDbState {
+    store: Arc<StdMutex<MemoryStore>>,
+    rw_gate: Arc<StdRwLock<()>>,
+    db_path: Arc<PathBuf>,
+    vec_available: bool,
+}
+
+/// Agent profile registered via `agent_register`. Stored per-session (in-memory).
+#[derive(Debug, Clone, serde::Serialize)]
+struct AgentProfile {
+    agent_id: String,
+    display_name: String,
+    capabilities: Vec<String>,
+    tool_filter: Option<Vec<String>>,
+    rate_limit_rpm: Option<u64>,
+    rate_limit_burst: Option<u64>,
+    registered_at: String,
+}
+
+/// Cross-agent handoff memo — left by one agent for the next.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct HandoffMemo {
+    id: String,
+    from_agent: String,
+    target_agent: Option<String>,
+    summary: String,
+    next_steps: Vec<String>,
+    context: Option<serde_json::Value>,
+    created_at: String,
+    acknowledged: bool,
+}
+
+#[derive(Clone)]
+#[allow(dead_code)]
 struct MemoryServer {
     global_store: Arc<StdMutex<MemoryStore>>,
     project_store: Option<Arc<StdMutex<MemoryStore>>>,
@@ -300,6 +355,9 @@ struct MemoryServer {
     project_db_path: Option<Arc<PathBuf>>,
     global_vec_available: bool,
     project_vec_available: bool,
+    /// Hot-swappable project DB state — allows `tachi_init_project_db` to activate
+    /// a project database on a running daemon without restart.
+    hot_project_db: Arc<StdRwLock<Option<ProjectDbState>>>,
     llm: Arc<llm::LlmClient>,
     pipeline_enabled: bool,
     /// Cached proxy tools from registered MCP servers: server_id → Vec<Tool>
@@ -320,6 +378,21 @@ struct MemoryServer {
     mcp_tool_exposure_mode: McpToolExposureMode,
     // ─── Enrichment Batcher ──────────────────────────────────────────────────
     enrich_tx: mpsc::UnboundedSender<EnrichmentItem>,
+    // ─── Rate Limiter ────────────────────────────────────────────────────────
+    /// Sliding window: tool call timestamps per session. Key = session_id (or "default").
+    rate_limit_windows: Arc<StdMutex<HashMap<String, VecDeque<Instant>>>>,
+    /// Burst detection: (tool_name + args_hash) → timestamps
+    rate_limit_bursts: Arc<StdMutex<HashMap<String, VecDeque<Instant>>>>,
+    /// Configured RPM limit (0 = unlimited)
+    rate_limit_rpm: u64,
+    /// Configured burst limit (0 = unlimited)
+    rate_limit_burst: u64,
+    // ─── Agent Profile ───────────────────────────────────────────────────────
+    /// Per-session agent profile (set via agent_register tool).
+    agent_profile: Arc<StdRwLock<Option<AgentProfile>>>,
+    // ─── Cross-Agent Handoff ─────────────────────────────────────────────────
+    /// Pending handoff memos from previous agent sessions.
+    handoff_memos: Arc<StdMutex<Vec<HandoffMemo>>>,
 }
 
 // ─── MCP Client Connection Pool ──────────────────────────────────────────────
@@ -428,15 +501,26 @@ impl MemoryServer {
 
         let (enrich_tx, enrich_rx) = mpsc::unbounded_channel::<EnrichmentItem>();
 
+        // Build hot-swap state before moving project_store into the struct
+        let hot_project_db = Arc::new(StdRwLock::new(
+            project_store.as_ref().map(|s| ProjectDbState {
+                store: Arc::clone(s),
+                rw_gate: project_rw_gate.clone().expect("project_rw_gate must exist if project_store exists"),
+                db_path: project_db_path.clone().expect("project_db_path must exist if project_store exists"),
+                vec_available: project_vec_available,
+            })
+        ));
+
         let server = Self {
             global_store: Arc::new(StdMutex::new(global_store)),
             project_store,
             global_rw_gate: Arc::new(StdRwLock::new(())),
-            project_rw_gate,
+            project_rw_gate: project_rw_gate.clone(),
             global_db_path: Arc::new(global_db_path),
-            project_db_path,
+            project_db_path: project_db_path.clone(),
             global_vec_available,
             project_vec_available,
+            hot_project_db,
             llm: llm.clone(),
             pipeline_enabled,
             proxy_tools: Arc::new(StdMutex::new(HashMap::new())),
@@ -452,6 +536,12 @@ impl MemoryServer {
             mcp_discovery_timeout: Duration::from_millis(mcp_discovery_timeout_ms),
             mcp_tool_exposure_mode,
             enrich_tx,
+            rate_limit_windows: Arc::new(StdMutex::new(HashMap::new())),
+            rate_limit_bursts: Arc::new(StdMutex::new(HashMap::new())),
+            rate_limit_rpm: parse_env_u64("RATE_LIMIT_RPM").unwrap_or(DEFAULT_RATE_LIMIT_RPM),
+            rate_limit_burst: parse_env_u64("RATE_LIMIT_BURST").unwrap_or(DEFAULT_RATE_LIMIT_BURST),
+            agent_profile: Arc::new(StdRwLock::new(None)),
+            handoff_memos: Arc::new(StdMutex::new(Vec::new())),
         };
 
         // Spawn the enrichment batcher worker
@@ -772,6 +862,54 @@ impl MemoryServer {
     }
 
     #[tool(
+        description = "Export Hub skills to agent-specific file formats. Targets: claude (SKILL.md + symlinks), openclaw (plugin manifest), cursor (.mdc rules), generic (raw files)."
+    )]
+    async fn hub_export_skills(
+        &self,
+        Parameters(params): Parameters<ExportSkillsParams>,
+    ) -> Result<String, String> {
+        handle_export_skills(self, params).await
+    }
+
+    #[tool(
+        description = "Register a Virtual Capability (logical capability layer) on top of concrete backends."
+    )]
+    async fn vc_register(
+        &self,
+        Parameters(params): Parameters<VirtualCapabilityRegisterParams>,
+    ) -> Result<String, String> {
+        handle_vc_register(self, params).await
+    }
+
+    #[tool(
+        description = "Bind a Virtual Capability to a concrete capability with deterministic priority and optional version pin."
+    )]
+    async fn vc_bind(
+        &self,
+        Parameters(params): Parameters<VirtualCapabilityBindParams>,
+    ) -> Result<String, String> {
+        handle_vc_bind(self, params).await
+    }
+
+    #[tool(description = "List Virtual Capabilities together with their current bindings.")]
+    async fn vc_list(
+        &self,
+        Parameters(params): Parameters<HubDiscoverParams>,
+    ) -> Result<String, String> {
+        handle_vc_list(self, params).await
+    }
+
+    #[tool(
+        description = "Resolve a Virtual Capability to the concrete capability currently selected for routing."
+    )]
+    async fn vc_resolve(
+        &self,
+        Parameters(params): Parameters<VirtualCapabilityResolveParams>,
+    ) -> Result<String, String> {
+        handle_vc_resolve(self, params).await
+    }
+
+    #[tool(
         description = "Add or update an edge in the memory graph. Edges represent causal, temporal, or entity relationships between memories."
     )]
     async fn add_edge(
@@ -911,6 +1049,16 @@ impl MemoryServer {
         handle_run_skill(self, params).await
     }
 
+    #[tool(
+        description = "Evolve a skill by analyzing its telemetry and using LLM to produce an improved prompt. Creates a new versioned capability."
+    )]
+    async fn skill_evolve(
+        &self,
+        Parameters(params): Parameters<SkillEvolveParams>,
+    ) -> Result<String, String> {
+        handle_skill_evolve(self, params).await
+    }
+
     #[tool(description = "View audit log of proxy tool calls through the Hub.")]
     async fn tachi_audit_log(
         &self,
@@ -947,6 +1095,220 @@ impl MemoryServer {
         Parameters(params): Parameters<HubDisconnectParams>,
     ) -> Result<String, String> {
         handle_hub_disconnect(self, params).await
+    }
+
+    #[tool(
+        description = "Initialize a project-scoped Tachi memory DB under the current or target git repository."
+    )]
+    async fn tachi_init_project_db(
+        &self,
+        Parameters(params): Parameters<InitProjectDbParams>,
+    ) -> Result<String, String> {
+        handle_tachi_init_project_db(self, params).await
+    }
+
+    // ─── Agent Profile ───────────────────────────────────────────────────────
+
+    #[tool(
+        description = "Register this agent session with an identity profile. Enables per-agent memory scoping, tool filtering, and rate limit customization."
+    )]
+    async fn agent_register(
+        &self,
+        Parameters(params): Parameters<AgentRegisterParams>,
+    ) -> Result<String, String> {
+        let profile = AgentProfile {
+            agent_id: params.agent_id.clone(),
+            display_name: params
+                .display_name
+                .unwrap_or_else(|| params.agent_id.clone()),
+            capabilities: params.capabilities,
+            tool_filter: params.tool_filter,
+            rate_limit_rpm: params.rate_limit_rpm,
+            rate_limit_burst: params.rate_limit_burst,
+            registered_at: Utc::now().to_rfc3339(),
+        };
+
+        let response = serde_json::to_string(&serde_json::json!({
+            "status": "registered",
+            "agent_id": profile.agent_id,
+            "display_name": profile.display_name,
+            "capabilities": profile.capabilities,
+            "tool_filter": profile.tool_filter,
+            "rate_limit_rpm": profile.rate_limit_rpm,
+            "rate_limit_burst": profile.rate_limit_burst,
+            "registered_at": profile.registered_at,
+        }))
+        .map_err(|e| format!("serialize: {e}"))?;
+
+        let mut guard = self
+            .agent_profile
+            .write()
+            .unwrap_or_else(|e| e.into_inner());
+        *guard = Some(profile);
+
+        Ok(response)
+    }
+
+    #[tool(
+        description = "Return the current agent profile for this session, or null if no agent has registered."
+    )]
+    async fn agent_whoami(
+        &self,
+        Parameters(_params): Parameters<AgentWhoamiParams>,
+    ) -> Result<String, String> {
+        let guard = self
+            .agent_profile
+            .read()
+            .unwrap_or_else(|e| e.into_inner());
+        match guard.as_ref() {
+            Some(profile) => serde_json::to_string(&profile).map_err(|e| format!("serialize: {e}")),
+            None => Ok(r#"{"status":"unregistered","message":"No agent profile set. Call agent_register to identify this session."}"#.to_string()),
+        }
+    }
+
+    // ─── Cross-Agent Handoff ─────────────────────────────────────────────────
+
+    #[tool(
+        description = "Leave a handoff memo for the next agent session. Contains session summary, next steps, and optional context."
+    )]
+    async fn handoff_leave(
+        &self,
+        Parameters(params): Parameters<HandoffLeaveParams>,
+    ) -> Result<String, String> {
+        let from_agent = {
+            let guard = self
+                .agent_profile
+                .read()
+                .unwrap_or_else(|e| e.into_inner());
+            guard
+                .as_ref()
+                .map(|p| p.agent_id.clone())
+                .unwrap_or_else(|| "anonymous".to_string())
+        };
+
+        let memo = HandoffMemo {
+            id: uuid::Uuid::new_v4().to_string(),
+            from_agent: from_agent.clone(),
+            target_agent: params.target_agent,
+            summary: params.summary,
+            next_steps: params.next_steps,
+            context: params.context,
+            created_at: Utc::now().to_rfc3339(),
+            acknowledged: false,
+        };
+
+        let memo_id = memo.id.clone();
+        let mut memos = self
+            .handoff_memos
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+
+        // Also persist to memory for cross-restart durability
+        let memo_json = serde_json::to_string(&memo).map_err(|e| format!("serialize: {e}"))?;
+        let entry = MemoryEntry {
+            id: format!("handoff:{}", memo_id),
+            text: format!(
+                "[Handoff from {}] {}\n\nNext steps:\n{}",
+                from_agent,
+                memo.summary,
+                memo.next_steps
+                    .iter()
+                    .enumerate()
+                    .map(|(i, s)| format!("{}. {}", i + 1, s))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            ),
+            category: "handoff".to_string(),
+            importance: 0.9,
+            summary: format!("Handoff from {}", from_agent),
+            path: "/handoff".to_string(),
+            timestamp: chrono::Utc::now().to_rfc3339(),
+            topic: "agent-handoff".to_string(),
+            keywords: vec!["handoff".to_string(), from_agent.clone()],
+            persons: vec![],
+            entities: vec![from_agent.clone()],
+            location: String::new(),
+            source: "extraction".to_string(),
+            scope: "general".to_string(),
+            archived: false,
+            access_count: 0,
+            last_access: None,
+            revision: 1,
+            vector: None,
+            metadata: serde_json::json!({"handoff_memo_id": memo_id}),
+        };
+        let _ = self.with_global_store(|store| {
+            store.upsert(&entry).map_err(|e| format!("{e}"))
+        });
+
+        memos.push(memo);
+
+        // Keep only last 50 memos
+        if memos.len() > 50 {
+            let drain_count = memos.len() - 50;
+            memos.drain(..drain_count);
+        }
+
+        serde_json::to_string(&json!({
+            "status": "memo_left",
+            "memo_id": memo_id,
+            "from_agent": from_agent,
+            "memo": memo_json,
+        }))
+        .map_err(|e| format!("serialize: {e}"))
+    }
+
+    #[tool(
+        description = "Check for pending handoff memos from previous agent sessions. Call this at the start of a new session."
+    )]
+    async fn handoff_check(
+        &self,
+        Parameters(params): Parameters<HandoffCheckParams>,
+    ) -> Result<String, String> {
+        let mut memos = self
+            .handoff_memos
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+
+        let matching: Vec<&HandoffMemo> = memos
+            .iter()
+            .filter(|m| {
+                if m.acknowledged {
+                    return false;
+                }
+                match (&params.agent_id, &m.target_agent) {
+                    (_, None) => true, // Memo for any agent
+                    (Some(my_id), Some(target)) => my_id == target,
+                    (None, _) => true, // No filter, return all
+                }
+            })
+            .collect();
+
+        let result = serde_json::to_string(&json!({
+            "pending_memos": matching.len(),
+            "memos": matching,
+        }))
+        .map_err(|e| format!("serialize: {e}"))?;
+
+        // Mark as acknowledged if requested
+        if params.acknowledge {
+            let agent_filter = params.agent_id.as_deref();
+            for memo in memos.iter_mut() {
+                if memo.acknowledged {
+                    continue;
+                }
+                let matches = match (&agent_filter, &memo.target_agent) {
+                    (_, None) => true,
+                    (Some(my_id), Some(target)) => *my_id == *target,
+                    (None, _) => true,
+                };
+                if matches {
+                    memo.acknowledged = true;
+                }
+            }
+        }
+
+        Ok(result)
     }
 
     // ─── Ghost Whispers (Inter-Agent Pub/Sub) ────────────────────────────────
@@ -1171,7 +1533,20 @@ impl MemoryServer {
 impl MemoryServer {
     /// Atomically check if connection exists and create if not.
     /// Prevents TOCTOU race where two concurrent calls both spawn a child.
+    #[allow(dead_code)]
     async fn ensure_child_connected(&self, server_name: &str) -> Result<(), rmcp::ErrorData> {
+        self.ensure_child_connected_with_context(&format!("mcp:{server_name}"), None)
+            .await
+    }
+
+    async fn ensure_child_connected_with_context(
+        &self,
+        resolved_capability_id: &str,
+        requested_capability_id: Option<&str>,
+    ) -> Result<(), rmcp::ErrorData> {
+        let server_name = resolved_capability_id
+            .strip_prefix("mcp:")
+            .unwrap_or(resolved_capability_id);
         // Check under lock
         {
             let conns = self.pool.connections.lock().unwrap();
@@ -1195,14 +1570,29 @@ impl MemoryServer {
                 return Ok(());
             }
         }
-        self.connect_child(server_name).await
+        self.connect_child_with_context(resolved_capability_id, requested_capability_id)
+            .await
     }
 
+    #[allow(dead_code)]
     async fn connect_child(&self, server_name: &str) -> Result<(), rmcp::ErrorData> {
-        let server_id = format!("mcp:{}", server_name);
+        self.connect_child_with_context(&format!("mcp:{server_name}"), None)
+            .await
+    }
+
+    async fn connect_child_with_context(
+        &self,
+        resolved_capability_id: &str,
+        requested_capability_id: Option<&str>,
+    ) -> Result<(), rmcp::ErrorData> {
+        let server_id = resolved_capability_id.to_string();
+        let server_name = resolved_capability_id
+            .strip_prefix("mcp:")
+            .unwrap_or(resolved_capability_id);
 
         let cap = self.get_capability(&server_id)?;
-        let sandbox_policy = self.get_sandbox_policy_for_capability(&server_id);
+        let (sandbox_policy, policy_source) =
+            self.get_effective_sandbox_policy(requested_capability_id, &server_id);
         if sandbox_policy.is_none() {
             self.record_sandbox_exec_audit(
                 &server_id,
@@ -1214,6 +1604,7 @@ impl MemoryServer {
                 Some("policy_missing"),
                 &json!({
                     "server_name": server_name,
+                    "requested_capability_id": requested_capability_id,
                 }),
             );
             return Err(rmcp::ErrorData::invalid_params(
@@ -1240,6 +1631,8 @@ impl MemoryServer {
                 Some("policy_disabled"),
                 &json!({
                     "server_name": server_name,
+                    "requested_capability_id": requested_capability_id,
+                    "policy_source": if policy_source.is_empty() { None::<String> } else { Some(policy_source.clone()) },
                 }),
             );
             return Err(rmcp::ErrorData::invalid_params(
@@ -1261,6 +1654,7 @@ impl MemoryServer {
                 Some("capability_not_callable"),
                 &json!({
                     "server_name": server_name,
+                    "requested_capability_id": requested_capability_id,
                     "enabled": cap.enabled,
                     "review_status": cap.review_status,
                     "health_status": cap.health_status,
@@ -1280,7 +1674,7 @@ impl MemoryServer {
         let startup_timeout_ms = def["startup_timeout_ms"].as_u64().unwrap_or(30_000);
         let startup_timeout = Duration::from_millis(startup_timeout_ms.max(1));
         let client = self
-            .connect_mcp_service(&server_id, &def, startup_timeout)
+            .connect_mcp_service(&server_id, requested_capability_id, &def, startup_timeout)
             .await
             .map_err(|e| rmcp::ErrorData::internal_error(e, None))?;
 
@@ -1300,8 +1694,27 @@ impl MemoryServer {
         tool_name: &str,
         arguments: Option<serde_json::Map<String, serde_json::Value>>,
     ) -> Result<rmcp::model::CallToolResult, rmcp::ErrorData> {
+        self.proxy_call_capability_internal(
+            &format!("mcp:{server_name}"),
+            None,
+            tool_name,
+            arguments,
+        )
+        .await
+    }
+
+    async fn proxy_call_capability_internal(
+        &self,
+        resolved_capability_id: &str,
+        requested_capability_id: Option<&str>,
+        tool_name: &str,
+        arguments: Option<serde_json::Map<String, serde_json::Value>>,
+    ) -> Result<rmcp::model::CallToolResult, rmcp::ErrorData> {
         // 0. Look up capability for deny-list and timeout config
-        let server_id = format!("mcp:{}", server_name);
+        let server_id = resolved_capability_id.to_string();
+        let server_name = resolved_capability_id
+            .strip_prefix("mcp:")
+            .unwrap_or(resolved_capability_id);
         let args_hash = stable_hash(&format!("{:?}", arguments));
         let audit_reject = |error_kind: &str| {
             let timestamp = Utc::now().to_rfc3339();
@@ -1347,7 +1760,8 @@ impl MemoryServer {
         }
         let cap_def: serde_json::Value = serde_json::from_str(&cap.definition)
             .map_err(|e| rmcp::ErrorData::internal_error(format!("bad definition: {e}"), None))?;
-        let sandbox_policy = self.get_sandbox_policy_for_capability(&server_id);
+        let (sandbox_policy, policy_source) =
+            self.get_effective_sandbox_policy(requested_capability_id, &server_id);
         if sandbox_policy.is_none() {
             audit_reject("policy_missing");
             self.record_sandbox_exec_audit(
@@ -1360,6 +1774,7 @@ impl MemoryServer {
                 Some("policy_missing"),
                 &json!({
                     "server_name": server_name,
+                    "requested_capability_id": requested_capability_id,
                 }),
             );
             return Err(rmcp::ErrorData::invalid_params(
@@ -1387,6 +1802,8 @@ impl MemoryServer {
                     Some("policy_disabled"),
                     &json!({
                         "server_name": server_name,
+                        "requested_capability_id": requested_capability_id,
+                        "policy_source": if policy_source.is_empty() { None::<String> } else { Some(policy_source.clone()) },
                     }),
                 );
                 return Err(rmcp::ErrorData::invalid_params(
@@ -1414,6 +1831,7 @@ impl MemoryServer {
                     Some("permission_allow_denied"),
                     &json!({
                         "server_name": server_name,
+                        "requested_capability_id": requested_capability_id,
                     }),
                 );
                 return Err(rmcp::ErrorData::invalid_params(
@@ -1440,6 +1858,7 @@ impl MemoryServer {
                     Some("permission_deny_blocked"),
                     &json!({
                         "server_name": server_name,
+                        "requested_capability_id": requested_capability_id,
                     }),
                 );
                 return Err(rmcp::ErrorData::invalid_params(
@@ -1470,6 +1889,7 @@ impl MemoryServer {
                                 Some("circuit_open"),
                                 &json!({
                                     "server_name": server_name,
+                                    "requested_capability_id": requested_capability_id,
                                 }),
                             );
                             return Err(rmcp::ErrorData::internal_error(
@@ -1515,7 +1935,8 @@ impl MemoryServer {
             .map_err(|_| rmcp::ErrorData::internal_error("semaphore closed", None))?;
 
         // 4. Ensure connection exists (atomic check-and-connect to avoid TOCTOU race)
-        self.ensure_child_connected(server_name).await?;
+        self.ensure_child_connected_with_context(&server_id, requested_capability_id)
+            .await?;
 
         // 5. Get peer and call tool with timeout
         let mut call_params = rmcp::model::CallToolRequestParams::new(tool_name.to_string());
@@ -1615,6 +2036,8 @@ impl MemoryServer {
             sandbox_error_kind,
             &json!({
                 "server_name": server_name,
+                "requested_capability_id": requested_capability_id,
+                "policy_source": if policy_source.is_empty() { None::<String> } else { Some(policy_source) },
                 "timeout_ms": timeout_ms,
             }),
         );

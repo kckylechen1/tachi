@@ -10,6 +10,7 @@ mod schema;
 mod sqlite_vec;
 mod state;
 mod stats_gc;
+mod virtual_capability;
 
 pub use agent_state::{get_agent_known_revisions, update_agent_known_state};
 pub use audit::{audit_log_insert, audit_log_list};
@@ -43,6 +44,7 @@ pub use state::{
     count_derived_by_source, get_state, list_derived_by_source, save_derived, set_state,
 };
 pub use stats_gc::{gc_tables, stats};
+pub use virtual_capability::{vc_list_bindings, vc_upsert_binding};
 
 #[cfg(test)]
 pub(crate) use common::now_utc_iso;

@@ -168,6 +168,12 @@ Tachi 亦化身为 OpenClaw 气海之元婴法宝。
 - **⏰ 自动扫尘（后台垃圾回收）**：每隔六个时辰，暗卫司自行巡视各大卯册，将过期日志、陈年旧事清却。可置 `MEMORY_GC_INTERVAL_SECS` 调节时辰，完全无需掌师亲临。
 - **🕸️ 因果网结（图谱操作）**：可用 `add_edge` 新结因果缘线，以 `get_edges` 查探千丝网络。支持因果、时序、实体三种羁绊，各带元数据与权重。
 - **🔗 缘线自织（自动链接）**：`save_memory` 每录新识，便自行侦查天下哪家与之共享同一实体，暗中编织因果线（异步无阻）。默认开启，置 `auto_link=false` 可禁。
+- **👤 灵核身令（Agent Profile）**：各路灵核入阵时可呈报名帖（`agent_register`），注明名号、所长、法器许可（glob 匹配）。另设 `agent_whoami` 供查验当前道号。一令一境，互不串扰。
+- **🤝 跨界交接（Handoff 令牌）**：灵核甲临退之际，以 `handoff_leave` 留下交接令牌（任务摘要、后续要务、目标灵核、附加情境），灵核乙入场时以 `handoff_check` 接领。令牌兼存内存与持久记忆（`category="handoff"`），跨重启亦不失。
+- **⚡ 关隘限速（Rate Limiter）**：每会话设滑窗限速（RPM）与重复探测（同术同参 60 秒内连发超阈则断）。默认 RPM 不限、重复阈值 8。可由 `RATE_LIMIT_RPM`、`RATE_LIMIT_BURST` 设定，或经 `agent_register` 逐灵核覆写。
+- **📤 仙诀外运（Skill Export）**：`hub_export_skills` 一键将万宝楼中仙诀输出为各派格式：Claude（SKILL.md + 符链）、OpenClaw（插件清单）、Cursor（.mdc 规则）、通用（原始卷轴）。支持可见性筛选、指定输出与清理旧物。
+- **🧬 仙诀进化（Skill Evolve）**：`skill_evolve` 以大模型之智审视当前仙诀、用户反馈与历史成败，自动炼化改良版本。可创版本号新诀（`skill:name/vN`），支持自动激活与试运行。
+- **🔮 虚灵法契（Virtual Capability）**：于万宝楼之上再筑一层抽象——虚灵法契（`vc:*`）。可绑定多路实体灵枢，依优先级择优调度，版本锁定，沙盒策略一处设定、各路继承。
 
 ---
 

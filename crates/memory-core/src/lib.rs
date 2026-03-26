@@ -12,7 +12,7 @@ pub mod search;
 pub mod types;
 
 pub use error::MemoryError;
-pub use hub::HubCapability;
+pub use hub::{HubCapability, VirtualCapabilityBinding};
 pub use noise::{is_noise_text, should_skip_query};
 pub use scorer::HybridWeights;
 pub use search::{hybrid_search, SearchOptions};
@@ -426,6 +426,19 @@ impl MemoryStore {
     /// Delete a hub capability.
     pub fn hub_delete(&self, id: &str) -> Result<bool, MemoryError> {
         db::hub_delete(&self.conn, id)
+    }
+
+    /// Upsert one binding from virtual capability to concrete capability.
+    pub fn vc_upsert_binding(&self, binding: &VirtualCapabilityBinding) -> Result<(), MemoryError> {
+        db::vc_upsert_binding(&self.conn, binding)
+    }
+
+    /// List bindings for a virtual capability.
+    pub fn vc_list_bindings(
+        &self,
+        vc_id: &str,
+    ) -> Result<Vec<VirtualCapabilityBinding>, MemoryError> {
+        db::vc_list_bindings(&self.conn, vc_id)
     }
 
     // ─── Audit Log Operations ────────────────────────────────────────────────

@@ -144,6 +144,22 @@ pub fn init_schema(conn: &Connection) -> Result<(), MemoryError> {
         );
         CREATE INDEX IF NOT EXISTS idx_hub_route_target ON hub_version_routes(active_capability_id);
 
+        CREATE TABLE IF NOT EXISTS virtual_capability_bindings (
+            vc_id         TEXT NOT NULL,
+            capability_id TEXT NOT NULL,
+            priority      INTEGER NOT NULL DEFAULT 100,
+            version_pin   INTEGER,
+            enabled       INTEGER NOT NULL DEFAULT 1,
+            metadata      TEXT NOT NULL DEFAULT '{}',
+            created_at    TEXT NOT NULL DEFAULT '',
+            updated_at    TEXT NOT NULL DEFAULT '',
+            PRIMARY KEY (vc_id, capability_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_vc_binding_capability
+            ON virtual_capability_bindings(capability_id);
+        CREATE INDEX IF NOT EXISTS idx_vc_binding_priority
+            ON virtual_capability_bindings(vc_id, priority ASC, capability_id ASC);
+
         -- Audit log for proxy tool calls
         CREATE TABLE IF NOT EXISTS audit_log (
             id          INTEGER PRIMARY KEY AUTOINCREMENT,

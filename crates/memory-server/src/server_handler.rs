@@ -102,6 +102,19 @@ impl ServerHandler for MemoryServer {
         async move {
             let name = params.name.as_ref();
 
+            // ─── Rate Limiter: throttle and loop detection ───────────────
+            {
+                let args_hash = params
+                    .arguments
+                    .as_ref()
+                    .map(|a| stable_hash(&serde_json::to_string(a).unwrap_or_default()))
+                    .unwrap_or_default();
+                // Each MemoryServer clone corresponds to one MCP session
+                // (StreamableHttpService creates one clone per session), so
+                // "default" as session_id is correct for per-session limiting.
+                self.check_rate_limit(name, &args_hash, "default")?;
+            }
+
             // ─── Phantom Tools: cache invalidation on write ops ──────────
             if CACHE_INVALIDATING_TOOLS.contains(&name) {
                 if let Ok(mut cache) = self.tool_cache.lock() {

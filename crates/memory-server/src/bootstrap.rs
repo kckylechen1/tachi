@@ -450,14 +450,14 @@ async fn tokio_main(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 interval.tick().await;
                 eprintln!("[gc] Running scheduled garbage collection...");
                 match gc_server
-                    .with_global_store(|store| store.gc_tables().map_err(|e| format!("{}", e)))
+                    .with_global_store(|store: &mut MemoryStore| store.gc_tables().map_err(|e| format!("{}", e)))
                 {
                     Ok(result) => eprintln!("[gc] Global DB: {}", result),
                     Err(e) => eprintln!("[gc] Global DB error: {}", e),
                 }
-                if gc_server.project_db_path.is_some() {
+                if gc_server.has_project_db() {
                     match gc_server
-                        .with_project_store(|store| store.gc_tables().map_err(|e| format!("{}", e)))
+                        .with_project_store(|store: &mut MemoryStore| store.gc_tables().map_err(|e| format!("{}", e)))
                     {
                         Ok(result) => eprintln!("[gc] Project DB: {}", result),
                         Err(e) => eprintln!("[gc] Project DB error: {}", e),
@@ -536,7 +536,7 @@ async fn tokio_main(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         if let Err(e) = server.with_global_store(load_proxy_tools) {
             eprintln!("[startup] failed loading global MCP proxy cache: {e}");
         }
-        if server.project_db_path.is_some() {
+        if server.has_project_db() {
             if let Err(e) = server.with_project_store(load_proxy_tools) {
                 eprintln!("[startup] failed loading project MCP proxy cache: {e}");
             }
@@ -562,7 +562,7 @@ async fn tokio_main(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         if let Err(e) = server.with_global_store(load_skill_tools) {
             eprintln!("[startup] failed loading global skill tools: {e}");
         }
-        if server.project_db_path.is_some() {
+        if server.has_project_db() {
             if let Err(e) = server.with_project_store(load_skill_tools) {
                 eprintln!("[startup] failed loading project skill tools: {e}");
             }
