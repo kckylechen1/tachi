@@ -2093,22 +2093,17 @@ pub fn list_sandbox_policies(
     enabled_only: bool,
     limit: usize,
 ) -> Result<Vec<serde_json::Value>, MemoryError> {
-    let sql = if enabled_only {
+    let mut sql = String::from(
         "SELECT capability_id, runtime_type, env_allowlist, fs_read_roots, fs_write_roots,
                 cwd_roots, max_startup_ms, max_tool_ms, max_concurrency, enabled, created_at, updated_at
-         FROM sandbox_policies
-         WHERE enabled = 1
-         ORDER BY capability_id ASC
-         LIMIT ?1"
-    } else {
-        "SELECT capability_id, runtime_type, env_allowlist, fs_read_roots, fs_write_roots,
-                cwd_roots, max_startup_ms, max_tool_ms, max_concurrency, enabled, created_at, updated_at
-         FROM sandbox_policies
-         ORDER BY capability_id ASC
-         LIMIT ?1"
-    };
+         FROM sandbox_policies",
+    );
+    if enabled_only {
+        sql.push_str(" WHERE enabled = 1");
+    }
+    sql.push_str(" ORDER BY capability_id ASC LIMIT ?1");
 
-    let mut stmt = conn.prepare(sql)?;
+    let mut stmt = conn.prepare(&sql)?;
     let rows = stmt.query_map(params![limit as i64], |row| {
         let env_allowlist: String = row.get(2)?;
         let fs_read_roots: String = row.get(3)?;
