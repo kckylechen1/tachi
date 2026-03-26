@@ -4,12 +4,13 @@ import { t } from '../utils/i18n.js';
 import { colors } from '../utils/ui.js';
 import { getMcpServers, toggleMcpServer, removeMcpServer, type McpServer } from '../utils/mcp.js';
 import { McpAddForm } from './McpAddForm.js';
+import { McpToolsDiscovery } from './McpToolsDiscovery.js';
 
 interface McpManagerProps {
   onBack: () => void;
 }
 
-type ViewMode = 'list' | 'add';
+type ViewMode = 'list' | 'add' | 'discover';
 
 export function McpManager({ onBack }: McpManagerProps) {
   const [servers, setServers] = useState<McpServer[]>([]);
@@ -48,6 +49,7 @@ export function McpManager({ onBack }: McpManagerProps) {
   const menuItems = [
     { id: 'toggle', label: 'Enable/Disable', action: handleToggle },
     { id: 'remove', label: 'Remove Server', action: handleRemove },
+    { id: 'discover', label: 'Discover Tools', action: () => setViewMode('discover') },
     { id: 'add', label: t('mcp.add'), action: () => setViewMode('add') },
     { id: 'back', label: t('daemon.back'), action: onBack },
   ];
@@ -67,6 +69,8 @@ export function McpManager({ onBack }: McpManagerProps) {
       handleToggle();
     } else if (input === 'd') {
       handleRemove();
+    } else if (input === 't') {
+      setViewMode('discover');
     } else if (input === 'a') {
       setViewMode('add');
     } else if (input === 'q' || key.escape) {
@@ -80,6 +84,16 @@ export function McpManager({ onBack }: McpManagerProps) {
         onBack={() => {
           setViewMode('list');
           refreshServers();
+        }}
+      />
+    );
+  }
+
+  if (viewMode === 'discover') {
+    return (
+      <McpToolsDiscovery
+        onBack={() => {
+          setViewMode('list');
         }}
       />
     );
@@ -116,6 +130,7 @@ export function McpManager({ onBack }: McpManagerProps) {
           <Text dimColor>Commands:</Text>
           <Text dimColor>  e - Enable/Disable selected</Text>
           <Text dimColor>  d - Delete selected</Text>
+          <Text dimColor>  t - Discover tools</Text>
           <Text dimColor>  a - Add new server</Text>
           <Text dimColor>  q - Back</Text>
         </Box>
