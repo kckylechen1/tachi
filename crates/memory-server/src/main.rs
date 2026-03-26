@@ -241,6 +241,7 @@ const DEFAULT_MCP_DISCOVERY_TIMEOUT_MS: u64 = 10_000;
 /// Tools whose results can be cached (read-only, no side effects)
 const CACHEABLE_TOOLS: &[&str] = &[
     "search_memory",
+    "cyberbrain_search",
     "find_similar_memory",
     "get_memory",
     "list_memories",
@@ -255,15 +256,20 @@ const CACHEABLE_TOOLS: &[&str] = &[
 /// Tools that invalidate the cache (write operations)
 const CACHE_INVALIDATING_TOOLS: &[&str] = &[
     "save_memory",
+    "cyberbrain_write",
     "extract_facts",
     "ingest_event",
     "set_state",
     "hub_register",
     "hub_review",
+    "section9_review",
     "hub_set_active_version",
     "hub_feedback",
     "sandbox_set_rule",
     "sandbox_set_policy",
+    "shell_set_policy",
+    "ghost_reflect",
+    "ghost_promote",
 ];
 
 struct CachedResult {
@@ -644,9 +650,29 @@ impl MemoryServer {
     }
 
     #[tool(
+        description = "Ghost-in-the-Shell style alias for save_memory. Write memory into cyberbrain."
+    )]
+    async fn cyberbrain_write(
+        &self,
+        Parameters(params): Parameters<SaveMemoryParams>,
+    ) -> Result<String, String> {
+        handle_save_memory(self, params).await
+    }
+
+    #[tool(
         description = "Search memory entries using hybrid search (vector + FTS + symbolic). Returns ranked results with scores."
     )]
     async fn search_memory(
+        &self,
+        Parameters(params): Parameters<SearchMemoryParams>,
+    ) -> Result<String, String> {
+        handle_search_memory(self, params).await
+    }
+
+    #[tool(
+        description = "Ghost-in-the-Shell style alias for search_memory. Query memories from cyberbrain."
+    )]
+    async fn cyberbrain_search(
         &self,
         Parameters(params): Parameters<SearchMemoryParams>,
     ) -> Result<String, String> {
@@ -721,6 +747,16 @@ impl MemoryServer {
 
     #[tool(description = "Set governance review status for a Hub capability.")]
     async fn hub_review(
+        &self,
+        Parameters(params): Parameters<HubReviewParams>,
+    ) -> Result<String, String> {
+        handle_hub_review(self, params).await
+    }
+
+    #[tool(
+        description = "Ghost-in-the-Shell style alias for hub_review (Section 9 governance review)."
+    )]
+    async fn section9_review(
         &self,
         Parameters(params): Parameters<HubReviewParams>,
     ) -> Result<String, String> {
@@ -884,6 +920,16 @@ impl MemoryServer {
     }
 
     #[tool(
+        description = "Ghost-in-the-Shell style alias for tachi_audit_log (Section 9 audit view)."
+    )]
+    async fn section9_audit_log(
+        &self,
+        Parameters(params): Parameters<AuditLogParams>,
+    ) -> Result<String, String> {
+        handle_tachi_audit_log(self, params).await
+    }
+
+    #[tool(
         description = "Call a tool on a registered MCP server through the Hub using the shared connection pool."
     )]
     async fn hub_call(
@@ -916,6 +962,16 @@ impl MemoryServer {
     }
 
     #[tool(
+        description = "Ghost-in-the-Shell style alias for ghost_publish. Send a ghost whisper to a topic."
+    )]
+    async fn ghost_whisper(
+        &self,
+        Parameters(params): Parameters<GhostPublishParams>,
+    ) -> Result<String, String> {
+        handle_ghost_publish(self, params).await
+    }
+
+    #[tool(
         description = "Subscribe to Ghost Whispers topics and get new messages since last poll. Advances the cursor so the same messages are not returned again."
     )]
     async fn ghost_subscribe(
@@ -926,9 +982,26 @@ impl MemoryServer {
     }
 
     #[tool(
+        description = "Ghost-in-the-Shell style alias for ghost_subscribe. Listen for new whispers."
+    )]
+    async fn ghost_listen(
+        &self,
+        Parameters(params): Parameters<GhostSubscribeParams>,
+    ) -> Result<String, String> {
+        handle_ghost_subscribe(self, params).await
+    }
+
+    #[tool(
         description = "List active Ghost Whispers topics with message counts and last message time."
     )]
     async fn ghost_topics(&self) -> Result<String, String> {
+        handle_ghost_topics(self).await
+    }
+
+    #[tool(
+        description = "Ghost-in-the-Shell style alias for ghost_topics. List active whisper channels."
+    )]
+    async fn ghost_channels(&self) -> Result<String, String> {
         handle_ghost_topics(self).await
     }
 
@@ -1028,8 +1101,28 @@ impl MemoryServer {
         handle_sandbox_set_policy(self, params).await
     }
 
+    #[tool(
+        description = "Ghost-in-the-Shell style alias for sandbox_set_policy. Configure shell execution policy."
+    )]
+    async fn shell_set_policy(
+        &self,
+        Parameters(params): Parameters<SandboxSetPolicyParams>,
+    ) -> Result<String, String> {
+        handle_sandbox_set_policy(self, params).await
+    }
+
     #[tool(description = "Get runtime sandbox policy for a capability.")]
     async fn sandbox_get_policy(
+        &self,
+        Parameters(params): Parameters<SandboxGetPolicyParams>,
+    ) -> Result<String, String> {
+        handle_sandbox_get_policy(self, params).await
+    }
+
+    #[tool(
+        description = "Ghost-in-the-Shell style alias for sandbox_get_policy. Read shell execution policy."
+    )]
+    async fn shell_get_policy(
         &self,
         Parameters(params): Parameters<SandboxGetPolicyParams>,
     ) -> Result<String, String> {
@@ -1045,9 +1138,29 @@ impl MemoryServer {
     }
 
     #[tool(
+        description = "Ghost-in-the-Shell style alias for sandbox_list_policies. List shell policies."
+    )]
+    async fn shell_list_policies(
+        &self,
+        Parameters(params): Parameters<SandboxListPoliciesParams>,
+    ) -> Result<String, String> {
+        handle_sandbox_list_policies(self, params).await
+    }
+
+    #[tool(
         description = "List sandbox execution audit rows (policy decisions, startup, runtime outcomes)."
     )]
     async fn sandbox_exec_audit(
+        &self,
+        Parameters(params): Parameters<SandboxExecAuditParams>,
+    ) -> Result<String, String> {
+        handle_sandbox_exec_audit(self, params).await
+    }
+
+    #[tool(
+        description = "Ghost-in-the-Shell style alias for sandbox_exec_audit. Inspect shell execution audit."
+    )]
+    async fn shell_exec_audit(
         &self,
         Parameters(params): Parameters<SandboxExecAuditParams>,
     ) -> Result<String, String> {
