@@ -221,6 +221,42 @@ impl MemoryServer {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn record_sandbox_exec_audit(
+        &self,
+        capability_id: &str,
+        stage: &str,
+        decision: &str,
+        reason: Option<&str>,
+        duration_ms: u64,
+        tool_name: Option<&str>,
+        error_kind: Option<&str>,
+        metadata: &Value,
+    ) {
+        let timestamp = Utc::now().to_rfc3339();
+        let metadata_json = serde_json::to_string(metadata).unwrap_or_else(|_| "{}".to_string());
+        if let Err(e) = self.with_global_store(|store| {
+            store
+                .insert_sandbox_exec_audit(
+                    &timestamp,
+                    capability_id,
+                    stage,
+                    decision,
+                    reason,
+                    duration_ms,
+                    tool_name,
+                    error_kind,
+                    &metadata_json,
+                )
+                .map_err(|err| format!("sandbox exec audit insert: {err}"))
+        }) {
+            eprintln!(
+                "[sandbox] failed to record execution audit for '{}' (stage={}, decision={}): {}",
+                capability_id, stage, decision, e
+            );
+        }
+    }
+
     pub(super) fn register_skill_tool(&self, cap: &HubCapability) -> Result<String, String> {
         let _ = self.unregister_skill_tool(&cap.id);
         let (tool_name, tool) = build_skill_tool_from_cap(cap)?;

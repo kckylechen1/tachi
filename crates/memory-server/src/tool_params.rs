@@ -702,6 +702,11 @@ fn default_sandbox_policy_limit() -> usize {
 }
 
 #[allow(dead_code)]
+fn default_sandbox_exec_audit_limit() -> usize {
+    100
+}
+
+#[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub(super) struct SandboxSetPolicyParams {
     /// Capability ID (typically MCP capability id, e.g. "mcp:exa")
@@ -750,6 +755,23 @@ pub(super) struct SandboxListPoliciesParams {
     pub enabled_only: bool,
     /// Max rows returned
     #[serde(default = "default_sandbox_policy_limit")]
+    pub limit: usize,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub(super) struct SandboxExecAuditParams {
+    /// Optional capability filter (e.g. "mcp:exa")
+    #[serde(default)]
+    pub capability_id: Option<String>,
+    /// Optional stage filter (e.g. "preflight", "startup", "tool_call")
+    #[serde(default)]
+    pub stage: Option<String>,
+    /// Optional decision filter (e.g. "allowed", "denied", "timeout", "failed")
+    #[serde(default)]
+    pub decision: Option<String>,
+    /// Max rows returned.
+    #[serde(default = "default_sandbox_exec_audit_limit")]
     pub limit: usize,
 }
 

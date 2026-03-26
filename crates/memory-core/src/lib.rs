@@ -552,4 +552,43 @@ impl MemoryStore {
     ) -> Result<Vec<serde_json::Value>, MemoryError> {
         db::list_sandbox_policies(&self.conn, enabled_only, limit)
     }
+
+    /// Insert one sandbox execution audit row.
+    #[allow(clippy::too_many_arguments)]
+    pub fn insert_sandbox_exec_audit(
+        &self,
+        timestamp: &str,
+        capability_id: &str,
+        stage: &str,
+        decision: &str,
+        reason: Option<&str>,
+        duration_ms: u64,
+        tool_name: Option<&str>,
+        error_kind: Option<&str>,
+        metadata_json: &str,
+    ) -> Result<(), MemoryError> {
+        db::insert_sandbox_exec_audit(
+            &self.conn,
+            timestamp,
+            capability_id,
+            stage,
+            decision,
+            reason,
+            duration_ms,
+            tool_name,
+            error_kind,
+            metadata_json,
+        )
+    }
+
+    /// List sandbox execution audit rows.
+    pub fn list_sandbox_exec_audit(
+        &self,
+        capability_id: Option<&str>,
+        stage: Option<&str>,
+        decision: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<serde_json::Value>, MemoryError> {
+        db::list_sandbox_exec_audit(&self.conn, capability_id, stage, decision, limit)
+    }
 }

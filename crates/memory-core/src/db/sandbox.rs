@@ -211,25 +211,116 @@ pub fn list_sandbox_policies(
     sql.push_str(" ORDER BY capability_id ASC LIMIT ?1");
     let mut stmt = conn.prepare(&sql)?;
     let rows = stmt.query_map(params![limit as i64], |row| {
-            let env_allowlist: String = row.get(2)?;
-            let fs_read_roots: String = row.get(3)?;
-            let fs_write_roots: String = row.get(4)?;
-            let cwd_roots: String = row.get(5)?;
-            Ok(serde_json::json!({
-                "capability_id": row.get::<_, String>(0)?,
-                "runtime_type": row.get::<_, String>(1)?,
-                "env_allowlist": parse_json_text(&env_allowlist, serde_json::json!([])),
-                "fs_read_roots": parse_json_text(&fs_read_roots, serde_json::json!([])),
-                "fs_write_roots": parse_json_text(&fs_write_roots, serde_json::json!([])),
-                "cwd_roots": parse_json_text(&cwd_roots, serde_json::json!([])),
-                "max_startup_ms": row.get::<_, i64>(6)?,
-                "max_tool_ms": row.get::<_, i64>(7)?,
-                "max_concurrency": row.get::<_, i64>(8)?,
-                "enabled": row.get::<_, i32>(9)? != 0,
-                "created_at": row.get::<_, String>(10)?,
-                "updated_at": row.get::<_, String>(11)?,
-            }))
-        })?;
+        let env_allowlist: String = row.get(2)?;
+        let fs_read_roots: String = row.get(3)?;
+        let fs_write_roots: String = row.get(4)?;
+        let cwd_roots: String = row.get(5)?;
+        Ok(serde_json::json!({
+            "capability_id": row.get::<_, String>(0)?,
+            "runtime_type": row.get::<_, String>(1)?,
+            "env_allowlist": parse_json_text(&env_allowlist, serde_json::json!([])),
+            "fs_read_roots": parse_json_text(&fs_read_roots, serde_json::json!([])),
+            "fs_write_roots": parse_json_text(&fs_write_roots, serde_json::json!([])),
+            "cwd_roots": parse_json_text(&cwd_roots, serde_json::json!([])),
+            "max_startup_ms": row.get::<_, i64>(6)?,
+            "max_tool_ms": row.get::<_, i64>(7)?,
+            "max_concurrency": row.get::<_, i64>(8)?,
+            "enabled": row.get::<_, i32>(9)? != 0,
+            "created_at": row.get::<_, String>(10)?,
+            "updated_at": row.get::<_, String>(11)?,
+        }))
+    })?;
+
+    let mut out = Vec::new();
+    for r in rows {
+        out.push(r?);
+    }
+    Ok(out)
+}
+
+/// Insert one sandbox execution audit row.
+#[allow(clippy::too_many_arguments)]
+pub fn insert_sandbox_exec_audit(
+    conn: &Connection,
+    timestamp: &str,
+    capability_id: &str,
+    stage: &str,
+    decision: &str,
+    reason: Option<&str>,
+    duration_ms: u64,
+    tool_name: Option<&str>,
+    error_kind: Option<&str>,
+    metadata_json: &str,
+) -> Result<(), MemoryError> {
+    conn.execute(
+        "INSERT INTO sandbox_exec_audit
+         (timestamp, capability_id, stage, decision, reason, duration_ms, tool_name, error_kind, metadata, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?1)",
+        params![
+            timestamp,
+            capability_id,
+            stage,
+            decision,
+            reason,
+            duration_ms as i64,
+            tool_name,
+            error_kind,
+            metadata_json,
+        ],
+    )?;
+    Ok(())
+}
+
+/// List recent sandbox execution audit rows.
+pub fn list_sandbox_exec_audit(
+    conn: &Connection,
+    capability_id: Option<&str>,
+    stage: Option<&str>,
+    decision: Option<&str>,
+    limit: usize,
+) -> Result<Vec<serde_json::Value>, MemoryError> {
+    let mut sql = String::from(
+        "SELECT timestamp, capability_id, stage, decision, reason, duration_ms, tool_name, error_kind, metadata
+         FROM sandbox_exec_audit",
+    );
+    let mut clauses: Vec<&str> = Vec::new();
+    let mut params_buf: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
+    if let Some(v) = capability_id {
+        clauses.push("capability_id = ?");
+        params_buf.push(Box::new(v.to_string()));
+    }
+    if let Some(v) = stage {
+        clauses.push("stage = ?");
+        params_buf.push(Box::new(v.to_string()));
+    }
+    if let Some(v) = decision {
+        clauses.push("decision = ?");
+        params_buf.push(Box::new(v.to_string()));
+    }
+    if !clauses.is_empty() {
+        sql.push_str(" WHERE ");
+        sql.push_str(&clauses.join(" AND "));
+    }
+    sql.push_str(" ORDER BY timestamp DESC LIMIT ?");
+    params_buf.push(Box::new(limit as i64));
+
+    let mut stmt = conn.prepare(&sql)?;
+    let params_refs: Vec<&dyn rusqlite::types::ToSql> =
+        params_buf.iter().map(|v| v.as_ref()).collect();
+    let rows = stmt.query_map(params_refs.as_slice(), |row| {
+        let metadata_text: String = row.get(8)?;
+        Ok(serde_json::json!({
+            "timestamp": row.get::<_, String>(0)?,
+            "capability_id": row.get::<_, String>(1)?,
+            "stage": row.get::<_, String>(2)?,
+            "decision": row.get::<_, String>(3)?,
+            "reason": row.get::<_, Option<String>>(4)?,
+            "duration_ms": row.get::<_, i64>(5)?,
+            "tool_name": row.get::<_, Option<String>>(6)?,
+            "error_kind": row.get::<_, Option<String>>(7)?,
+            "metadata": parse_json_text(&metadata_text, serde_json::json!({})),
+        }))
+    })?;
 
     let mut out = Vec::new();
     for r in rows {

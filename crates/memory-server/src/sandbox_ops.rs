@@ -152,3 +152,25 @@ pub(super) async fn handle_sandbox_list_policies(
     }))
     .map_err(|e| format!("serialize: {e}"))
 }
+
+pub(super) async fn handle_sandbox_exec_audit(
+    server: &MemoryServer,
+    params: SandboxExecAuditParams,
+) -> Result<String, String> {
+    let rows = server.with_global_store(|store| {
+        store
+            .list_sandbox_exec_audit(
+                params.capability_id.as_deref(),
+                params.stage.as_deref(),
+                params.decision.as_deref(),
+                params.limit,
+            )
+            .map_err(|e| format!("Failed to list sandbox exec audit: {e}"))
+    })?;
+
+    serde_json::to_string(&json!({
+        "count": rows.len(),
+        "items": rows,
+    }))
+    .map_err(|e| format!("serialize: {e}"))
+}
