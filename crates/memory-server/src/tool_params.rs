@@ -1042,3 +1042,84 @@ pub(super) struct SkillEvolveParams {
     #[serde(default)]
     pub dry_run: bool,
 }
+
+// ─── Pack System Params ─────────────────────────────────────────────────────
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub(super) struct PackListParams {
+    /// If true, only return enabled packs (default: false)
+    #[serde(default)]
+    pub enabled_only: Option<bool>,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub(super) struct PackGetParams {
+    /// Pack identifier, e.g. "garrytan/gstack" or "obra/superpowers"
+    pub id: String,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub(super) struct PackRegisterParams {
+    /// Pack identifier, e.g. "garrytan/gstack"
+    pub id: String,
+
+    /// Display name
+    #[serde(default)]
+    pub name: Option<String>,
+
+    /// Source URI: "github:owner/repo", "local:/path/to/pack"
+    #[serde(default)]
+    pub source: Option<String>,
+
+    /// Version string (git tag, commit sha, or semver)
+    #[serde(default)]
+    pub version: Option<String>,
+
+    /// Short description
+    #[serde(default)]
+    pub description: Option<String>,
+
+    /// Local filesystem path where the pack is stored
+    #[serde(default)]
+    pub local_path: Option<String>,
+
+    /// Extra metadata (JSON object)
+    #[serde(default)]
+    pub metadata: Option<serde_json::Value>,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub(super) struct PackRemoveParams {
+    /// Pack identifier to remove
+    pub id: String,
+
+    /// If true (default), also delete projected files from agent directories
+    #[serde(default)]
+    pub clean_files: Option<bool>,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub(super) struct PackProjectParams {
+    /// Pack identifier to project
+    pub pack_id: String,
+
+    /// List of agent kinds to project to: "claude", "codex", "cursor", "gemini", "opencode", "antigravity", "trae", "kiro"
+    pub agents: Vec<String>,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub(super) struct ProjectionListParams {
+    /// Filter by agent kind (optional)
+    #[serde(default)]
+    pub agent: Option<String>,
+
+    /// Filter by pack ID (optional)
+    #[serde(default)]
+    pub pack_id: Option<String>,
+}
