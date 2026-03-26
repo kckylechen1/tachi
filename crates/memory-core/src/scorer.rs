@@ -3,9 +3,9 @@
 // Replaces JS `scorer.ts` (cosineSimilarity / hybridScore / rankHybrid)
 // and Python `store.py:hybrid_search` weighting logic.
 
-use std::collections::HashMap;
 use crate::types::{HybridScore, MemoryEntry};
 use chrono::Utc;
+use std::collections::HashMap;
 
 // Half-life for the decay function: 30 days (ACT-R inspired, from Nowledge Mem)
 const HALF_LIFE_DAYS: f64 = 30.0;
@@ -31,7 +31,11 @@ pub fn cosine_similarity(a: &[f32], b: &[f32]) -> f64 {
         mag_b += y * y;
     }
     let mag = mag_a.sqrt() * mag_b.sqrt();
-    if mag == 0.0 { 0.0 } else { (dot / mag).clamp(-1.0, 1.0) }
+    if mag == 0.0 {
+        0.0
+    } else {
+        (dot / mag).clamp(-1.0, 1.0)
+    }
 }
 
 /// Memory decay score (ACT-R Nowledge Mem formula).
@@ -67,11 +71,12 @@ pub fn base_level_activation(access_ages_secs: &[f64], d: f64) -> f64 {
     if access_ages_secs.is_empty() {
         return 0.0;
     }
-    let sum: f64 = access_ages_secs
-        .iter()
-        .map(|t| t.max(1.0).powf(-d))
-        .sum();
-    if sum > 0.0 { sum.ln() } else { 0.0 }
+    let sum: f64 = access_ages_secs.iter().map(|t| t.max(1.0).powf(-d)).sum();
+    if sum > 0.0 {
+        sum.ln()
+    } else {
+        0.0
+    }
 }
 
 /// Enhanced decay score using ACT-R base-level activation when access history is available.
@@ -114,7 +119,10 @@ pub fn local_pagerank(edges: &[crate::types::MemoryEdge], damping: f64) -> HashM
     let mut outgoing: HashMap<&str, Vec<&str>> = HashMap::new();
     for edge in edges {
         if edge.relation != "contradicts" {
-            outgoing.entry(edge.source_id.as_str()).or_default().push(edge.target_id.as_str());
+            outgoing
+                .entry(edge.source_id.as_str())
+                .or_default()
+                .push(edge.target_id.as_str());
         }
     }
 
@@ -123,7 +131,8 @@ pub fn local_pagerank(edges: &[crate::types::MemoryEdge], damping: f64) -> HashM
 
     // 5 iterations of PageRank
     for _ in 0..5 {
-        let mut new_scores: HashMap<String, f64> = nodes.iter().map(|id| (id.clone(), base)).collect();
+        let mut new_scores: HashMap<String, f64> =
+            nodes.iter().map(|id| (id.clone(), base)).collect();
 
         for (source, targets) in &outgoing {
             let source_score = scores.get(*source).copied().unwrap_or(0.0);
@@ -168,16 +177,16 @@ pub fn surprise_score(
 
     // Component 2: Contradiction signal — contradictions are inherently surprising
     let contradiction_surprise = if contradiction_count > 0 {
-        (1.0 + contradiction_count as f64).ln() / 3.0  // logarithmic scale, max ~0.7
+        (1.0 + contradiction_count as f64).ln() / 3.0 // logarithmic scale, max ~0.7
     } else {
         0.0
     };
 
     // Component 3: Topic novelty — rare topics are more surprising
     let topic_novelty = if total_same_topic <= 1 {
-        0.5  // New/unique topic
+        0.5 // New/unique topic
     } else {
-        1.0 / (total_same_topic as f64)  // Diminishing novelty
+        1.0 / (total_same_topic as f64) // Diminishing novelty
     };
 
     // Component 4: Low-access high-importance = overlooked valuable memory
@@ -260,10 +269,8 @@ pub fn hybrid_score(
             })
             .unwrap_or(0.0);
 
-        let final_score = weights.semantic * vs
-            + weights.fts * fs
-            + weights.symbolic * ss
-            + weights.decay * ds;
+        let final_score =
+            weights.semantic * vs + weights.fts * fs + weights.symbolic * ss + weights.decay * ds;
 
         out.insert(
             id.clone(),

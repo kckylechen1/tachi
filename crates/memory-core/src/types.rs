@@ -104,13 +104,27 @@ pub struct MemoryEntry {
 
 // ─── Defaults ────────────────────────────────────────────────────────────────
 
-fn default_path() -> String { "/".to_string() }
-fn default_importance() -> f64 { 0.7 }
-fn default_category() -> String { "fact".to_string() }
-fn default_source() -> String { "manual".to_string() }
-fn default_scope() -> String { "general".to_string() }
-fn default_revision() -> i64 { 1 }
-fn default_metadata() -> serde_json::Value { serde_json::Value::Object(Default::default()) }
+fn default_path() -> String {
+    "/".to_string()
+}
+fn default_importance() -> f64 {
+    0.7
+}
+fn default_category() -> String {
+    "fact".to_string()
+}
+fn default_source() -> String {
+    "manual".to_string()
+}
+fn default_scope() -> String {
+    "general".to_string()
+}
+fn default_revision() -> i64 {
+    1
+}
+fn default_metadata() -> serde_json::Value {
+    serde_json::Value::Object(Default::default())
+}
 
 // ─── Scoring Types ───────────────────────────────────────────────────────────
 
@@ -174,7 +188,9 @@ pub struct MemoryEdge {
     pub valid_to: Option<String>,
 }
 
-fn default_edge_weight() -> f64 { 1.0 }
+fn default_edge_weight() -> f64 {
+    1.0
+}
 
 /// Result of a graph expansion query
 #[derive(Debug, Clone, Serialize, Deserialize)]

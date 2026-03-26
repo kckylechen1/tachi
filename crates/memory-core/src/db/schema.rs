@@ -281,6 +281,36 @@ pub fn init_schema(conn: &Connection) -> Result<(), MemoryError> {
         CREATE INDEX IF NOT EXISTS idx_ghost_topics_last_message
             ON ghost_topics(last_message_time DESC);
 
+        -- Pack registry: installed skill packs from external sources
+        CREATE TABLE IF NOT EXISTS packs (
+            id             TEXT PRIMARY KEY,
+            name           TEXT NOT NULL,
+            source         TEXT NOT NULL DEFAULT '',
+            version        TEXT NOT NULL DEFAULT '',
+            description    TEXT NOT NULL DEFAULT '',
+            skill_count    INTEGER NOT NULL DEFAULT 0,
+            enabled        INTEGER NOT NULL DEFAULT 1,
+            local_path     TEXT NOT NULL DEFAULT '',
+            metadata       TEXT NOT NULL DEFAULT '{}',
+            installed_at   TEXT NOT NULL DEFAULT '',
+            updated_at     TEXT NOT NULL DEFAULT ''
+        );
+        CREATE INDEX IF NOT EXISTS idx_packs_enabled ON packs(enabled);
+        CREATE INDEX IF NOT EXISTS idx_packs_source ON packs(source);
+
+        -- Agent projections: tracks which packs are projected to which agents
+        CREATE TABLE IF NOT EXISTS agent_projections (
+            agent          TEXT NOT NULL,
+            pack_id        TEXT NOT NULL,
+            enabled        INTEGER NOT NULL DEFAULT 1,
+            projected_path TEXT NOT NULL DEFAULT '',
+            skill_count    INTEGER NOT NULL DEFAULT 0,
+            synced_at      TEXT NOT NULL DEFAULT '',
+            PRIMARY KEY (agent, pack_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_projections_pack ON agent_projections(pack_id);
+        CREATE INDEX IF NOT EXISTS idx_projections_agent ON agent_projections(agent);
+
         CREATE TABLE IF NOT EXISTS ghost_reflections (
             id          TEXT PRIMARY KEY,
             agent_id    TEXT NOT NULL,

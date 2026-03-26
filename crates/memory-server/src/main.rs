@@ -15,6 +15,7 @@ mod mcp_connection;
 mod mcp_proxy;
 mod memory_ops;
 mod memory_search_ops;
+mod pack_ops;
 mod pipeline_ops;
 mod project_db_ops;
 mod prompts;
@@ -61,6 +62,10 @@ use crate::memory_ops::{
 };
 use crate::memory_search_ops::{
     handle_find_similar_memory, handle_save_memory, handle_search_memory,
+};
+use crate::pack_ops::{
+    handle_pack_get, handle_pack_list, handle_pack_project, handle_pack_register,
+    handle_pack_remove, handle_projection_list,
 };
 use crate::pipeline_ops::{
     handle_extract_facts, handle_get_pipeline_status, handle_ingest_event, handle_sync_memories,
@@ -291,6 +296,9 @@ const CACHE_INVALIDATING_TOOLS: &[&str] = &[
     "tachi_init_project_db",
     "ghost_reflect",
     "ghost_promote",
+    "pack_register",
+    "pack_remove",
+    "pack_project",
 ];
 
 struct CachedResult {
@@ -1527,6 +1535,62 @@ impl MemoryServer {
         Parameters(params): Parameters<SandboxExecAuditParams>,
     ) -> Result<String, String> {
         handle_sandbox_exec_audit(self, params).await
+    }
+
+    // ─── Pack System Tools ────────────────────────────────────────────────────
+
+    #[tool(description = "List installed skill packs. Optionally filter by enabled_only.")]
+    async fn pack_list(
+        &self,
+        Parameters(params): Parameters<PackListParams>,
+    ) -> Result<String, String> {
+        handle_pack_list(self, params).await
+    }
+
+    #[tool(description = "Get details of a single installed skill pack by ID.")]
+    async fn pack_get(
+        &self,
+        Parameters(params): Parameters<PackGetParams>,
+    ) -> Result<String, String> {
+        handle_pack_get(self, params).await
+    }
+
+    #[tool(
+        description = "Register a skill pack after git clone / download. Records the pack in the registry with its metadata, source, and skill count."
+    )]
+    async fn pack_register(
+        &self,
+        Parameters(params): Parameters<PackRegisterParams>,
+    ) -> Result<String, String> {
+        handle_pack_register(self, params).await
+    }
+
+    #[tool(
+        description = "Remove a skill pack from the registry. Also cleans up projected files in agent directories unless clean_files=false."
+    )]
+    async fn pack_remove(
+        &self,
+        Parameters(params): Parameters<PackRemoveParams>,
+    ) -> Result<String, String> {
+        handle_pack_remove(self, params).await
+    }
+
+    #[tool(
+        description = "Project a pack's skills to one or more agents. Converts SKILL.md files to each agent's native format (e.g. .mdc rules for Cursor) and copies them to the agent's skill directory."
+    )]
+    async fn pack_project(
+        &self,
+        Parameters(params): Parameters<PackProjectParams>,
+    ) -> Result<String, String> {
+        handle_pack_project(self, params).await
+    }
+
+    #[tool(description = "List agent projections. Filter by agent and/or pack_id.")]
+    async fn projection_list(
+        &self,
+        Parameters(params): Parameters<ProjectionListParams>,
+    ) -> Result<String, String> {
+        handle_projection_list(self, params).await
     }
 }
 
