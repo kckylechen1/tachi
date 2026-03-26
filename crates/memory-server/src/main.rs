@@ -26,6 +26,8 @@ mod shared_defs;
 mod skill_chain_ops;
 mod tool_params;
 mod utils;
+mod vault_crypto;
+mod vault_ops;
 
 use crate::dlq_ops::{handle_dlq_list, handle_dlq_retry};
 use crate::ghost_ops::{
@@ -74,6 +76,12 @@ use crate::project_db_ops::handle_tachi_init_project_db;
 use crate::sandbox_ops::{
     handle_sandbox_check, handle_sandbox_exec_audit, handle_sandbox_get_policy,
     handle_sandbox_list_policies, handle_sandbox_set_policy, handle_sandbox_set_rule,
+};
+use crate::vault_ops::{
+    handle_vault_get, handle_vault_init, handle_vault_list, handle_vault_lock,
+    handle_vault_remove, handle_vault_set, handle_vault_setup_rotation, handle_vault_status,
+    handle_vault_unlock, VaultGetParams, VaultInitParams, VaultListParams, VaultRemoveParams,
+    VaultSetParams, VaultSetupRotationParams, VaultUnlockParams,
 };
 use crate::shared_defs::{
     categorize_error, slim_entry, slim_l0_rule, slim_search_result, DeadLetter, DLQ_MAX_ENTRIES,
@@ -386,6 +394,8 @@ struct MemoryServer {
     mcp_tool_exposure_mode: McpToolExposureMode,
     // ─── Enrichment Batcher ──────────────────────────────────────────────────
     enrich_tx: mpsc::UnboundedSender<EnrichmentItem>,
+    // ─── Vault (Encrypted Secret Storage) ────────────────────────────────────
+    vault_key: Arc<StdRwLock<Option<[u8; 32]>>>,
     // ─── Rate Limiter ────────────────────────────────────────────────────────
     /// Sliding window: tool call timestamps per session. Key = session_id (or "default").
     rate_limit_windows: Arc<StdMutex<HashMap<String, VecDeque<Instant>>>>,
@@ -544,6 +554,7 @@ impl MemoryServer {
             mcp_discovery_timeout: Duration::from_millis(mcp_discovery_timeout_ms),
             mcp_tool_exposure_mode,
             enrich_tx,
+            vault_key: Arc::new(StdRwLock::new(None)),
             rate_limit_windows: Arc::new(StdMutex::new(HashMap::new())),
             rate_limit_bursts: Arc::new(StdMutex::new(HashMap::new())),
             rate_limit_rpm: parse_env_u64("RATE_LIMIT_RPM").unwrap_or(DEFAULT_RATE_LIMIT_RPM),
@@ -1591,6 +1602,84 @@ impl MemoryServer {
         Parameters(params): Parameters<ProjectionListParams>,
     ) -> Result<String, String> {
         handle_projection_list(self, params).await
+    }
+
+    // ─── Vault (Encrypted Secret Storage) ────────────────────────────────────
+
+    #[tool(
+        description = "Initialize the vault with a master password. Can only be called once."
+    )]
+    async fn vault_init(
+        &self,
+        Parameters(params): Parameters<VaultInitParams>,
+    ) -> Result<String, String> {
+        handle_vault_init(self, params).await
+    }
+
+    #[tool(description = "Unlock the vault by verifying the master password.")]
+    async fn vault_unlock(
+        &self,
+        Parameters(params): Parameters<VaultUnlockParams>,
+    ) -> Result<String, String> {
+        handle_vault_unlock(self, params).await
+    }
+
+    #[tool(description = "Lock the vault (clear encryption key from memory).")]
+    async fn vault_lock(&self) -> Result<String, String> {
+        handle_vault_lock(self).await
+    }
+
+    #[tool(
+        description = "Store or update an encrypted secret in the vault. Supports multi-key rotation when name ends with _N."
+    )]
+    async fn vault_set(
+        &self,
+        Parameters(params): Parameters<VaultSetParams>,
+    ) -> Result<String, String> {
+        handle_vault_set(self, params).await
+    }
+
+    #[tool(
+        description = "Retrieve and decrypt a secret from the vault. Supports auto-rotation for multi-key secrets."
+    )]
+    async fn vault_get(
+        &self,
+        Parameters(params): Parameters<VaultGetParams>,
+    ) -> Result<String, String> {
+        handle_vault_get(self, params).await
+    }
+
+    #[tool(
+        description = "List all stored secrets (names and metadata only, not values). Does not require vault to be unlocked."
+    )]
+    async fn vault_list(
+        &self,
+        Parameters(params): Parameters<VaultListParams>,
+    ) -> Result<String, String> {
+        handle_vault_list(self, params).await
+    }
+
+    #[tool(description = "Delete a secret from the vault.")]
+    async fn vault_remove(
+        &self,
+        Parameters(params): Parameters<VaultRemoveParams>,
+    ) -> Result<String, String> {
+        handle_vault_remove(self, params).await
+    }
+
+    #[tool(description = "Check vault status (initialized, locked/unlocked, entry count).")]
+    async fn vault_status(&self) -> Result<String, String> {
+        handle_vault_status(self).await
+    }
+
+    #[tool(
+        description = "Setup key rotation for a prefix. Requires keys like PREFIX_1, PREFIX_2, etc. to already exist."
+    )]
+    async fn vault_setup_rotation(
+        &self,
+        Parameters(params): Parameters<VaultSetupRotationParams>,
+    ) -> Result<String, String> {
+        handle_vault_setup_rotation(self, params).await
     }
 }
 

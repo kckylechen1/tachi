@@ -1,0 +1,169 @@
+// vault_crypto.rs — encryption primitives for Tachi Vault
+
+use aes_gcm::{
+    aead::{Aead, KeyInit},
+    Aes256Gcm, Key, Nonce,
+};
+use argon2::{Algorithm, Argon2, Params, Version};
+use base64::{engine::general_purpose::STANDARD as B64, Engine};
+use rand::RngCore;
+
+const VERIFIER_PLAINTEXT: &[u8] = b"tachi-vault-ok";
+
+/// Derive a 32-byte encryption key from password + salt using Argon2id.
+pub fn derive_key(password: &str, salt: &[u8]) -> Result<[u8; 32], String> {
+    let params =
+        Params::new(65536, 3, 4, Some(32)).map_err(|e| format!("Argon2 params error: {e}"))?;
+    let argon2 = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
+    let mut key = [0u8; 32];
+    argon2
+        .hash_password_into(password.as_bytes(), salt, &mut key)
+        .map_err(|e| format!("Key derivation failed: {e}"))?;
+    Ok(key)
+}
+
+/// Generate a random 32-byte salt.
+pub fn generate_salt() -> [u8; 32] {
+    let mut salt = [0u8; 32];
+    rand::thread_rng().fill_bytes(&mut salt);
+    salt
+}
+
+/// Generate a random 12-byte nonce.
+pub fn generate_nonce() -> [u8; 12] {
+    let mut nonce = [0u8; 12];
+    rand::thread_rng().fill_bytes(&mut nonce);
+    nonce
+}
+
+/// Encrypt plaintext with AES-256-GCM. Returns (ciphertext_b64, nonce_b64).
+pub fn encrypt(key: &[u8; 32], plaintext: &[u8]) -> Result<(String, String), String> {
+    let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(key));
+    let nonce_bytes = generate_nonce();
+    let nonce = Nonce::from_slice(&nonce_bytes);
+    let ciphertext = cipher
+        .encrypt(nonce, plaintext)
+        .map_err(|e| format!("Encryption failed: {e}"))?;
+    Ok((B64.encode(&ciphertext), B64.encode(&nonce_bytes)))
+}
+
+/// Decrypt ciphertext (base64) with AES-256-GCM.
+pub fn decrypt(key: &[u8; 32], ciphertext_b64: &str, nonce_b64: &str) -> Result<Vec<u8>, String> {
+    let ciphertext = B64
+        .decode(ciphertext_b64)
+        .map_err(|e| format!("Bad ciphertext base64: {e}"))?;
+    let nonce_bytes = B64
+        .decode(nonce_b64)
+        .map_err(|e| format!("Bad nonce base64: {e}"))?;
+    let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(key));
+    let nonce = Nonce::from_slice(&nonce_bytes);
+    cipher
+        .decrypt(nonce, ciphertext.as_ref())
+        .map_err(|e| format!("Decryption failed: {e}"))
+}
+
+/// Create the verifier blob (encrypt known plaintext). Format: "nonce_b64:ciphertext_b64"
+pub fn create_verifier(key: &[u8; 32]) -> Result<String, String> {
+    let (ciphertext_b64, nonce_b64) = encrypt(key, VERIFIER_PLAINTEXT)?;
+    Ok(format!("{}:{}", nonce_b64, ciphertext_b64))
+}
+
+/// Verify a password by decrypting the verifier blob.
+pub fn verify_password(key: &[u8; 32], verifier: &str) -> Result<bool, String> {
+    let parts: Vec<&str> = verifier.splitn(2, ':').collect();
+    if parts.len() != 2 {
+        return Err("Invalid verifier format".into());
+    }
+    // Decrypt with the given key - if it fails, the key is wrong
+    match decrypt(key, parts[1], parts[0]) {
+        Ok(plaintext) => Ok(plaintext == VERIFIER_PLAINTEXT),
+        Err(_) => Ok(false),
+    }
+}
+
+/// Validate a secret name. Returns Ok(()) if valid, Err otherwise.
+pub fn validate_secret_name(name: &str) -> Result<(), String> {
+    if name.is_empty() {
+        return Err("Secret name cannot be empty".into());
+    }
+    if name.len() > 128 {
+        return Err("Secret name too long (max 128 chars)".into());
+    }
+    // Allow alphanumeric, underscore, dot, hyphen
+    if !name
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '.' || c == '-')
+    {
+        return Err(
+            "Secret name contains invalid characters (allowed: a-z, A-Z, 0-9, _, ., -)".into(),
+        );
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_derive_key_deterministic() {
+        let password = "test_password";
+        let salt = b"0123456789abcdef0123456789abcdef";
+        let key1 = derive_key(password, salt).unwrap();
+        let key2 = derive_key(password, salt).unwrap();
+        assert_eq!(key1, key2);
+    }
+
+    #[test]
+    fn test_derive_key_different_passwords() {
+        let salt = b"0123456789abcdef0123456789abcdef";
+        let key1 = derive_key("password1", salt).unwrap();
+        let key2 = derive_key("password2", salt).unwrap();
+        assert_ne!(key1, key2);
+    }
+
+    #[test]
+    fn test_encrypt_decrypt_roundtrip() {
+        let key = [0u8; 32];
+        let plaintext = b"Hello, World!";
+        let (ciphertext_b64, nonce_b64) = encrypt(&key, plaintext).unwrap();
+        let decrypted = decrypt(&key, &ciphertext_b64, &nonce_b64).unwrap();
+        assert_eq!(decrypted, plaintext);
+    }
+
+    #[test]
+    fn test_decrypt_wrong_key() {
+        let key1 = [0u8; 32];
+        let key2 = [1u8; 32];
+        let plaintext = b"Secret message";
+        let (ciphertext_b64, nonce_b64) = encrypt(&key1, plaintext).unwrap();
+        let result = decrypt(&key2, &ciphertext_b64, &nonce_b64);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_verifier_roundtrip() {
+        let key = [0u8; 32];
+        let verifier = create_verifier(&key).unwrap();
+        assert!(verify_password(&key, &verifier).unwrap());
+    }
+
+    #[test]
+    fn test_verifier_wrong_password() {
+        let key1 = [0u8; 32];
+        let key2 = [1u8; 32];
+        let verifier = create_verifier(&key1).unwrap();
+        assert!(!verify_password(&key2, &verifier).unwrap());
+    }
+
+    #[test]
+    fn test_validate_secret_name() {
+        assert!(validate_secret_name("VALID_KEY").is_ok());
+        assert!(validate_secret_name("valid.key").is_ok());
+        assert!(validate_secret_name("valid_key_123").is_ok());
+        assert!(validate_secret_name("invalid key").is_err());
+        assert!(validate_secret_name("invalid-key!").is_err());
+        assert!(validate_secret_name("").is_err());
+        assert!(validate_secret_name("a".repeat(129).as_str()).is_err());
+    }
+}

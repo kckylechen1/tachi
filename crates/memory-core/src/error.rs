@@ -15,4 +15,7 @@ pub enum MemoryError {
 
     #[error("Not found: {0}")]
     NotFound(String),
+
+    #[error("Vault error: {0}")]
+    Vault(String),
 }

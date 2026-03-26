@@ -323,6 +323,42 @@ pub fn init_schema(conn: &Connection) -> Result<(), MemoryError> {
             ON ghost_reflections(topic);
         CREATE INDEX IF NOT EXISTS idx_ghost_reflections_created
             ON ghost_reflections(created_at DESC);
+
+        -- Vault: encrypted secret storage configuration (exactly one row)
+        CREATE TABLE IF NOT EXISTS vault_config (
+            id              INTEGER PRIMARY KEY CHECK (id = 1),
+            salt            TEXT NOT NULL,
+            verifier        TEXT NOT NULL,
+            kdf_algorithm   TEXT NOT NULL DEFAULT 'argon2id',
+            kdf_params      TEXT NOT NULL DEFAULT '{"m":65536,"t":3,"p":4}',
+            cipher          TEXT NOT NULL DEFAULT 'aes-256-gcm',
+            created_at      TEXT NOT NULL DEFAULT '',
+            updated_at      TEXT NOT NULL DEFAULT ''
+        );
+
+        -- Vault: encrypted secret entries
+        CREATE TABLE IF NOT EXISTS vault_entries (
+            name            TEXT PRIMARY KEY,
+            encrypted_value TEXT NOT NULL,
+            nonce           TEXT NOT NULL,
+            secret_type     TEXT NOT NULL DEFAULT 'api_key',
+            description     TEXT NOT NULL DEFAULT '',
+            created_at      TEXT NOT NULL DEFAULT '',
+            updated_at      TEXT NOT NULL DEFAULT '',
+            accessed_at     TEXT NOT NULL DEFAULT '',
+            access_count    INTEGER NOT NULL DEFAULT 0
+        );
+        CREATE INDEX IF NOT EXISTS idx_vault_entries_type ON vault_entries(secret_type);
+
+        -- Vault: key rotation state for multi-key secrets
+        CREATE TABLE IF NOT EXISTS vault_key_rotations (
+            prefix              TEXT PRIMARY KEY,
+            current_index       INTEGER NOT NULL DEFAULT 1,
+            total_keys          INTEGER NOT NULL DEFAULT 0,
+            rotation_strategy   TEXT NOT NULL DEFAULT 'round_robin',
+            created_at          TEXT NOT NULL DEFAULT '',
+            updated_at          TEXT NOT NULL DEFAULT ''
+        );
     "#)?;
 
     // Forward-compatible migrations for existing DB files created before

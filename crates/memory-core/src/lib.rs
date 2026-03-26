@@ -11,6 +11,7 @@ pub mod pack;
 pub mod scorer;
 pub mod search;
 pub mod types;
+pub mod vault;
 
 pub use error::MemoryError;
 pub use hub::{HubCapability, VirtualCapabilityBinding};
@@ -21,6 +22,7 @@ pub use search::{hybrid_search, SearchOptions};
 pub use types::{
     GraphExpandResult, HybridScore, MemoryEdge, MemoryEntry, SearchResult, StatsResult,
 };
+pub use vault::{SecretType, VaultConfig, VaultEntry, VaultKeyRotation};
 
 use rusqlite::Connection;
 use std::time::Duration;
@@ -762,5 +764,88 @@ impl MemoryStore {
     /// Delete an agent projection.
     pub fn projection_delete(&self, agent: &str, pack_id: &str) -> Result<bool, MemoryError> {
         db::projection_delete(&self.conn, agent, pack_id)
+    }
+
+    // Vault operations
+
+    /// Get vault configuration (returns None if not initialized).
+    pub fn vault_get_config(&self) -> Result<Option<vault::VaultConfig>, MemoryError> {
+        db::vault_get_config(&self.conn)
+    }
+
+    /// Set vault configuration.
+    pub fn vault_set_config(&self, config: &vault::VaultConfig) -> Result<(), MemoryError> {
+        db::vault_set_config(&self.conn, config)
+    }
+
+    /// Store or update an encrypted secret.
+    pub fn vault_upsert_entry(&self, entry: &vault::VaultEntry) -> Result<(), MemoryError> {
+        db::vault_upsert_entry(&self.conn, entry)
+    }
+
+    /// Get a secret by name (returns None if not found).
+    pub fn vault_get_entry(&self, name: &str) -> Result<Option<vault::VaultEntry>, MemoryError> {
+        db::vault_get_entry(&self.conn, name)
+    }
+
+    /// List all secrets.
+    pub fn vault_list_entries(&self) -> Result<Vec<vault::VaultEntry>, MemoryError> {
+        db::vault_list_entries(&self.conn)
+    }
+
+    /// List secrets filtered by type.
+    pub fn vault_list_entries_by_type(
+        &self,
+        secret_type: &str,
+    ) -> Result<Vec<vault::VaultEntry>, MemoryError> {
+        db::vault_list_entries_by_type(&self.conn, secret_type)
+    }
+
+    /// Delete a secret by name. Returns true if deleted, false if not found.
+    pub fn vault_delete_entry(&self, name: &str) -> Result<bool, MemoryError> {
+        db::vault_delete_entry(&self.conn, name)
+    }
+
+    /// Touch a secret (update accessed_at and increment access_count).
+    pub fn vault_touch_entry(&self, name: &str) -> Result<(), MemoryError> {
+        db::vault_touch_entry(&self.conn, name)
+    }
+
+    /// Count total number of secrets.
+    pub fn vault_count_entries(&self) -> Result<i64, MemoryError> {
+        db::vault_count_entries(&self.conn)
+    }
+
+    /// Check if a secret exists.
+    pub fn vault_entry_exists(&self, name: &str) -> Result<bool, MemoryError> {
+        db::vault_entry_exists(&self.conn, name)
+    }
+
+    // Key rotation operations
+
+    /// Get rotation state for a prefix.
+    pub fn vault_get_rotation(
+        &self,
+        prefix: &str,
+    ) -> Result<Option<vault::VaultKeyRotation>, MemoryError> {
+        db::vault_get_rotation(&self.conn, prefix)
+    }
+
+    /// Set rotation state for a prefix.
+    pub fn vault_set_rotation(
+        &self,
+        rotation: &vault::VaultKeyRotation,
+    ) -> Result<(), MemoryError> {
+        db::vault_set_rotation(&self.conn, rotation)
+    }
+
+    /// List all rotation configurations.
+    pub fn vault_list_rotations(&self) -> Result<Vec<vault::VaultKeyRotation>, MemoryError> {
+        db::vault_list_rotations(&self.conn)
+    }
+
+    /// Delete rotation configuration for a prefix.
+    pub fn vault_delete_rotation(&self, prefix: &str) -> Result<bool, MemoryError> {
+        db::vault_delete_rotation(&self.conn, prefix)
     }
 }
