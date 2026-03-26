@@ -60,8 +60,8 @@ use crate::pipeline_ops::{
     handle_extract_facts, handle_get_pipeline_status, handle_ingest_event, handle_sync_memories,
 };
 use crate::sandbox_ops::{
-    handle_sandbox_check, handle_sandbox_get_policy, handle_sandbox_list_policies,
-    handle_sandbox_set_policy, handle_sandbox_set_rule,
+    handle_sandbox_check, handle_sandbox_exec_audit, handle_sandbox_get_policy,
+    handle_sandbox_list_policies, handle_sandbox_set_policy, handle_sandbox_set_rule,
 };
 use crate::shared_defs::{
     categorize_error, slim_entry, slim_l0_rule, slim_search_result, DeadLetter, DLQ_MAX_ENTRIES,
@@ -1025,6 +1025,16 @@ impl MemoryServer {
     ) -> Result<String, String> {
         handle_sandbox_list_policies(self, params).await
     }
+
+    #[tool(
+        description = "List sandbox execution audit rows (policy decisions, startup, runtime outcomes)."
+    )]
+    async fn sandbox_exec_audit(
+        &self,
+        Parameters(params): Parameters<SandboxExecAuditParams>,
+    ) -> Result<String, String> {
+        handle_sandbox_exec_audit(self, params).await
+    }
 }
 
 impl MemoryServer {
@@ -1061,7 +1071,70 @@ impl MemoryServer {
         let server_id = format!("mcp:{}", server_name);
 
         let cap = self.get_capability(&server_id)?;
+        let sandbox_policy = self.get_sandbox_policy_for_capability(&server_id);
+        if sandbox_policy.is_none() {
+            self.record_sandbox_exec_audit(
+                &server_id,
+                "preflight",
+                "denied",
+                Some("missing sandbox policy"),
+                0,
+                None,
+                Some("policy_missing"),
+                &json!({
+                    "server_name": server_name,
+                }),
+            );
+            return Err(rmcp::ErrorData::invalid_params(
+                format!(
+                    "Capability '{}' has no sandbox policy. Use sandbox_set_policy before connecting.",
+                    server_id
+                ),
+                None,
+            ));
+        }
+        if sandbox_policy
+            .as_ref()
+            .and_then(|v| v.get("enabled"))
+            .and_then(|v| v.as_bool())
+            == Some(false)
+        {
+            self.record_sandbox_exec_audit(
+                &server_id,
+                "preflight",
+                "denied",
+                Some("sandbox policy disabled capability"),
+                0,
+                None,
+                Some("policy_disabled"),
+                &json!({
+                    "server_name": server_name,
+                }),
+            );
+            return Err(rmcp::ErrorData::invalid_params(
+                format!(
+                    "Capability '{}' blocked by sandbox policy (enabled=false)",
+                    server_id
+                ),
+                None,
+            ));
+        }
         if !capability_callable(&cap) {
+            self.record_sandbox_exec_audit(
+                &server_id,
+                "preflight",
+                "denied",
+                Some("capability is not callable"),
+                0,
+                None,
+                Some("capability_not_callable"),
+                &json!({
+                    "server_name": server_name,
+                    "enabled": cap.enabled,
+                    "review_status": cap.review_status,
+                    "health_status": cap.health_status,
+                }),
+            );
             return Err(rmcp::ErrorData::invalid_params(
                 format!(
                     "MCP server '{}' is not callable (enabled={}, review_status={}, health_status={}).",
@@ -1098,8 +1171,41 @@ impl MemoryServer {
     ) -> Result<rmcp::model::CallToolResult, rmcp::ErrorData> {
         // 0. Look up capability for deny-list and timeout config
         let server_id = format!("mcp:{}", server_name);
+        let args_hash = stable_hash(&format!("{:?}", arguments));
+        let audit_reject = |error_kind: &str| {
+            let timestamp = Utc::now().to_rfc3339();
+            let _ = self.with_global_store(|store| {
+                store
+                    .audit_log_insert(
+                        &timestamp,
+                        server_name,
+                        tool_name,
+                        &args_hash,
+                        false,
+                        0,
+                        Some(error_kind),
+                    )
+                    .map_err(|e| format!("{e}"))
+            });
+        };
         let cap = self.get_capability(&server_id)?;
         if !capability_callable(&cap) {
+            audit_reject("capability_not_callable");
+            self.record_sandbox_exec_audit(
+                &server_id,
+                "preflight",
+                "denied",
+                Some("capability is not callable"),
+                0,
+                Some(tool_name),
+                Some("capability_not_callable"),
+                &json!({
+                    "server_name": server_name,
+                    "enabled": cap.enabled,
+                    "review_status": cap.review_status,
+                    "health_status": cap.health_status,
+                }),
+            );
             return Err(rmcp::ErrorData::invalid_params(
                 format!(
                     "MCP server '{}' is not callable (enabled={}, review_status={}, health_status={}).",
@@ -1111,12 +1217,47 @@ impl MemoryServer {
         let cap_def: serde_json::Value = serde_json::from_str(&cap.definition)
             .map_err(|e| rmcp::ErrorData::internal_error(format!("bad definition: {e}"), None))?;
         let sandbox_policy = self.get_sandbox_policy_for_capability(&server_id);
+        if sandbox_policy.is_none() {
+            audit_reject("policy_missing");
+            self.record_sandbox_exec_audit(
+                &server_id,
+                "preflight",
+                "denied",
+                Some("missing sandbox policy"),
+                0,
+                Some(tool_name),
+                Some("policy_missing"),
+                &json!({
+                    "server_name": server_name,
+                }),
+            );
+            return Err(rmcp::ErrorData::invalid_params(
+                format!(
+                    "Capability '{}' has no sandbox policy. Use sandbox_set_policy before calling.",
+                    server_id
+                ),
+                None,
+            ));
+        }
         if let Some(policy) = sandbox_policy.as_ref() {
             let policy_enabled = policy
                 .get("enabled")
                 .and_then(|v| v.as_bool())
                 .unwrap_or(true);
             if !policy_enabled {
+                audit_reject("policy_disabled");
+                self.record_sandbox_exec_audit(
+                    &server_id,
+                    "preflight",
+                    "denied",
+                    Some("sandbox policy disabled capability"),
+                    0,
+                    Some(tool_name),
+                    Some("policy_disabled"),
+                    &json!({
+                        "server_name": server_name,
+                    }),
+                );
                 return Err(rmcp::ErrorData::invalid_params(
                     format!(
                         "Capability '{}' blocked by sandbox policy (enabled=false)",
@@ -1131,6 +1272,19 @@ impl MemoryServer {
         if let Some(allow_list) = cap_def["permissions"]["allow"].as_array() {
             let allowed: HashSet<&str> = allow_list.iter().filter_map(|v| v.as_str()).collect();
             if !allowed.is_empty() && !allowed.contains(tool_name) {
+                audit_reject("permission_allow_denied");
+                self.record_sandbox_exec_audit(
+                    &server_id,
+                    "preflight",
+                    "denied",
+                    Some("tool not in permissions.allow"),
+                    0,
+                    Some(tool_name),
+                    Some("permission_allow_denied"),
+                    &json!({
+                        "server_name": server_name,
+                    }),
+                );
                 return Err(rmcp::ErrorData::invalid_params(
                     format!(
                         "Tool '{}' is not in permissions.allow for '{}'",
@@ -1144,6 +1298,19 @@ impl MemoryServer {
         if let Some(deny_list) = cap_def["permissions"]["deny"].as_array() {
             let denied: Vec<&str> = deny_list.iter().filter_map(|v| v.as_str()).collect();
             if denied.contains(&tool_name) {
+                audit_reject("permission_deny_blocked");
+                self.record_sandbox_exec_audit(
+                    &server_id,
+                    "preflight",
+                    "denied",
+                    Some("tool denied by permissions policy"),
+                    0,
+                    Some(tool_name),
+                    Some("permission_deny_blocked"),
+                    &json!({
+                        "server_name": server_name,
+                    }),
+                );
                 return Err(rmcp::ErrorData::invalid_params(
                     format!(
                         "Tool '{}' is denied by permissions policy on '{}'",
@@ -1161,6 +1328,19 @@ impl MemoryServer {
                 match state {
                     CircuitState::Open { until } => {
                         if Instant::now() < *until {
+                            audit_reject("circuit_open");
+                            self.record_sandbox_exec_audit(
+                                &server_id,
+                                "preflight",
+                                "denied",
+                                Some("circuit breaker open"),
+                                0,
+                                Some(tool_name),
+                                Some("circuit_open"),
+                                &json!({
+                                    "server_name": server_name,
+                                }),
+                            );
                             return Err(rmcp::ErrorData::internal_error(
                                 format!("Circuit open for '{}', retry after cooldown", server_name),
                                 None,
@@ -1241,31 +1421,39 @@ impl MemoryServer {
         let duration_ms = start.elapsed().as_millis() as u64;
 
         // 6. Process result, update circuit breaker, log audit
-        let final_result = match result {
+        let (final_result, sandbox_decision, sandbox_error_kind) = match result {
             Ok(Ok(r)) => {
                 // Tool returned successfully (even if r.is_error — that's a tool-level error, not transport)
                 let mut circuits = self.pool.circuits.lock().unwrap();
                 circuits.insert(server_name.to_string(), (CircuitState::Closed, 0));
-                Ok(r)
+                (Ok(r), "allowed", None)
             }
             Ok(Err(e)) => {
                 // Transport/protocol error — increment circuit breaker
                 self.record_circuit_failure(server_name);
-                Err(rmcp::ErrorData::internal_error(
-                    format!("proxy call failed: {e}"),
-                    None,
-                ))
+                (
+                    Err(rmcp::ErrorData::internal_error(
+                        format!("proxy call failed: {e}"),
+                        None,
+                    )),
+                    "failed",
+                    Some("proxy_failed"),
+                )
             }
             Err(_timeout) => {
                 // Timeout — increment circuit breaker
                 self.record_circuit_failure(server_name);
-                Err(rmcp::ErrorData::internal_error(
-                    format!(
-                        "Tool call '{}' on '{}' timed out after {}ms",
-                        tool_name, server_name, timeout_ms
-                    ),
-                    None,
-                ))
+                (
+                    Err(rmcp::ErrorData::internal_error(
+                        format!(
+                            "Tool call '{}' on '{}' timed out after {}ms",
+                            tool_name, server_name, timeout_ms
+                        ),
+                        None,
+                    )),
+                    "timeout",
+                    Some("tool_timeout"),
+                )
             }
         };
 
@@ -1273,7 +1461,6 @@ impl MemoryServer {
         let success = final_result.is_ok();
         let error_kind = final_result.as_ref().err().map(|e| format!("{e}"));
         let timestamp = Utc::now().to_rfc3339();
-        let args_hash = stable_hash(&format!("{:?}", arguments));
         let _ = self.with_global_store(|store| {
             store
                 .audit_log_insert(
@@ -1287,6 +1474,19 @@ impl MemoryServer {
                 )
                 .map_err(|e| format!("{e}"))
         });
+        self.record_sandbox_exec_audit(
+            &server_id,
+            "tool_call",
+            sandbox_decision,
+            error_kind.as_deref(),
+            duration_ms,
+            Some(tool_name),
+            sandbox_error_kind,
+            &json!({
+                "server_name": server_name,
+                "timeout_ms": timeout_ms,
+            }),
+        );
 
         final_result
     }

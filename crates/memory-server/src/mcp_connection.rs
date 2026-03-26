@@ -135,6 +135,7 @@ impl MemoryServer {
         def: &serde_json::Value,
         timeout: Duration,
     ) -> Result<rmcp::service::RunningService<rmcp::service::RoleClient, ()>, String> {
+        let connect_started = Instant::now();
         let policy = self.get_sandbox_policy_for_capability(capability_id);
         let policy_enabled = policy
             .as_ref()
@@ -142,6 +143,18 @@ impl MemoryServer {
             .and_then(|v| v.as_bool())
             .unwrap_or(true);
         if !policy_enabled {
+            self.record_sandbox_exec_audit(
+                capability_id,
+                "preflight",
+                "denied",
+                Some("sandbox policy disabled capability"),
+                0,
+                None,
+                Some("policy_disabled"),
+                &json!({
+                    "has_policy": policy.is_some(),
+                }),
+            );
             return Err(format!(
                 "Sandbox policy disabled capability '{}'",
                 capability_id
@@ -154,6 +167,18 @@ impl MemoryServer {
             .and_then(|v| v.as_str())
             .unwrap_or("process");
         if policy_runtime != "process" && policy_runtime != "wasm" {
+            self.record_sandbox_exec_audit(
+                capability_id,
+                "preflight",
+                "denied",
+                Some("invalid sandbox runtime_type"),
+                0,
+                None,
+                Some("invalid_runtime_type"),
+                &json!({
+                    "runtime_type": policy_runtime,
+                }),
+            );
             return Err(format!(
                 "Invalid sandbox runtime_type '{}' for '{}'",
                 policy_runtime, capability_id
@@ -185,6 +210,19 @@ impl MemoryServer {
         match transport_type {
             "stdio" => {
                 if policy_runtime == "wasm" {
+                    self.record_sandbox_exec_audit(
+                        capability_id,
+                        "preflight",
+                        "denied",
+                        Some("runtime_type=wasm incompatible with stdio transport"),
+                        0,
+                        None,
+                        Some("runtime_transport_mismatch"),
+                        &json!({
+                            "runtime_type": policy_runtime,
+                            "transport": transport_type,
+                        }),
+                    );
                     return Err(format!(
                         "Capability '{}' requires runtime_type=wasm but stdio transport was requested",
                         capability_id
@@ -211,29 +249,66 @@ impl MemoryServer {
                     }
                     None => Vec::new(),
                 };
-                let env_map = resolve_env_map(def)?;
-                let env_allowlist = parse_string_array(
-                    policy
-                        .as_ref()
-                        .and_then(|v| v.get("env_allowlist")),
-                );
+                let env_map = resolve_env_map(def).map_err(|e| {
+                    self.record_sandbox_exec_audit(
+                        capability_id,
+                        "preflight",
+                        "denied",
+                        Some("invalid env configuration"),
+                        0,
+                        None,
+                        Some("invalid_env"),
+                        &json!({
+                            "transport": transport_type,
+                            "error": e,
+                        }),
+                    );
+                    e
+                })?;
+                let env_allowlist =
+                    parse_string_array(policy.as_ref().and_then(|v| v.get("env_allowlist")));
                 let env_map = apply_env_allowlist(env_map, &env_allowlist);
 
-                let cwd_roots = parse_string_array(
-                    policy
-                        .as_ref()
-                        .and_then(|v| v.get("cwd_roots")),
-                );
+                let cwd_roots =
+                    parse_string_array(policy.as_ref().and_then(|v| v.get("cwd_roots")));
                 let cwd = def.get("cwd").and_then(|v| v.as_str());
                 if !cwd_roots.is_empty() {
                     let cwd_str = cwd.ok_or_else(|| {
-                        format!(
+                        let reason = format!(
                             "Sandbox policy for '{}' requires cwd within allowed roots, but definition has no cwd",
                             capability_id
-                        )
+                        );
+                        self.record_sandbox_exec_audit(
+                            capability_id,
+                            "preflight",
+                            "denied",
+                            Some("cwd required by policy but missing in definition"),
+                            0,
+                            None,
+                            Some("cwd_missing"),
+                            &json!({
+                                "transport": transport_type,
+                                "cwd_roots": cwd_roots,
+                            }),
+                        );
+                        reason
                     })?;
                     let cwd_path = normalize_path(cwd_str);
                     if !path_within_roots(&cwd_path, &cwd_roots) {
+                        self.record_sandbox_exec_audit(
+                            capability_id,
+                            "preflight",
+                            "denied",
+                            Some("cwd outside allowed roots"),
+                            0,
+                            None,
+                            Some("cwd_denied"),
+                            &json!({
+                                "transport": transport_type,
+                                "cwd": cwd_path.display().to_string(),
+                                "cwd_roots": cwd_roots,
+                            }),
+                        );
                         return Err(format!(
                             "Sandbox policy denied cwd '{}' for '{}'",
                             cwd_path.display(),
@@ -250,34 +325,169 @@ impl MemoryServer {
                     cmd.current_dir(normalize_path(cwd_str));
                 }
 
-                let transport = rmcp::transport::TokioChildProcess::new(cmd)
-                    .map_err(|e| format!("spawn failed: {e}"))?;
-                tokio::time::timeout(effective_timeout, rmcp::ServiceExt::serve((), transport))
-                    .await
-                    .map_err(|_| {
-                        format!(
+                let transport = rmcp::transport::TokioChildProcess::new(cmd).map_err(|e| {
+                    let reason = format!("spawn failed: {e}");
+                    self.record_sandbox_exec_audit(
+                        capability_id,
+                        "startup",
+                        "failed",
+                        Some("child process spawn failed"),
+                        connect_started.elapsed().as_millis() as u64,
+                        None,
+                        Some("spawn_failed"),
+                        &json!({
+                            "transport": transport_type,
+                            "error": reason,
+                        }),
+                    );
+                    reason
+                })?;
+
+                match tokio::time::timeout(
+                    effective_timeout,
+                    rmcp::ServiceExt::serve((), transport),
+                )
+                .await
+                {
+                    Ok(Ok(client)) => {
+                        self.record_sandbox_exec_audit(
+                            capability_id,
+                            "startup",
+                            "allowed",
+                            None,
+                            connect_started.elapsed().as_millis() as u64,
+                            None,
+                            None,
+                            &json!({
+                                "transport": transport_type,
+                                "policy_timeout_ms": effective_timeout.as_millis() as u64,
+                            }),
+                        );
+                        Ok(client)
+                    }
+                    Ok(Err(e)) => {
+                        let reason = format!("MCP handshake failed: {e}");
+                        self.record_sandbox_exec_audit(
+                            capability_id,
+                            "startup",
+                            "failed",
+                            Some("handshake failed"),
+                            connect_started.elapsed().as_millis() as u64,
+                            None,
+                            Some("handshake_failed"),
+                            &json!({
+                                "transport": transport_type,
+                                "error": reason,
+                            }),
+                        );
+                        Err(reason)
+                    }
+                    Err(_) => {
+                        let reason = format!(
                             "MCP handshake timed out after {}ms",
                             effective_timeout.as_millis()
-                        )
-                    })?
-                    .map_err(|e| format!("MCP handshake failed: {e}"))
+                        );
+                        self.record_sandbox_exec_audit(
+                            capability_id,
+                            "startup",
+                            "timeout",
+                            Some("handshake timeout"),
+                            connect_started.elapsed().as_millis() as u64,
+                            None,
+                            Some("startup_timeout"),
+                            &json!({
+                                "transport": transport_type,
+                                "effective_timeout_ms": effective_timeout.as_millis() as u64,
+                            }),
+                        );
+                        Err(reason)
+                    }
+                }
             }
             "sse" | "http" | "streamable-http" => {
                 let url = def["url"]
                     .as_str()
                     .ok_or_else(|| "missing url for SSE".to_string())?;
                 let transport = StreamableHttpClientTransport::from_uri(url);
-                tokio::time::timeout(effective_timeout, rmcp::ServiceExt::serve((), transport))
-                    .await
-                    .map_err(|_| {
-                        format!(
+                match tokio::time::timeout(
+                    effective_timeout,
+                    rmcp::ServiceExt::serve((), transport),
+                )
+                .await
+                {
+                    Ok(Ok(client)) => {
+                        self.record_sandbox_exec_audit(
+                            capability_id,
+                            "startup",
+                            "allowed",
+                            None,
+                            connect_started.elapsed().as_millis() as u64,
+                            None,
+                            None,
+                            &json!({
+                                "transport": transport_type,
+                                "url": url,
+                                "policy_timeout_ms": effective_timeout.as_millis() as u64,
+                            }),
+                        );
+                        Ok(client)
+                    }
+                    Ok(Err(e)) => {
+                        let reason = format!("SSE handshake failed: {e}");
+                        self.record_sandbox_exec_audit(
+                            capability_id,
+                            "startup",
+                            "failed",
+                            Some("remote transport handshake failed"),
+                            connect_started.elapsed().as_millis() as u64,
+                            None,
+                            Some("handshake_failed"),
+                            &json!({
+                                "transport": transport_type,
+                                "url": url,
+                                "error": reason,
+                            }),
+                        );
+                        Err(reason)
+                    }
+                    Err(_) => {
+                        let reason = format!(
                             "SSE handshake timed out after {}ms",
                             effective_timeout.as_millis()
-                        )
-                    })?
-                    .map_err(|e| format!("SSE handshake failed: {e}"))
+                        );
+                        self.record_sandbox_exec_audit(
+                            capability_id,
+                            "startup",
+                            "timeout",
+                            Some("remote transport handshake timeout"),
+                            connect_started.elapsed().as_millis() as u64,
+                            None,
+                            Some("startup_timeout"),
+                            &json!({
+                                "transport": transport_type,
+                                "url": url,
+                                "effective_timeout_ms": effective_timeout.as_millis() as u64,
+                            }),
+                        );
+                        Err(reason)
+                    }
+                }
             }
-            other => Err(format!("unsupported transport: {other}")),
+            other => {
+                self.record_sandbox_exec_audit(
+                    capability_id,
+                    "preflight",
+                    "denied",
+                    Some("unsupported transport"),
+                    0,
+                    None,
+                    Some("unsupported_transport"),
+                    &json!({
+                        "transport": other,
+                    }),
+                );
+                Err(format!("unsupported transport: {other}"))
+            }
         }
     }
 

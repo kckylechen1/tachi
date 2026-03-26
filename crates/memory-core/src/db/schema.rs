@@ -198,6 +198,23 @@ pub fn init_schema(conn: &Connection) -> Result<(), MemoryError> {
             updated_at       TEXT NOT NULL DEFAULT ''
         );
         CREATE INDEX IF NOT EXISTS idx_sandbox_policy_enabled ON sandbox_policies(enabled);
+
+        -- Sandbox execution audit for preflight/runtime decisions.
+        CREATE TABLE IF NOT EXISTS sandbox_exec_audit (
+            id             INTEGER PRIMARY KEY AUTOINCREMENT,
+            timestamp      TEXT NOT NULL,
+            capability_id  TEXT NOT NULL,
+            stage          TEXT NOT NULL DEFAULT 'preflight',
+            decision       TEXT NOT NULL,
+            reason         TEXT,
+            duration_ms    INTEGER NOT NULL DEFAULT 0,
+            tool_name      TEXT,
+            error_kind     TEXT,
+            metadata       TEXT NOT NULL DEFAULT '{}',
+            created_at     TEXT NOT NULL DEFAULT (STRFTIME('%Y-%m-%dT%H:%M:%fZ', 'now'))
+        );
+        CREATE INDEX IF NOT EXISTS idx_sandbox_exec_timestamp ON sandbox_exec_audit(timestamp DESC);
+        CREATE INDEX IF NOT EXISTS idx_sandbox_exec_capability ON sandbox_exec_audit(capability_id);
     "#)?;
 
     // Forward-compatible migrations for existing DB files created before
