@@ -1,11 +1,32 @@
 use super::*;
 
 impl MemoryServer {
+    fn open_read_store(db_path: &PathBuf, label: &str) -> Result<MemoryStore, String> {
+        let db_str = db_path.to_str().ok_or_else(|| {
+            format!(
+                "{} DB path contains invalid UTF-8: {}",
+                label,
+                db_path.display()
+            )
+        })?;
+        MemoryStore::open(db_str).map_err(|e| format!("open {label} read store: {e}"))
+    }
+
     pub(super) fn with_global_store<T>(
         &self,
         f: impl FnOnce(&mut MemoryStore) -> Result<T, String>,
     ) -> Result<T, String> {
+        let _gate = write_or_recover(&self.global_rw_gate, "global_rw_gate");
         let mut store = lock_or_recover(&self.global_store, "global_store");
+        f(&mut store)
+    }
+
+    pub(super) fn with_global_store_read<T>(
+        &self,
+        f: impl FnOnce(&mut MemoryStore) -> Result<T, String>,
+    ) -> Result<T, String> {
+        let _gate = read_or_recover(&self.global_rw_gate, "global_rw_gate");
+        let mut store = Self::open_read_store(self.global_db_path.as_ref(), "global")?;
         f(&mut store)
     }
 
@@ -17,7 +38,29 @@ impl MemoryServer {
             .project_store
             .as_ref()
             .ok_or_else(|| "No project database available (not in a git repository)".to_string())?;
+        let gate = self
+            .project_rw_gate
+            .as_ref()
+            .ok_or_else(|| "No project lock available".to_string())?;
+        let _gate = write_or_recover(gate, "project_rw_gate");
         let mut store = lock_or_recover(store_arc, "project_store");
+        f(&mut store)
+    }
+
+    pub(super) fn with_project_store_read<T>(
+        &self,
+        f: impl FnOnce(&mut MemoryStore) -> Result<T, String>,
+    ) -> Result<T, String> {
+        let db_path = self
+            .project_db_path
+            .as_ref()
+            .ok_or_else(|| "No project database available (not in a git repository)".to_string())?;
+        let gate = self
+            .project_rw_gate
+            .as_ref()
+            .ok_or_else(|| "No project lock available".to_string())?;
+        let _gate = read_or_recover(gate, "project_rw_gate");
+        let mut store = Self::open_read_store(db_path.as_ref(), "project")?;
         f(&mut store)
     }
 
@@ -49,7 +92,7 @@ impl MemoryServer {
         let mut found = None;
         if self.project_db_path.is_some() {
             found = self
-                .with_project_store(|store| {
+                .with_project_store_read(|store| {
                     store
                         .hub_get(cap_id)
                         .map_err(|e| format!("hub get project: {e}"))
@@ -58,7 +101,7 @@ impl MemoryServer {
         }
         if found.is_none() {
             found = self
-                .with_global_store(|store| {
+                .with_global_store_read(|store| {
                     store
                         .hub_get(cap_id)
                         .map_err(|e| format!("hub get global: {e}"))

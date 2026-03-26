@@ -114,7 +114,7 @@ pub(super) async fn handle_save_memory(
         tokio::spawn(async move {
             for entity in &auto_link_entities {
                 let query = entity.clone();
-                if let Ok(results) = auto_link_server.with_global_store(|store| {
+                if let Ok(results) = auto_link_server.with_global_store_read(|store| {
                     store
                         .search(
                             &query,
@@ -176,7 +176,7 @@ pub(super) async fn handle_search_memory(
 
     let global_opts = params.to_search_options(server.global_vec_available);
 
-    let global_results = server.with_global_store(|store| {
+    let global_results = server.with_global_store_read(|store| {
         store
             .search(&params.query, Some(global_opts))
             .map_err(|e| format!("Search failed in global DB: {}", e))
@@ -186,7 +186,7 @@ pub(super) async fn handle_search_memory(
     if server.project_db_path.is_some() {
         let project_opts = params.to_search_options(server.project_vec_available);
 
-        let project_results = server.with_project_store(|store| {
+        let project_results = server.with_project_store_read(|store| {
             store
                 .search(&params.query, Some(project_opts))
                 .map_err(|e| format!("Search failed in project DB: {}", e))
@@ -224,7 +224,7 @@ pub(super) async fn handle_search_memory(
             .collect();
 
         if server.project_db_path.is_some() {
-            let project_rules = server.with_project_store(|store| {
+            let project_rules = server.with_project_store_read(|store| {
                 Ok(store
                     .list_by_path("/behavior/global_rules", 50, false)
                     .unwrap_or_default())
@@ -240,7 +240,7 @@ pub(super) async fn handle_search_memory(
             }
         }
 
-        let global_rules = server.with_global_store(|store| {
+        let global_rules = server.with_global_store_read(|store| {
             Ok(store
                 .list_by_path("/behavior/global_rules", 50, false)
                 .unwrap_or_default())
@@ -294,7 +294,7 @@ pub(super) async fn handle_find_similar_memory(
         graph_relation_filter: None,
     };
 
-    let global_results = server.with_global_store(|store| {
+    let global_results = server.with_global_store_read(|store| {
         store
             .search("", Some(global_opts))
             .map_err(|e| format!("Vector search failed in global DB: {}", e))
@@ -316,7 +316,7 @@ pub(super) async fn handle_find_similar_memory(
             graph_relation_filter: None,
         };
 
-        let project_results = server.with_project_store(|store| {
+        let project_results = server.with_project_store_read(|store| {
             store
                 .search("", Some(project_opts))
                 .map_err(|e| format!("Vector search failed in project DB: {}", e))

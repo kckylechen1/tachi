@@ -197,6 +197,8 @@ impl SearchMemoryParams {
             graph_relation_filter: self.graph_relation_filter.clone(),
             vec_available,
             weights,
+            // Keep search path read-only so multiple search requests can run concurrently.
+            record_access: false,
             ..Default::default()
         }
     }
