@@ -39,6 +39,18 @@ pub(super) struct PostCardParams {
     /// Optional thread correlation ID
     #[serde(default)]
     pub thread_id: Option<String>,
+    /// Workspace or project identifier this card relates to
+    #[serde(default)]
+    pub workspace_id: Option<String>,
+    /// Project identifier (legacy alias for workspace_id)
+    #[serde(default)]
+    pub project_id: Option<String>,
+    /// Conversation/session ID that spawned this card
+    #[serde(default)]
+    pub conversation_id: Option<String>,
+    /// Agent session identifier (unique per agent instance)
+    #[serde(default)]
+    pub agent_session_id: Option<String>,
 }
 
 #[allow(dead_code)]
@@ -58,6 +70,12 @@ pub(super) struct CheckInboxParams {
     /// Maximum cards returned
     #[serde(default = "default_inbox_limit")]
     pub limit: usize,
+    /// Optional workspace filter — only return cards from this workspace
+    #[serde(default)]
+    pub workspace_id: Option<String>,
+    /// Optional conversation filter — only return cards from this conversation
+    #[serde(default)]
+    pub conversation_id: Option<String>,
 }
 
 #[allow(dead_code)]
@@ -98,10 +116,9 @@ pub(super) fn normalize_card_priority(value: &str) -> String {
 
 pub(super) fn normalize_card_type(value: &str) -> String {
     match value.trim().to_ascii_lowercase().as_str() {
-        "request" => "request".to_string(),
-        "report" => "report".to_string(),
-        "alert" => "alert".to_string(),
-        "handoff" => "handoff".to_string(),
+        "request" | "report" | "alert" | "handoff" | "ack" | "progress" | "result" => {
+            value.trim().to_ascii_lowercase()
+        }
         _ => default_card_type(),
     }
 }
@@ -208,6 +225,20 @@ pub(super) fn card_matches_inbox(
     }
     if let Some(since) = params.since.as_ref() {
         if entry.timestamp < *since {
+            return false;
+        }
+    }
+    if let Some(ref ws_filter) = params.workspace_id {
+        let card_ws = card_metadata_str(entry, "workspace_id")
+            .or_else(|| card_metadata_str(entry, "project_id"))
+            .unwrap_or_default();
+        if !card_ws.is_empty() && card_ws != *ws_filter {
+            return false;
+        }
+    }
+    if let Some(ref conv_filter) = params.conversation_id {
+        let card_conv = card_metadata_str(entry, "conversation_id").unwrap_or_default();
+        if !card_conv.is_empty() && card_conv != *conv_filter {
             return false;
         }
     }
@@ -365,6 +396,38 @@ pub(super) async fn handle_post_card(
     {
         metadata["thread_id"] = json!(thread_id);
     }
+    if let Some(workspace_id) = params
+        .workspace_id
+        .as_ref()
+        .map(|v| v.trim())
+        .filter(|v| !v.is_empty())
+    {
+        metadata["workspace_id"] = json!(workspace_id);
+    }
+    if let Some(project_id) = params
+        .project_id
+        .as_ref()
+        .map(|v| v.trim())
+        .filter(|v| !v.is_empty())
+    {
+        metadata["project_id"] = json!(project_id);
+    }
+    if let Some(conversation_id) = params
+        .conversation_id
+        .as_ref()
+        .map(|v| v.trim())
+        .filter(|v| !v.is_empty())
+    {
+        metadata["conversation_id"] = json!(conversation_id);
+    }
+    if let Some(agent_session_id) = params
+        .agent_session_id
+        .as_ref()
+        .map(|v| v.trim())
+        .filter(|v| !v.is_empty())
+    {
+        metadata["agent_session_id"] = json!(agent_session_id);
+    }
 
     let entry = MemoryEntry {
         id: card_id.clone(),
@@ -387,7 +450,7 @@ pub(super) async fn handle_post_card(
         ],
         location: String::new(),
         source: "agent".to_string(),
-        scope: "project".to_string(),
+        scope: "global".to_string(),
         archived: false,
         access_count: 0,
         last_access: None,
@@ -396,8 +459,7 @@ pub(super) async fn handle_post_card(
         metadata: metadata.clone(),
     };
 
-    let (target_db, warning) = server.resolve_write_scope("project");
-    server.with_store_for_scope(target_db, |store| {
+    server.with_global_store(|store| {
         store
             .upsert(&entry)
             .map_err(|e| format!("failed to save kanban card: {e}"))
@@ -405,13 +467,7 @@ pub(super) async fn handle_post_card(
 
     let classify_enabled = parse_env_bool("KANBAN_CLASSIFY_ENABLED").unwrap_or(false);
     if classify_enabled {
-        let db_path = match target_db {
-            DbScope::Global => server.global_db_path.clone(),
-            DbScope::Project => server
-                .project_db_path
-                .clone()
-                .unwrap_or_else(|| server.global_db_path.clone()),
-        };
+        let db_path = server.global_db_path.clone();
         let card_id_clone = card_id.clone();
         let body_clone = body.clone();
         let title_clone = title.clone();
@@ -438,11 +494,8 @@ pub(super) async fn handle_post_card(
     let mut resp = serde_json::Map::new();
     resp.insert("status".into(), json!("posted"));
     resp.insert("card_id".into(), json!(card_id));
-    resp.insert("db".into(), json!(target_db.as_str()));
+    resp.insert("db".into(), json!("global"));
     resp.insert("classification_enqueued".into(), json!(classify_enabled));
-    if let Some(w) = warning {
-        append_warning(&mut resp, w);
-    }
     serde_json::to_string(&serde_json::Value::Object(resp)).map_err(|e| format!("serialize: {e}"))
 }
 
@@ -456,52 +509,38 @@ pub(super) async fn handle_check_inbox(
     }
     let limit = params.limit.clamp(1, 1000);
 
-    let mut cards: Vec<(MemoryEntry, DbScope)> = Vec::new();
-    let global_cards = server.with_global_store(|store| {
+    let mut cards: Vec<MemoryEntry> = server.with_global_store(|store| {
         store
             .list_by_path(KANBAN_PATH_PREFIX, limit * 4, false)
-            .map_err(|e| format!("list global kanban cards failed: {e}"))
-    })?;
-    cards.extend(
-        global_cards
-            .into_iter()
-            .filter(|entry| card_matches_inbox(entry, &params, &agent_id))
-            .map(|entry| (entry, DbScope::Global)),
-    );
-
-    if server.project_db_path.is_some() {
-        let project_cards = server.with_project_store(|store| {
-            store
-                .list_by_path(KANBAN_PATH_PREFIX, limit * 4, false)
-                .map_err(|e| format!("list project kanban cards failed: {e}"))
-        })?;
-        cards.extend(
-            project_cards
-                .into_iter()
-                .filter(|entry| card_matches_inbox(entry, &params, &agent_id))
-                .map(|entry| (entry, DbScope::Project)),
-        );
-    }
+            .map_err(|e| format!("list kanban cards failed: {e}"))
+    })?
+    .into_iter()
+    .filter(|entry| card_matches_inbox(entry, &params, &agent_id))
+    .collect();
 
     cards.sort_by(|a, b| {
-        let pa = kanban_priority_rank(card_priority(&a.0).as_str());
-        let pb = kanban_priority_rank(card_priority(&b.0).as_str());
-        pa.cmp(&pb).then_with(|| b.0.timestamp.cmp(&a.0.timestamp))
+        let pa = kanban_priority_rank(card_priority(a).as_str());
+        let pb = kanban_priority_rank(card_priority(b).as_str());
+        pa.cmp(&pb).then_with(|| b.timestamp.cmp(&a.timestamp))
     });
     cards.truncate(limit);
 
     let payload: Vec<serde_json::Value> = cards
         .into_iter()
-        .map(|(entry, db)| {
+        .map(|entry| {
             json!({
                 "id": entry.id,
-                "db": db.as_str(),
+                "db": "global",
                 "from_agent": card_from_agent(&entry),
                 "to_agent": card_to_agent(&entry),
                 "status": card_status(&entry).unwrap_or_else(|| "open".to_string()),
                 "priority": card_priority(&entry),
                 "card_type": card_type(&entry),
                 "thread_id": card_metadata_str(&entry, "thread_id"),
+                "workspace_id": card_metadata_str(&entry, "workspace_id"),
+                "project_id": card_metadata_str(&entry, "project_id"),
+                "conversation_id": card_metadata_str(&entry, "conversation_id"),
+                "agent_session_id": card_metadata_str(&entry, "agent_session_id"),
                 "title": entry.summary,
                 "body": entry.text,
                 "path": entry.path,
@@ -529,29 +568,13 @@ pub(super) async fn handle_update_card(
         "new_status must be one of open|acknowledged|resolved|expired".to_string()
     })?;
 
-    let mut found: Option<(DbScope, MemoryEntry)> = None;
-    if server.project_db_path.is_some() {
-        if let Ok(Some(entry)) = server.with_project_store(|store| {
-            store
-                .get(&params.card_id)
-                .map_err(|e| format!("get project card failed: {e}"))
-        }) {
-            found = Some((DbScope::Project, entry));
-        }
-    }
-    if found.is_none() {
-        if let Some(entry) = server.with_global_store(|store| {
-            store
-                .get(&params.card_id)
-                .map_err(|e| format!("get global card failed: {e}"))
-        })? {
-            found = Some((DbScope::Global, entry));
-        }
-    }
-
-    let (target_db, mut entry) = found.ok_or_else(|| {
+    let mut entry = server.with_global_store(|store| {
+        store
+            .get(&params.card_id)
+            .map_err(|e| format!("get card failed: {e}"))
+    })?.ok_or_else(|| {
         format!(
-            "kanban card '{}' not found in project/global db",
+            "kanban card '{}' not found in global db",
             params.card_id
         )
     })?;
@@ -593,7 +616,7 @@ pub(super) async fn handle_update_card(
         );
     }
 
-    let updated = server.with_store_for_scope(target_db, |store| {
+    let updated = server.with_global_store(|store| {
         store
             .update_with_revision(
                 &entry.id,
@@ -616,7 +639,7 @@ pub(super) async fn handle_update_card(
 
     serde_json::to_string(&json!({
         "updated": true,
-        "db": target_db.as_str(),
+        "db": "global",
         "card_id": entry.id,
         "status": metadata["status"],
         "revision": entry.revision + 1,

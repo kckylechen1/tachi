@@ -821,6 +821,10 @@ async fn post_card_check_inbox_and_update_roundtrip() {
             priority: "high".to_string(),
             card_type: "request".to_string(),
             thread_id: Some("thread-42".to_string()),
+            workspace_id: None,
+            project_id: None,
+            conversation_id: None,
+            agent_session_id: None,
         }))
         .await
         .expect("post_card should succeed");
@@ -838,6 +842,8 @@ async fn post_card_check_inbox_and_update_roundtrip() {
             since: None,
             include_broadcast: true,
             limit: 20,
+            workspace_id: None,
+            conversation_id: None,
         }))
         .await
         .expect("check_inbox should succeed");
@@ -869,6 +875,8 @@ async fn post_card_check_inbox_and_update_roundtrip() {
             since: None,
             include_broadcast: true,
             limit: 20,
+            workspace_id: None,
+            conversation_id: None,
         }))
         .await
         .expect("check_inbox after update should succeed");
@@ -902,6 +910,10 @@ async fn check_inbox_respects_broadcast_toggle() {
             priority: "critical".to_string(),
             card_type: "alert".to_string(),
             thread_id: None,
+            workspace_id: None,
+            project_id: None,
+            conversation_id: None,
+            agent_session_id: None,
         }))
         .await
         .expect("post_card broadcast should succeed");
@@ -913,6 +925,8 @@ async fn check_inbox_respects_broadcast_toggle() {
             since: None,
             include_broadcast: false,
             limit: 10,
+            workspace_id: None,
+            conversation_id: None,
         }))
         .await
         .expect("check_inbox without broadcast should succeed");
@@ -927,6 +941,8 @@ async fn check_inbox_respects_broadcast_toggle() {
             since: None,
             include_broadcast: true,
             limit: 10,
+            workspace_id: None,
+            conversation_id: None,
         }))
         .await
         .expect("check_inbox with broadcast should succeed");
