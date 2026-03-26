@@ -5,11 +5,13 @@ mod ghost;
 mod graph;
 mod hub_db;
 mod memory_crud;
+mod pack_db;
 mod sandbox;
 mod schema;
 mod sqlite_vec;
 mod state;
 mod stats_gc;
+mod virtual_capability;
 
 pub use agent_state::{get_agent_known_revisions, update_agent_known_state};
 pub use audit::{audit_log_insert, audit_log_list};
@@ -33,6 +35,10 @@ pub use memory_crud::{
     list_by_path, mark_event_processed, record_access, release_event_claim, search_fts, search_vec,
     try_claim_event, update_enrichment_fields, update_with_revision, upsert,
 };
+pub use pack_db::{
+    pack_delete, pack_get, pack_list, pack_set_enabled, pack_upsert, projection_delete,
+    projection_list, projection_upsert,
+};
 pub use sandbox::{
     check_sandbox_access, get_sandbox_policy, insert_sandbox_exec_audit, list_sandbox_exec_audit,
     list_sandbox_policies, set_sandbox_policy, set_sandbox_rule,
@@ -43,6 +49,7 @@ pub use state::{
     count_derived_by_source, get_state, list_derived_by_source, save_derived, set_state,
 };
 pub use stats_gc::{gc_tables, stats};
+pub use virtual_capability::{vc_list_bindings, vc_upsert_binding};
 
 #[cfg(test)]
 pub(crate) use common::now_utc_iso;

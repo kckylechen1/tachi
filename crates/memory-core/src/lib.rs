@@ -7,13 +7,15 @@ pub mod db;
 pub mod error;
 pub mod hub;
 pub mod noise;
+pub mod pack;
 pub mod scorer;
 pub mod search;
 pub mod types;
 
 pub use error::MemoryError;
-pub use hub::HubCapability;
+pub use hub::{HubCapability, VirtualCapabilityBinding};
 pub use noise::{is_noise_text, should_skip_query};
+pub use pack::{AgentKind, AgentProjection, Pack};
 pub use scorer::HybridWeights;
 pub use search::{hybrid_search, SearchOptions};
 pub use types::{
@@ -428,6 +430,19 @@ impl MemoryStore {
         db::hub_delete(&self.conn, id)
     }
 
+    /// Upsert one binding from virtual capability to concrete capability.
+    pub fn vc_upsert_binding(&self, binding: &VirtualCapabilityBinding) -> Result<(), MemoryError> {
+        db::vc_upsert_binding(&self.conn, binding)
+    }
+
+    /// List bindings for a virtual capability.
+    pub fn vc_list_bindings(
+        &self,
+        vc_id: &str,
+    ) -> Result<Vec<VirtualCapabilityBinding>, MemoryError> {
+        db::vc_list_bindings(&self.conn, vc_id)
+    }
+
     // ─── Audit Log Operations ────────────────────────────────────────────────
 
     /// Insert an audit log entry.
@@ -701,5 +716,51 @@ impl MemoryStore {
         limit: usize,
     ) -> Result<Vec<serde_json::Value>, MemoryError> {
         db::list_sandbox_exec_audit(&self.conn, capability_id, stage, decision, limit)
+    }
+
+    // ─── Pack Operations ─────────────────────────────────────────────────────
+
+    /// Register or update a pack in the registry.
+    pub fn pack_register(&self, pack: &Pack) -> Result<(), MemoryError> {
+        db::pack_upsert(&self.conn, pack)
+    }
+
+    /// Get a pack by ID.
+    pub fn pack_get(&self, id: &str) -> Result<Option<Pack>, MemoryError> {
+        db::pack_get(&self.conn, id)
+    }
+
+    /// List all packs, optionally filtering by enabled status.
+    pub fn pack_list(&self, enabled_only: bool) -> Result<Vec<Pack>, MemoryError> {
+        db::pack_list(&self.conn, enabled_only)
+    }
+
+    /// Delete a pack by ID (also removes associated projections).
+    pub fn pack_delete(&self, id: &str) -> Result<bool, MemoryError> {
+        db::pack_delete(&self.conn, id)
+    }
+
+    /// Enable or disable a pack.
+    pub fn pack_set_enabled(&self, id: &str, enabled: bool) -> Result<bool, MemoryError> {
+        db::pack_set_enabled(&self.conn, id, enabled)
+    }
+
+    /// Upsert an agent projection record.
+    pub fn projection_upsert(&self, proj: &AgentProjection) -> Result<(), MemoryError> {
+        db::projection_upsert(&self.conn, proj)
+    }
+
+    /// List agent projections, optionally filtering by agent and/or pack_id.
+    pub fn projection_list(
+        &self,
+        agent: Option<&str>,
+        pack_id: Option<&str>,
+    ) -> Result<Vec<AgentProjection>, MemoryError> {
+        db::projection_list(&self.conn, agent, pack_id)
+    }
+
+    /// Delete an agent projection.
+    pub fn projection_delete(&self, agent: &str, pack_id: &str) -> Result<bool, MemoryError> {
+        db::projection_delete(&self.conn, agent, pack_id)
     }
 }

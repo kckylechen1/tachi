@@ -154,7 +154,7 @@ pub(super) async fn handle_search_memory(
     })?;
     combined_results.extend(global_results.into_iter().map(|r| (r, DbScope::Global)));
 
-    if server.project_db_path.is_some() {
+    if server.has_project_db() {
         let project_opts = params.to_search_options(server.project_vec_available);
 
         let project_results = server.with_project_store_read(|store| {
@@ -215,7 +215,7 @@ pub(super) async fn handle_search_memory(
             .map(|(r, _)| r.entry.id.clone())
             .collect();
 
-        if server.project_db_path.is_some() {
+        if server.has_project_db() {
             let project_rules = server.with_project_store_read(|store| {
                 Ok(store
                     .list_by_path("/behavior/global_rules", 50, false)
@@ -293,7 +293,7 @@ pub(super) async fn handle_find_similar_memory(
     })?;
     combined_results.extend(global_results.into_iter().map(|r| (r, DbScope::Global)));
 
-    if server.project_db_path.is_some() {
+    if server.has_project_db() {
         let project_opts = SearchOptions {
             candidates_per_channel: params.candidates_per_channel.max(params.top_k),
             top_k: params.top_k,

@@ -5,6 +5,65 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.11.0] - 2026-03-26
+
+### Added
+
+#### Wave 10 — Multi-Agent Orchestration Layer
+- **`agent_register` Tool**: Register an agent profile per-session with identity (`agent_id`, `display_name`), capabilities, tool allowlist (glob patterns), and per-agent rate limit overrides. Stored in-memory, scoped to the MCP session lifetime.
+- **`agent_whoami` Tool**: Return the current agent profile for this session, or a clear `"unregistered"` status if no profile is set.
+- **`handoff_leave` Tool**: Leave a structured handoff memo for the next agent session. Includes summary, next_steps list, optional target agent, and arbitrary context JSON. Persisted both in-memory (fast cross-session) and to the global memory store (cross-restart durability, `category="handoff"`, `importance=0.9`). Caps at 50 in-memory memos with LRU eviction.
+- **`handoff_check` Tool**: Check for pending handoff memos, filtered by target agent. Supports acknowledgment (marks memos as read). Designed to be called at the start of every new agent session.
+
+#### Wave 9 — Rate Limiter & Loop Detection
+- **Per-session rate limiter**: Sliding window RPM (requests per minute) enforcement per MCP session. Configurable via `RATE_LIMIT_RPM` env var (default: 0 = unlimited).
+- **Burst / loop detection**: Detects identical tool+args calls within a 60-second window. Default burst limit: 8. Configurable via `RATE_LIMIT_BURST` env var.
+- **Agent profile overrides**: `agent_register` can set per-agent `rate_limit_rpm` and `rate_limit_burst` that override server-wide defaults.
+- **Clear error messages**: Rate limit and loop detection errors include actionable guidance ("Retry in Ns", "Break the loop by varying your approach").
+
+#### Wave 8 — Skill Export & Evolution
+- **`hub_export_skills` Tool**: Export Hub skills to agent-specific file formats. Supports 4 agent targets:
+  - `claude`: Writes `SKILL.md` files to `~/.tachi/skills/<name>/` with symlinks to `~/.claude/skills/`.
+  - `openclaw`: Generates a plugin manifest JSON in `~/.openclaw/plugins/`.
+  - `cursor`: Writes `.mdc` rule files to `.cursor/rules/` (project-relative).
+  - `generic`: Raw markdown export to a specified directory.
+  - All modes support visibility filtering (`listed`, `discoverable`, `all`), skill ID selection, agent-local scope filtering, and clean mode (removes stale exports).
+- **`skill_evolve` Tool**: LLM-powered skill prompt improvement. Analyzes the current skill prompt, usage feedback, and success/failure metrics to generate an improved version. Creates a new versioned capability (`skill:name/vN`), supports optional auto-activation via `hub_version_routes`, and dry-run mode.
+- **Feedback recording in `run_skill`**: Skill executions now automatically record call outcomes (success/failure + latency) via `hub_record_call_outcome`, enabling data-driven evolution.
+
+#### Infrastructure
+- **Project DB hot-activation** (`tachi_init_project_db`): Creates and immediately wires up a project-scoped SQLite database at runtime without daemon restart. Uses `ProjectDbState` struct with `Arc<StdRwLock>` interior mutability. All ~30 `project_db_path.is_some()` checks replaced with `has_project_db()` which checks both static config and hot-swapped state.
+
+### Changed
+- **32 tests**: Test suite expanded from 21 to 32 tests covering rate limiter burst detection, RPM enforcement, agent profile overrides, agent register/whoami roundtrip, handoff leave/check with target filtering and acknowledgment, handoff persistence to memory store, and skill export (empty set, unknown agent, generic file write).
+- **`hub_discover` refactored**: Extracted `hub_discover_inner()` returning `Vec<Value>` directly, eliminating double serde round-trip in `handle_vc_list` (M-3 from code review).
+
+### Fixed
+- **I-1: Metadata error swallowing**: `virtual_capability.rs` now propagates JSON parse errors for VC binding metadata instead of silently replacing with `{}`.
+- **I-2: Cross-scope VC shadowing**: `vc_register` now rejects registration if the same VC ID exists in the opposite scope (global vs project), preventing orphaned bindings.
+- **M-1: version_pin i64→u32 cast**: Uses `try_into().unwrap_or(0)` instead of unchecked `as u32` cast that could silently wrap negative values.
+- **M-2: VC auto-approval undocumented**: Added comment explaining why VCs skip `hub_review` (logical routing abstractions, not executable code).
+- **MemoryEntry construction**: Handoff memo persistence now constructs `MemoryEntry` with all required fields instead of relying on missing `Default` impl.
+
+## [0.10.0] - 2026-03-26
+
+### Added
+
+#### Wave 7b — Virtual Capabilities & Governance Hardening
+- **Virtual Capability (VC) layer**: Logical capability abstraction on top of concrete Hub backends. Register VCs (`vc:*` IDs), bind to multiple concrete MCP backends with priority ordering, and resolve at call time. Deterministic priority-ordered resolution with version pinning and full candidate reporting.
+- **`vc_register` Tool**: Register a Virtual Capability with contract, routing strategy, tags, and input schema.
+- **`vc_bind` Tool**: Bind a concrete MCP capability to a VC with priority, version pin, and enable/disable toggle.
+- **`vc_resolve` Tool**: Resolve a VC to its best available concrete backend. Returns the resolved ID and a detailed resolution report with candidate status.
+- **`vc_list` Tool**: List all VCs with their bindings, merged from both global and project databases.
+- **Sandbox policy inheritance**: Sandbox policies fall back from resolved concrete capability to the requesting VC ID, enabling policy-once-at-VC-level.
+- **Fail-closed fs_roots**: Process-transport MCP capabilities with `fs_read_roots`/`fs_write_roots` now fail closed (rejected at preflight) because stdio processes cannot enforce filesystem isolation. Audit trail logged before denial.
+- **`virtual_capability_bindings` table**: New SQLite table with composite PK `(vc_id, capability_id)`, priority+id index for deterministic ordering, and `ON CONFLICT DO UPDATE` upsert semantics.
+
+### Changed
+- **Hub governance**: Prompt security scanning on skill registration (high-risk auto-disable, medium-risk flag). Static scan for shell injection patterns and prompt injection markers.
+- **Desktop API resilience**: `api.ts` now tries multiple base URLs (`VITE_TACHI_BASE_URL`, proxy, localhost) with automatic failover.
+- **Desktop proxy fix**: `vite.config.ts` proxy configuration corrected for daemon communication.
+
 ## [0.9.0] - 2026-03-25
 
 ### Added

@@ -397,6 +397,14 @@ fn default_hub_version() -> u32 {
     1
 }
 
+fn default_virtual_binding_priority() -> i32 {
+    100
+}
+
+fn default_project_db_relpath() -> String {
+    ".tachi/memory.db".to_string()
+}
+
 #[allow(dead_code)]
 fn default_hub_review_status() -> String {
     "approved".to_string()
@@ -521,6 +529,72 @@ pub(super) struct HubSetActiveVersionParams {
     pub alias_id: String,
     /// Concrete capability id routed by this alias
     pub active_capability_id: String,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub(super) struct VirtualCapabilityRegisterParams {
+    /// Virtual capability ID, e.g. "vc:web_search"
+    pub id: String,
+    /// Human-readable name
+    pub name: String,
+    /// Short description
+    #[serde(default)]
+    pub description: String,
+    /// Contract / intent kind, e.g. "web_search", "docs_search"
+    #[serde(default)]
+    pub contract: String,
+    /// Routing strategy. Current implementation uses "priority".
+    #[serde(default)]
+    pub routing_strategy: String,
+    /// Agent-readable tags
+    #[serde(default)]
+    pub tags: Vec<String>,
+    /// Optional JSON input schema for the logical capability
+    #[serde(default)]
+    pub input_schema: Option<serde_json::Value>,
+    /// Target database scope: "global" or "project" (default)
+    #[serde(default = "default_scope")]
+    pub scope: String,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub(super) struct VirtualCapabilityBindParams {
+    /// Virtual capability ID, e.g. "vc:web_search"
+    pub vc_id: String,
+    /// Concrete target capability ID, e.g. "mcp:exa"
+    pub capability_id: String,
+    /// Lower numbers win during deterministic routing.
+    #[serde(default = "default_virtual_binding_priority")]
+    pub priority: i32,
+    /// Optional version pin. If set, target version must match during resolve.
+    #[serde(default)]
+    pub version_pin: Option<u32>,
+    /// Whether this binding is active.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// Free-form binding metadata
+    #[serde(default)]
+    pub metadata: Option<serde_json::Value>,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub(super) struct VirtualCapabilityResolveParams {
+    /// Virtual capability ID to resolve
+    pub id: String,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub(super) struct InitProjectDbParams {
+    /// Optional target repository root. Defaults to current git root.
+    #[serde(default)]
+    pub project_root: Option<String>,
+    /// Relative DB path under the repo root.
+    #[serde(default = "default_project_db_relpath")]
+    pub db_relpath: String,
 }
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
@@ -843,4 +917,209 @@ pub(super) struct ChainSkillsParams {
     pub steps: Vec<ChainStep>,
     /// Input for the first step
     pub initial_input: String,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub(super) struct ExportSkillsParams {
+    /// Target agent format: "claude", "openclaw", "cursor", "generic"
+    /// Defaults to "claude" if omitted.
+    #[serde(default = "default_export_agent")]
+    pub agent: String,
+
+    /// Only export skills matching these IDs (e.g. ["skill:code-review"]).
+    /// If omitted, exports all enabled skills matching the visibility filter.
+    #[serde(default)]
+    pub skill_ids: Option<Vec<String>>,
+
+    /// Visibility filter: "listed", "discoverable", "all" (default: "listed")
+    #[serde(default = "default_export_visibility")]
+    pub visibility: String,
+
+    /// Override output directory. If omitted, uses agent-specific defaults:
+    /// - claude: ~/.tachi/skills/ (with symlinks to ~/.claude/skills/)
+    /// - openclaw: ~/.openclaw/plugins/
+    /// - cursor: .cursor/rules/ (relative to cwd)
+    /// - generic: ./exported-skills/
+    #[serde(default)]
+    pub output_dir: Option<String>,
+
+    /// If true, remove skills from the target directory that are not in the export set (default: false)
+    #[serde(default)]
+    pub clean: bool,
+}
+
+fn default_export_agent() -> String {
+    "claude".to_string()
+}
+
+fn default_export_visibility() -> String {
+    "listed".to_string()
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub(super) struct AgentRegisterParams {
+    /// Unique agent identifier (e.g. "claude-code", "openclaw", "cursor", "codex")
+    pub agent_id: String,
+
+    /// Human-readable display name
+    #[serde(default)]
+    pub display_name: Option<String>,
+
+    /// Agent capabilities / feature flags (e.g. ["code-gen", "file-edit", "web-search"])
+    #[serde(default)]
+    pub capabilities: Vec<String>,
+
+    /// Optional tool allowlist — if set, only these tools will be returned in list_tools.
+    /// Supports glob patterns like "hub_*", "save_memory", "tachi_skill_*".
+    #[serde(default)]
+    pub tool_filter: Option<Vec<String>>,
+
+    /// Optional per-agent rate limit override (requests per minute, 0 = use server default)
+    #[serde(default)]
+    pub rate_limit_rpm: Option<u64>,
+
+    /// Optional per-agent burst limit override (0 = use server default)
+    #[serde(default)]
+    pub rate_limit_burst: Option<u64>,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub(super) struct AgentWhoamiParams {
+    /// No parameters needed — returns the current agent profile for this session.
+    #[serde(default)]
+    pub _placeholder: Option<String>,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub(super) struct HandoffLeaveParams {
+    /// Summary of what was accomplished in this session
+    pub summary: String,
+
+    /// List of incomplete tasks / next steps for the receiving agent
+    #[serde(default)]
+    pub next_steps: Vec<String>,
+
+    /// Optional target agent ID (e.g. "claude-code", "cursor"). If omitted, any agent can pick up.
+    #[serde(default)]
+    pub target_agent: Option<String>,
+
+    /// Optional context (file paths, error messages, etc.)
+    #[serde(default)]
+    pub context: Option<serde_json::Value>,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub(super) struct HandoffCheckParams {
+    /// Agent ID checking for handoff memos. If omitted, returns all pending memos.
+    #[serde(default)]
+    pub agent_id: Option<String>,
+
+    /// If true, mark retrieved memos as acknowledged (default: true)
+    #[serde(default = "default_true")]
+    pub acknowledge: bool,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub(super) struct SkillEvolveParams {
+    /// Skill capability ID to evolve (e.g. "skill:code-review")
+    pub skill_id: String,
+
+    /// Optional user feedback about what to improve in the skill
+    #[serde(default)]
+    pub feedback: Option<String>,
+
+    /// If true, automatically activate the new version (default: false)
+    #[serde(default)]
+    pub auto_activate: bool,
+
+    /// If true, perform a dry-run — return the proposed improved prompt without persisting (default: false)
+    #[serde(default)]
+    pub dry_run: bool,
+}
+
+// ─── Pack System Params ─────────────────────────────────────────────────────
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub(super) struct PackListParams {
+    /// If true, only return enabled packs (default: false)
+    #[serde(default)]
+    pub enabled_only: Option<bool>,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub(super) struct PackGetParams {
+    /// Pack identifier, e.g. "garrytan/gstack" or "obra/superpowers"
+    pub id: String,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub(super) struct PackRegisterParams {
+    /// Pack identifier, e.g. "garrytan/gstack"
+    pub id: String,
+
+    /// Display name
+    #[serde(default)]
+    pub name: Option<String>,
+
+    /// Source URI: "github:owner/repo", "local:/path/to/pack"
+    #[serde(default)]
+    pub source: Option<String>,
+
+    /// Version string (git tag, commit sha, or semver)
+    #[serde(default)]
+    pub version: Option<String>,
+
+    /// Short description
+    #[serde(default)]
+    pub description: Option<String>,
+
+    /// Local filesystem path where the pack is stored
+    #[serde(default)]
+    pub local_path: Option<String>,
+
+    /// Extra metadata (JSON object)
+    #[serde(default)]
+    pub metadata: Option<serde_json::Value>,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub(super) struct PackRemoveParams {
+    /// Pack identifier to remove
+    pub id: String,
+
+    /// If true (default), also delete projected files from agent directories
+    #[serde(default)]
+    pub clean_files: Option<bool>,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub(super) struct PackProjectParams {
+    /// Pack identifier to project
+    pub pack_id: String,
+
+    /// List of agent kinds to project to: "claude", "codex", "cursor", "gemini", "opencode", "antigravity", "trae", "kiro"
+    pub agents: Vec<String>,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub(super) struct ProjectionListParams {
+    /// Filter by agent kind (optional)
+    #[serde(default)]
+    pub agent: Option<String>,
+
+    /// Filter by pack ID (optional)
+    #[serde(default)]
+    pub pack_id: Option<String>,
 }

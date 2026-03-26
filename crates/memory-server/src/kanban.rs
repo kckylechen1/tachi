@@ -115,10 +115,11 @@ pub(super) fn normalize_card_priority(value: &str) -> String {
 }
 
 pub(super) fn normalize_card_type(value: &str) -> String {
-    match value.trim().to_ascii_lowercase().as_str() {
-        "request" | "report" | "alert" | "handoff" | "ack" | "progress" | "result" => {
-            value.trim().to_ascii_lowercase()
-        }
+    match value.trim().to_ascii_lowercase() {
+        s if matches!(
+            s.as_str(),
+            "request" | "report" | "alert" | "handoff" | "ack" | "progress" | "result"
+        ) => s,
         _ => default_card_type(),
     }
 }
@@ -199,6 +200,12 @@ pub(super) fn card_type(entry: &MemoryEntry) -> String {
         .unwrap_or_else(default_card_type)
 }
 
+fn add_trimmed_str_to_metadata(metadata: &mut serde_json::Value, key: &str, value: &Option<String>) {
+    if let Some(value) = value.as_deref().map(str::trim).filter(|value| !value.is_empty()) {
+        metadata[key] = json!(value);
+    }
+}
+
 pub(super) fn card_matches_inbox(
     entry: &MemoryEntry,
     params: &CheckInboxParams,
@@ -232,13 +239,13 @@ pub(super) fn card_matches_inbox(
         let card_ws = card_metadata_str(entry, "workspace_id")
             .or_else(|| card_metadata_str(entry, "project_id"))
             .unwrap_or_default();
-        if !card_ws.is_empty() && card_ws != *ws_filter {
+        if card_ws != *ws_filter {
             return false;
         }
     }
     if let Some(ref conv_filter) = params.conversation_id {
         let card_conv = card_metadata_str(entry, "conversation_id").unwrap_or_default();
-        if !card_conv.is_empty() && card_conv != *conv_filter {
+        if card_conv != *conv_filter {
             return false;
         }
     }
@@ -388,46 +395,11 @@ pub(super) async fn handle_post_card(
         "card_type": card_type,
         "created_at": now,
     });
-    if let Some(thread_id) = params
-        .thread_id
-        .as_ref()
-        .map(|v| v.trim())
-        .filter(|v| !v.is_empty())
-    {
-        metadata["thread_id"] = json!(thread_id);
-    }
-    if let Some(workspace_id) = params
-        .workspace_id
-        .as_ref()
-        .map(|v| v.trim())
-        .filter(|v| !v.is_empty())
-    {
-        metadata["workspace_id"] = json!(workspace_id);
-    }
-    if let Some(project_id) = params
-        .project_id
-        .as_ref()
-        .map(|v| v.trim())
-        .filter(|v| !v.is_empty())
-    {
-        metadata["project_id"] = json!(project_id);
-    }
-    if let Some(conversation_id) = params
-        .conversation_id
-        .as_ref()
-        .map(|v| v.trim())
-        .filter(|v| !v.is_empty())
-    {
-        metadata["conversation_id"] = json!(conversation_id);
-    }
-    if let Some(agent_session_id) = params
-        .agent_session_id
-        .as_ref()
-        .map(|v| v.trim())
-        .filter(|v| !v.is_empty())
-    {
-        metadata["agent_session_id"] = json!(agent_session_id);
-    }
+    add_trimmed_str_to_metadata(&mut metadata, "thread_id", &params.thread_id);
+    add_trimmed_str_to_metadata(&mut metadata, "workspace_id", &params.workspace_id);
+    add_trimmed_str_to_metadata(&mut metadata, "project_id", &params.project_id);
+    add_trimmed_str_to_metadata(&mut metadata, "conversation_id", &params.conversation_id);
+    add_trimmed_str_to_metadata(&mut metadata, "agent_session_id", &params.agent_session_id);
 
     let entry = MemoryEntry {
         id: card_id.clone(),
@@ -509,14 +481,15 @@ pub(super) async fn handle_check_inbox(
     }
     let limit = params.limit.clamp(1, 1000);
 
-    let mut cards: Vec<MemoryEntry> = server.with_global_store(|store| {
-        store
-            .list_by_path(KANBAN_PATH_PREFIX, limit * 4, false)
-            .map_err(|e| format!("list kanban cards failed: {e}"))
-    })?
-    .into_iter()
-    .filter(|entry| card_matches_inbox(entry, &params, &agent_id))
-    .collect();
+    let mut cards: Vec<MemoryEntry> = server
+        .with_global_store_read(|store| {
+            store
+                .list_by_path(KANBAN_PATH_PREFIX, limit * 4, false)
+                .map_err(|e| format!("list kanban cards failed: {e}"))
+        })?
+        .into_iter()
+        .filter(|entry| card_matches_inbox(entry, &params, &agent_id))
+        .collect();
 
     cards.sort_by(|a, b| {
         let pa = kanban_priority_rank(card_priority(a).as_str());
@@ -568,11 +541,13 @@ pub(super) async fn handle_update_card(
         "new_status must be one of open|acknowledged|resolved|expired".to_string()
     })?;
 
-    let mut entry = server.with_global_store(|store| {
-        store
-            .get(&params.card_id)
-            .map_err(|e| format!("get card failed: {e}"))
-    })?.ok_or_else(|| {
+    let mut entry = server
+        .with_global_store_read(|store| {
+            store
+                .get(&params.card_id)
+                .map_err(|e| format!("get card failed: {e}"))
+        })?
+        .ok_or_else(|| {
         format!(
             "kanban card '{}' not found in global db",
             params.card_id

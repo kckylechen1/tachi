@@ -71,20 +71,24 @@ fn normalize_path(path: &str) -> std::path::PathBuf {
     std::path::PathBuf::from(path)
 }
 
+fn canonicalize_for_policy(path: &std::path::Path) -> std::path::PathBuf {
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .map(|cwd| cwd.join(path))
+            .unwrap_or_else(|_| path.to_path_buf())
+    };
+    std::fs::canonicalize(&absolute).unwrap_or(absolute)
+}
+
 fn path_within_roots(path: &std::path::Path, roots: &[String]) -> bool {
     if roots.is_empty() {
         return true;
     }
-    let candidate = if path.is_absolute() {
-        path.to_path_buf()
-    } else {
-        match std::env::current_dir() {
-            Ok(cwd) => cwd.join(path),
-            Err(_) => path.to_path_buf(),
-        }
-    };
+    let candidate = canonicalize_for_policy(path);
     roots.iter().any(|root| {
-        let root_path = normalize_path(root);
+        let root_path = canonicalize_for_policy(&normalize_path(root));
         candidate.starts_with(&root_path)
     })
 }
@@ -132,11 +136,13 @@ impl MemoryServer {
     pub(super) async fn connect_mcp_service(
         &self,
         capability_id: &str,
+        requested_capability_id: Option<&str>,
         def: &serde_json::Value,
         timeout: Duration,
     ) -> Result<rmcp::service::RunningService<rmcp::service::RoleClient, ()>, String> {
         let connect_started = Instant::now();
-        let policy = self.get_sandbox_policy_for_capability(capability_id);
+        let (policy, policy_source) =
+            self.get_effective_sandbox_policy(requested_capability_id, capability_id);
         let policy_enabled = policy
             .as_ref()
             .and_then(|v| v.get("enabled"))
@@ -153,6 +159,8 @@ impl MemoryServer {
                 Some("policy_disabled"),
                 &json!({
                     "has_policy": policy.is_some(),
+                    "requested_capability_id": requested_capability_id,
+                    "policy_source": if policy_source.is_empty() { None::<String> } else { Some(policy_source.clone()) },
                 }),
             );
             return Err(format!(
@@ -177,6 +185,8 @@ impl MemoryServer {
                 Some("invalid_runtime_type"),
                 &json!({
                     "runtime_type": policy_runtime,
+                    "requested_capability_id": requested_capability_id,
+                    "policy_source": if policy_source.is_empty() { None::<String> } else { Some(policy_source.clone()) },
                 }),
             );
             return Err(format!(
@@ -221,6 +231,8 @@ impl MemoryServer {
                         &json!({
                             "runtime_type": policy_runtime,
                             "transport": transport_type,
+                            "requested_capability_id": requested_capability_id,
+                            "policy_source": if policy_source.is_empty() { None::<String> } else { Some(policy_source.clone()) },
                         }),
                     );
                     return Err(format!(
@@ -260,6 +272,8 @@ impl MemoryServer {
                         Some("invalid_env"),
                         &json!({
                             "transport": transport_type,
+                            "requested_capability_id": requested_capability_id,
+                            "policy_source": if policy_source.is_empty() { None::<String> } else { Some(policy_source.clone()) },
                             "error": e,
                         }),
                     );
@@ -271,6 +285,32 @@ impl MemoryServer {
 
                 let cwd_roots =
                     parse_string_array(policy.as_ref().and_then(|v| v.get("cwd_roots")));
+                let fs_read_roots =
+                    parse_string_array(policy.as_ref().and_then(|v| v.get("fs_read_roots")));
+                let fs_write_roots =
+                    parse_string_array(policy.as_ref().and_then(|v| v.get("fs_write_roots")));
+                if !fs_read_roots.is_empty() || !fs_write_roots.is_empty() {
+                    self.record_sandbox_exec_audit(
+                        capability_id,
+                        "preflight",
+                        "denied",
+                        Some("process runtime cannot enforce fs root restrictions"),
+                        0,
+                        None,
+                        Some("fs_roots_unsupported"),
+                        &json!({
+                            "transport": transport_type,
+                            "requested_capability_id": requested_capability_id,
+                            "policy_source": if policy_source.is_empty() { None::<String> } else { Some(policy_source.clone()) },
+                            "fs_read_roots": fs_read_roots,
+                            "fs_write_roots": fs_write_roots,
+                        }),
+                    );
+                    return Err(format!(
+                        "Sandbox policy for '{}' declares fs_read_roots/fs_write_roots, but stdio process transport cannot enforce them yet",
+                        capability_id
+                    ));
+                }
                 let cwd = def.get("cwd").and_then(|v| v.as_str());
                 if !cwd_roots.is_empty() {
                     let cwd_str = cwd.ok_or_else(|| {
@@ -288,6 +328,8 @@ impl MemoryServer {
                             Some("cwd_missing"),
                             &json!({
                                 "transport": transport_type,
+                                "requested_capability_id": requested_capability_id,
+                                "policy_source": if policy_source.is_empty() { None::<String> } else { Some(policy_source.clone()) },
                                 "cwd_roots": cwd_roots,
                             }),
                         );
@@ -306,6 +348,8 @@ impl MemoryServer {
                             &json!({
                                 "transport": transport_type,
                                 "cwd": cwd_path.display().to_string(),
+                                "requested_capability_id": requested_capability_id,
+                                "policy_source": if policy_source.is_empty() { None::<String> } else { Some(policy_source.clone()) },
                                 "cwd_roots": cwd_roots,
                             }),
                         );
@@ -337,6 +381,8 @@ impl MemoryServer {
                         Some("spawn_failed"),
                         &json!({
                             "transport": transport_type,
+                            "requested_capability_id": requested_capability_id,
+                            "policy_source": if policy_source.is_empty() { None::<String> } else { Some(policy_source.clone()) },
                             "error": reason,
                         }),
                     );
@@ -360,6 +406,8 @@ impl MemoryServer {
                             None,
                             &json!({
                                 "transport": transport_type,
+                                "requested_capability_id": requested_capability_id,
+                                "policy_source": if policy_source.is_empty() { None::<String> } else { Some(policy_source.clone()) },
                                 "policy_timeout_ms": effective_timeout.as_millis() as u64,
                             }),
                         );
@@ -377,6 +425,8 @@ impl MemoryServer {
                             Some("handshake_failed"),
                             &json!({
                                 "transport": transport_type,
+                                "requested_capability_id": requested_capability_id,
+                                "policy_source": if policy_source.is_empty() { None::<String> } else { Some(policy_source.clone()) },
                                 "error": reason,
                             }),
                         );
@@ -397,6 +447,8 @@ impl MemoryServer {
                             Some("startup_timeout"),
                             &json!({
                                 "transport": transport_type,
+                                "requested_capability_id": requested_capability_id,
+                                "policy_source": if policy_source.is_empty() { None::<String> } else { Some(policy_source.clone()) },
                                 "effective_timeout_ms": effective_timeout.as_millis() as u64,
                             }),
                         );
@@ -497,7 +549,7 @@ impl MemoryServer {
         def: &serde_json::Value,
     ) -> Result<Vec<rmcp::model::Tool>, String> {
         let client = self
-            .connect_mcp_service(capability_id, def, self.mcp_discovery_timeout)
+            .connect_mcp_service(capability_id, None, def, self.mcp_discovery_timeout)
             .await?;
         let list_result =
             tokio::time::timeout(self.mcp_discovery_timeout, client.peer().list_all_tools()).await;

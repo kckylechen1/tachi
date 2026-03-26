@@ -129,7 +129,8 @@ fn is_pure_emoji(s: &str) -> bool {
     if s.is_empty() {
         return true;
     }
-    s.chars().all(|c| c.is_whitespace() || (!c.is_alphanumeric() && !is_cjk(c)))
+    s.chars()
+        .all(|c| c.is_whitespace() || (!c.is_alphanumeric() && !is_cjk(c)))
 }
 
 /// Determine if a query should skip memory retrieval.
@@ -164,7 +165,10 @@ pub fn should_skip_query(query: &str) -> bool {
         if SKIP_PATTERNS[3..5].iter().any(|p| p.is_match(trimmed)) {
             return true;
         }
-        if SKIP_PATTERNS.iter().any(|p| p.as_str().contains("HEARTBEAT") && p.is_match(trimmed)) {
+        if SKIP_PATTERNS
+            .iter()
+            .any(|p| p.as_str().contains("HEARTBEAT") && p.is_match(trimmed))
+        {
             return true;
         }
     }
@@ -223,16 +227,24 @@ mod tests {
     #[test]
     fn noise_real_content_passes() {
         assert!(!is_noise_text("用户偏好使用 TypeScript 编写代码"));
-        assert!(!is_noise_text("The database schema uses SQLite with FTS5 indexing"));
-        assert!(!is_noise_text("Decision: use Rust for the memory core engine"));
+        assert!(!is_noise_text(
+            "The database schema uses SQLite with FTS5 indexing"
+        ));
+        assert!(!is_noise_text(
+            "Decision: use Rust for the memory core engine"
+        ));
         assert!(!is_noise_text("记住：每次部署前先运行测试"));
     }
 
     #[test]
     fn noise_greeting_with_substance_passes() {
         // Bug #4 fix: greeting-prefixed substantive text should NOT be noise
-        assert!(!is_noise_text("Hello, my name is Kyle and I prefer TypeScript"));
-        assert!(!is_noise_text("Hey, production broke after the migration and we need to roll back"));
+        assert!(!is_noise_text(
+            "Hello, my name is Kyle and I prefer TypeScript"
+        ));
+        assert!(!is_noise_text(
+            "Hey, production broke after the migration and we need to roll back"
+        ));
     }
 
     // ── should_skip_query ────────────────────────────────────────────────
@@ -276,9 +288,15 @@ mod tests {
 
     #[test]
     fn real_queries_pass() {
-        assert!(!should_skip_query("How to implement hybrid search in Rust?"));
-        assert!(!should_skip_query("什么是 memory-core 的 ACT-R decay 公式？"));
-        assert!(!should_skip_query("Show me the database schema for memories"));
+        assert!(!should_skip_query(
+            "How to implement hybrid search in Rust?"
+        ));
+        assert!(!should_skip_query(
+            "什么是 memory-core 的 ACT-R decay 公式？"
+        ));
+        assert!(!should_skip_query(
+            "Show me the database schema for memories"
+        ));
     }
 
     #[test]
@@ -297,8 +315,12 @@ mod tests {
     #[test]
     fn greeting_with_substance_not_skipped() {
         // Bug #5 fix: greeting-prefixed substantive queries should NOT skip
-        assert!(!should_skip_query("hello, can you help me debug the memory engine crash?"));
-        assert!(!should_skip_query("Hey, production broke after the migration and we need help"));
+        assert!(!should_skip_query(
+            "hello, can you help me debug the memory engine crash?"
+        ));
+        assert!(!should_skip_query(
+            "Hey, production broke after the migration and we need help"
+        ));
     }
 
     #[test]

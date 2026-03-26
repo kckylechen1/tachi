@@ -1,8 +1,8 @@
 # Tachi Desktop — Electron Frontend
 
 **Date**: 2026-03-25
-**Status**: Proposed
-**Branch**: `feat/tachi-desktop`
+**Status**: In Progress
+**Branch**: `main`
 
 ## Decision
 
@@ -20,7 +20,7 @@ Build an Electron + Vite + React desktop application as the management UI for Ta
            ▼
 ┌─────────────────────────────────┐
 │  Tachi Daemon                   │
-│  tachi --daemon --port 8080     │
+│  tachi --daemon --port 6919     │
 │  ├── Memory Store (SQLite)      │
 │  ├── Hub (Skill + MCP registry) │
 │  ├── MCP Connection Pool        │
@@ -52,7 +52,7 @@ Build an Electron + Vite + React desktop application as the management UI for Ta
 
 ## Backend Requirements (Tachi Daemon)
 
-The daemon (`tachi --daemon --port`) already exposes MCP tools via HTTP. Additional needs:
+The daemon (`tachi --daemon --port`) already exposes MCP tools via Streamable HTTP at `/mcp`. Additional needs:
 
 1. **launchd plist** — macOS auto-start on login
 2. **Connection pre-warming** — start registered MCP child processes on daemon boot
@@ -62,18 +62,18 @@ The daemon (`tachi --daemon --port`) already exposes MCP tools via HTTP. Additio
 ## Phased Rollout
 
 ### Phase 1: Foundation
-- [ ] Electron + Vite scaffold in `apps/tachi-desktop/`
+- [x] Electron + Vite scaffold in `apps/tachi-desktop/`
 - [ ] Tachi daemon launchd plist
-- [ ] HTTP client wrapper for Tachi API
-- [ ] Memory Explorer (search + CRUD)
+- [x] HTTP client wrapper for Tachi API
+- [x] Memory Explorer (search + CRUD)
 
 ### Phase 2: Agent Visualization
-- [ ] Kanban Board real-time view
-- [ ] Ghost Whispers message stream
-- [ ] MCP Dashboard with connection status
+- [x] Kanban Board real-time view
+- [x] Ghost Whispers message stream
+- [x] MCP Dashboard with connection status
 
 ### Phase 3: Advanced
-- [ ] Memory Graph interactive visualization
+- [x] Memory Graph interactive visualization
 - [ ] Skill Manager with security scan results
 - [ ] Settings panel
 - [ ] System tray with status indicator
