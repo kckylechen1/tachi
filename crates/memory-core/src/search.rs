@@ -83,7 +83,11 @@ fn apply_mmr_diversity(
 
     for (idx, (id, _)) in ranked.iter().enumerate() {
         if selected.len() >= needed {
-            deferred.extend(ranked[idx..].iter().map(|(rest_id, _)| (*rest_id).to_string()));
+            deferred.extend(
+                ranked[idx..]
+                    .iter()
+                    .map(|(rest_id, _)| (*rest_id).to_string()),
+            );
             break;
         }
 
@@ -122,7 +126,7 @@ fn apply_mmr_diversity(
 ///  4. Hybrid score merge (weighted sum) with ACT-R decay
 ///  5. Sort, take top_k, record access
 pub fn hybrid_search(
-    conn: &mut Connection,
+    conn: &Connection,
     query: &str,
     opts: &SearchOptions,
 ) -> Result<Vec<SearchResult>, MemoryError> {
@@ -229,18 +233,21 @@ pub fn hybrid_search(
         let seed_ids: Vec<String> = results.iter().map(|r| r.entry.id.clone()).collect();
         let rel_filter = opts.graph_relation_filter.as_deref();
 
-        if let Ok(expand_result) = graph_expand(conn, &seed_ids, opts.graph_expand_hops, rel_filter) {
+        if let Ok(expand_result) = graph_expand(conn, &seed_ids, opts.graph_expand_hops, rel_filter)
+        {
             let existing_ids: std::collections::HashSet<String> =
                 results.iter().map(|r| r.entry.id.clone()).collect();
 
-            let min_score = results.last()
+            let min_score = results
+                .last()
                 .map(|r| r.score.final_score * 0.5)
                 .unwrap_or(0.1);
 
             // Compute local PageRank on the expanded subgraph
             let pr_scores = crate::scorer::local_pagerank(&expand_result.edges, 0.85);
 
-            let new_entries: Vec<SearchResult> = expand_result.entries
+            let new_entries: Vec<SearchResult> = expand_result
+                .entries
                 .into_iter()
                 .filter(|entry| !existing_ids.contains(&entry.id))
                 .map(|entry| {
@@ -280,7 +287,7 @@ pub fn hybrid_search(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::db::{init_schema, try_load_sqlite_vec, register_sqlite_vec, upsert};
+    use crate::db::{init_schema, register_sqlite_vec, try_load_sqlite_vec, upsert};
     use crate::types::MemoryEntry;
     use chrono::Utc;
     use rusqlite::Connection;
@@ -324,15 +331,25 @@ mod tests {
     #[test]
     fn hybrid_returns_relevant() {
         let mut conn = setup();
-        insert(&mut conn, "a", "Rust is fast and memory safe", &["rust", "performance"]);
-        insert(&mut conn, "b", "Python is great for scripting", &["python", "scripting"]);
+        insert(
+            &mut conn,
+            "a",
+            "Rust is fast and memory safe",
+            &["rust", "performance"],
+        );
+        insert(
+            &mut conn,
+            "b",
+            "Python is great for scripting",
+            &["python", "scripting"],
+        );
 
         let opts = SearchOptions {
             top_k: 3,
             record_access: false,
             ..Default::default()
         };
-        let results = hybrid_search(&mut conn, "rust performance", &opts).unwrap();
+        let results = hybrid_search(&conn, "rust performance", &opts).unwrap();
         assert!(!results.is_empty());
         // "a" should score higher for "rust performance" query
         assert_eq!(results[0].entry.id, "a");
@@ -342,8 +359,11 @@ mod tests {
     fn empty_query_returns_empty() {
         let mut conn = setup();
         insert(&mut conn, "x", "some text", &[]);
-        let opts = SearchOptions { record_access: false, ..Default::default() };
-        let results = hybrid_search(&mut conn, "", &opts).unwrap();
+        let opts = SearchOptions {
+            record_access: false,
+            ..Default::default()
+        };
+        let results = hybrid_search(&conn, "", &opts).unwrap();
         // FTS5 with empty query should produce no FTS results; vec channel also empty
         assert!(results.is_empty());
     }

@@ -54,49 +54,20 @@ pub(super) async fn handle_save_memory(
             .map_err(|e| format!("Failed to save memory: {}", e))
     })?;
 
-    let server_clone = server.clone();
-    let enrich_id = id.clone();
-    let enrich_text = entry.text.clone();
-    let enrich_revision = 1_i64;
-    tokio::spawn(async move {
-        let mut new_vec: Option<Vec<f32>> = None;
-        let mut new_summary: Option<String> = None;
-
-        if needs_embedding {
-            match server_clone
-                .llm
-                .embed_voyage(&enrich_text, "document")
-                .await
-            {
-                Ok(vec) => new_vec = Some(vec),
-                Err(e) => eprintln!("[enrichment] embedding failed for {enrich_id}: {e}"),
-            }
-        }
-
-        if needs_summary {
-            match server_clone.llm.generate_summary(&enrich_text).await {
-                Ok(s) => new_summary = Some(s),
-                Err(e) => eprintln!("[enrichment] summary failed for {enrich_id}: {e}"),
-            }
-        }
-
-        if new_vec.is_some() || new_summary.is_some() {
-            match server_clone.with_store_for_scope(target_db, |store| {
-                store
-                    .update_enrichment_fields(
-                        &enrich_id,
-                        new_summary.as_deref(),
-                        new_vec.as_deref(),
-                        enrich_revision,
-                    )
-                    .map_err(|e| format!("Failed to update enriched entry: {e}"))
-            }) {
-                Ok(true) => eprintln!("[enrichment] completed for {enrich_id}"),
-                Ok(false) => eprintln!("[enrichment] discarded for {enrich_id} (revision changed)"),
-                Err(e) => eprintln!("[enrichment] DB update failed for {enrich_id}: {e}"),
-            }
-        }
-    });
+    // Queue enrichment (embedding + summary) via the batcher instead of
+    // spawning a per-item task. The batcher accumulates items and calls
+    // the Voyage API in batch (up to 128 per request), dramatically
+    // reducing API calls when the agent saves multiple memories in sequence.
+    if needs_embedding || needs_summary {
+        let _ = server.enrich_tx.send(super::EnrichmentItem {
+            id: id.clone(),
+            text: entry.text.clone(),
+            needs_embedding,
+            needs_summary,
+            target_db,
+            revision: 1,
+        });
+    }
 
     let mut response = serde_json::Map::new();
     response.insert("id".into(), json!(id));
@@ -210,6 +181,27 @@ pub(super) async fn handle_search_memory(
         if deduped_results.len() >= params.top_k {
             break;
         }
+    }
+
+    // Sandbox filtering: if agent_role is specified, filter out denied entries
+    if let Some(ref role) = params.agent_role {
+        deduped_results.retain(|(result, db_scope)| {
+            let allowed = match db_scope {
+                DbScope::Global => server.with_global_store(|store| {
+                    store
+                        .check_sandbox_access(role, &result.entry.path, "read")
+                        .map(|(allowed, _)| allowed)
+                        .map_err(|e| format!("{e}"))
+                }),
+                DbScope::Project => server.with_project_store(|store| {
+                    store
+                        .check_sandbox_access(role, &result.entry.path, "read")
+                        .map(|(allowed, _)| allowed)
+                        .map_err(|e| format!("{e}"))
+                }),
+            };
+            allowed.unwrap_or(true)
+        });
     }
 
     let mut output: Vec<serde_json::Value> = deduped_results

@@ -172,6 +172,10 @@ pub(super) struct SearchMemoryParams {
     /// Optional scoring weights override {semantic, fts, symbolic, decay}
     #[serde(default)]
     pub weights: Option<HybridWeightsParam>,
+
+    /// Optional agent role for sandbox filtering (e.g. "finance", "code-review")
+    #[serde(default)]
+    pub agent_role: Option<String>,
 }
 
 impl SearchMemoryParams {
