@@ -41,6 +41,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `vault_operations_record_audit_entries`: Audit rows for init/set/get/lock/unlock(both success+fail)/remove
   - `memory_gc_prunes_expired_resolved_kanban_cards`: Resolved card older than 30 days gets deleted
 
+## [0.11.1] - 2026-03-26
+
+### Added
+
+#### Ghost in the Shell Tool Aliases (#25)
+- **Ghost layer aliases**: `ghost_whisper` → `ghost_publish`, `ghost_listen` → `ghost_subscribe`, `ghost_channels` → `ghost_list_topics`. Fully backward-compatible; original tool names continue to work.
+- **Shell layer aliases**: `shell_set_policy` → `sandbox_set_rule`, `shell_get_policy` → `sandbox_get_rule`, `shell_list_policies` → `sandbox_list_rules`, `shell_exec_audit` → `sandbox_exec_audit`. Maintain the same cache invalidation behavior as original tools.
+- **Section 9 aliases**: `section9_review` → `hub_review`, `section9_audit_log` → `tachi_audit_log`. Reflects the Ghost in the Shell universe's Section 9 intelligence unit.
+- **Cyberbrain aliases**: `cyberbrain_write` → `save_memory`, `cyberbrain_search` → `search_memory`. Stylized aliases for the core memory operations.
+- **Cache behavior preserved**: All alias write/read paths correctly invalidate caches matching the canonical tool behavior.
+
+#### Ghost Phase-3 Persistence (#24)
+- **Persistent ghost tables**: New SQLite tables `ghost_messages`, `ghost_subscriptions`, `ghost_cursors`, `ghost_topics`, `ghost_reflections` in `memory-core`. Ghost pub/sub is now fully DB-backed and restart-safe.
+- **Restart-safe cursors**: Per-subscriber message cursors survive daemon restarts. `ghost_subscribe` resumes from the last acknowledged message position.
+- **`ghost_ack` Tool**: Acknowledge ghost messages by ID, advancing the subscriber cursor. Prevents re-delivery of already-processed messages.
+- **`ghost_reflect` Tool**: Create a reflection entry from a ghost message — capturing insights, patterns, and optional rule derivations from observed agent communications.
+- **`ghost_promote` Tool**: Promote a ghost message or reflection to long-term memory (`save_memory` with `category="ghost"`). Optionally triggers reflection-to-rule derivation via LLM.
+- **DB-backed ghost_publish/subscribe/topics**: All three core operations now read/write from persistent SQLite instead of in-memory state, enabling true cross-session message delivery.
+
+#### Sandbox Executor Phase-2 Audit & Policy Enforcement (#23)
+- **`sandbox_exec_audit` table**: New `sandbox_exec_audit` persistence table in `memory-core` recording preflight, startup, and tool-call sandbox decisions with error kind classification.
+- **`sandbox_exec_audit` Tool**: New MCP tool exposing sandbox audit log for observability — query by agent, tool, decision (allow/deny), and time range.
+- **Runtime policy enforcement**: Policy presence is now enforced on the MCP `connect` and `call` path. Connections from agents without a matching sandbox policy are rejected with a clear error.
+- **Policy denial logging**: All policy-based denials are logged to both `sandbox_exec_audit` and `audit_log`, making policy rejects distinguishable from runtime failures.
+- **Audit record classification**: Records distinguish between `preflight` (before connection), `startup` (at process spawn), and `tool_call` (at invocation) decision points.
+
+#### Hub Governance Phase-1 (#22)
+- **Governance metadata fields**: `hub_capabilities` extended with `review_status` (pending/approved/rejected), `health_status` (healthy/degraded/offline), `fail_streak`, `last_error_at`, `last_success_at`, and `exposure` metadata.
+- **`hub_version_routes` table**: New table mapping capability IDs to active version pins. Enables deterministic active-version resolution across capability upgrades.
+- **`hub_review` Tool**: Review a capability — set `review_status` to approved or rejected with an optional note. Only approved capabilities are callable via `hub_call`.
+- **`hub_set_active_version` Tool**: Pin a capability ID to a specific version string. Used by `skill_evolve` to activate evolved skill versions.
+- **Governance gates in `hub_call`**: Before proxying a call, `hub_call` checks `review_status == approved` and `health_status != offline`. Rejects non-approved or offline capabilities with actionable error messages.
+- **Call outcome persistence**: `hub_call` records success/failure outcomes to `hub_capabilities.fail_streak`, `last_error_at`, and `last_success_at` after every invocation.
+- **Bootstrap initializers updated**: New capabilities registered at startup are initialized with `review_status=approved` and `health_status=healthy` to avoid breaking existing workflows.
+
 ## [0.11.0] - 2026-03-26
 
 ### Added
