@@ -5,6 +5,27 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.12.1] - 2026-03-30
+
+### Added
+
+#### Search + Backfill Ergonomics
+- **`backfill-vectors` CLI command**: new maintenance command to count and backfill missing Voyage embeddings in any SQLite DB (`--db`, `--batch-size`, `--dry-run`). Useful for agent-local stores such as OpenClaw, Antigravity, or migrated databases.
+- **Vector health helpers in `memory-core`**: `entries_missing_vectors()` and `vector_stats()` expose direct DB introspection for maintenance tools and migration scripts.
+- **Write provenance metadata**: primary write paths now inject `metadata.provenance` (`save_memory`, `extract_facts`, `ingest_event`, `post_card`, `handoff_leave`, `ghost_promote`). Captures tool name, source kind, requested scope, resolved DB scope/path, registered agent identity, and optional profile/domain env tags.
+
+### Changed
+- **`search_memory` now auto-embeds queries** when `query_vec` is omitted and vector search is available, restoring true hybrid retrieval for plain-text clients.
+- **`tachi search` CLI now matches MCP behavior** by generating a query embedding when vectors are enabled instead of silently degrading to lexical-only search.
+- **OpenClaw runtime guidance updated**: current active topology is per-agent (`data/agents/<agent>/memory.db`), while root `data/memory.db` is legacy-only.
+
+### Fixed
+- **Hub schema migration ordering**: delayed `review_status` / `health_status` index creation until after migration guards, preventing startup issues on older DBs.
+- **Live agent retrieval quality**: filled missing vectors in Antigravity/OpenClaw stores and archived stale topology memories that incorrectly claimed the legacy shared DB was still active.
+
+### Tests
+- **57 tests** (up from 55): 2 new provenance tests covering `save_memory` and `post_card` metadata injection.
+
 ## [0.12.0] - 2026-03-27
 
 ### Added

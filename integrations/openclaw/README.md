@@ -15,6 +15,8 @@ OpenClaw Gateway (Node.js)
 **MCP 优先**：默认通过 MCP stdio 协议调用 Tachi 二进制。当 MCP 不可用时自动降级到 NAPI（30s 重试窗口）。
 环境变量 `OPENCLAW_MEMORY_BACKEND=napi` 可强制使用 NAPI 路径。
 
+**当前运行时拓扑**：插件通过 `getResolvedPaths(agentId)` 将记忆按 agent 拆到 `data/agents/<agent>/memory.db`。根目录的 `data/memory.db` 只作为历史/迁移遗留库保留，不再是新写入的默认目标。
+
 ## 安装
 
 ### 方式一：brew install（推荐）
@@ -54,7 +56,7 @@ curl -fsSL https://raw.githubusercontent.com/kckylechen1/tachi/main/scripts/inst
 |------|------|------|
 | `VOYAGE_API_KEY` | 是 | Voyage AI embedding + reranking |
 | `SILICONFLOW_API_KEY` | 是 | SiliconFlow LLM 提取 |
-| `MEMORY_DB_PATH` | 否 | 数据库路径（默认 `~/.tachi/memory.db`） |
+| `TACHI_BIN` / `OPENCLAW_MEMORY_SERVER_BIN` | 否 | 显式指定 `tachi` / `memory-server` 二进制路径，优先于 PATH |
 | `OPENCLAW_MEMORY_BACKEND` | 否 | `mcp`（默认）或 `napi` |
 | `MEMORY_BRIDGE_EMBEDDING_MODEL` | 否 | 嵌入模型（默认 `voyage-4`） |
 | `MEMORY_BRIDGE_EMBEDDING_DIMENSION` | 否 | 嵌入维度（默认 1024） |
@@ -81,5 +83,5 @@ curl -fsSL https://raw.githubusercontent.com/kckylechen1/tachi/main/scripts/inst
 ## 回滚
 
 1. 在 `openclaw.json` 中禁用 `memory-hybrid-bridge`
-2. 如需清理数据：删除 `~/.tachi/memory.db`
+2. 如需清理数据：删除 `data/agents/<agent>/memory.db` 或整个插件 `data/agents/` 目录
 3. 重启 OpenClaw gateway

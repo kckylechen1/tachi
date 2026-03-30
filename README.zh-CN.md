@@ -148,6 +148,11 @@ Tachi 支持以外部扩展插件的形式桥接运行于 OpenClaw 内核。
 4. 在项目根目录的 `.env` 中配置 API 密钥（参见 `.env.example`）：
    - VOYAGE_API_KEY (向量与重排)
    - SILICONFLOW_API_KEY (结构化抽取)
+
+运行注意事项：
+- 当前 OpenClaw 的运行时拓扑已经是按 agent 分库：`data/agents/<agent>/memory.db`。
+- 根目录下的 `data/memory.db` 现在只作为历史或迁移遗留库保留，不再是新记忆的默认写入目标。
+- 如果要升级到最新本地二进制，推荐在 tap formula 更新后执行 `brew reinstall tachi`，或者直接把各 agent 配置指向 freshly built 的 `target/release/memory-server`。
 ```
 
 ---
@@ -168,9 +173,11 @@ Tachi 支持以外部扩展插件的形式桥接运行于 OpenClaw 内核。
 - **🔀 MCP 代理**：在 Tachi 中注册子 MCP Server，可通过 `tool_exposure=flatten` 展开为 `server__tool`，也可通过 `tool_exposure=gateway` 收敛为 `hub_call` 单入口透传。共享连接池，按需连接，空闲自动清理，熔断器保护，并发控制。环境变量清洗保留 21 个系统关键变量。传输协议别名 (`http`、`streamable-http` → `sse`)。告别僵尸进程。
 - **🗑️ 记忆生命周期管理**：完整的生命周期控制——`delete_memory`（永久删除，CASCADE 清理关联数据）、`archive_memory`（软删除，可恢复）、`memory_gc`（清理过期访问历史、事件日志、审计记录）。
 - **🧹 噎声过滤**：保存时自动拦截无价值内容 (`is_noise_text`)，检索时自动跳过无意义查询 (`should_skip_query`)。节省 Embedding API 调用成本，保持记忆库清洁。可通过 `force=true` 绕过。
+- **🩺 向量回填维护**：新增 `tachi backfill-vectors --db <path> [--dry-run]`，可扫描任意库缺失的 embedding 并批量补齐，适合迁移后或 agent 本地库向量缺口修复。
 - **⏰ 后台自动垃圾回收**：周期性后台 GC 定时器（默认每 6 小时，通过 `MEMORY_GC_INTERVAL_SECS` 可配置）。无需手动干预即可保持增长表有界。
 - **🕸️ 知识图谱操作**：通过 `add_edge` 和 `get_edges` MCP 工具直接操作记忆图谱。支持创建因果、时序和实体关联边，可附带元数据和权重。
 - **🔗 保存时自动链接**：`save_memory` 自动发现共享相同实体的已有记忆，并在它们之间创建图谱边（异步、非阻塞）。默认开启，通过 `auto_link=false` 可禁用。
+- **🧾 写入血缘标记**：主要写入链路现在会自动携带 `metadata.provenance`，记录调用工具、最终落库 scope/path、当前注册 agent 身份，以及可选的 `TACHI_PROFILE` / `TACHI_DOMAIN` 标签，便于后续排查冲突与过期事实。
 
 ---
 

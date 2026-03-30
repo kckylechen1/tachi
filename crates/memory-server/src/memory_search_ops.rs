@@ -24,16 +24,32 @@ pub(super) async fn handle_save_memory(
     let summary = params.summary;
     let needs_summary = summary.is_empty();
     let needs_embedding = params.vector.is_none();
+    let path = params.path;
+    let category = params.category;
+    let topic = params.topic;
+    let metadata = crate::provenance::inject_provenance(
+        server,
+        json!({}),
+        "save_memory",
+        "memory_write",
+        Some(requested_scope.as_str()),
+        target_db,
+        json!({
+            "path": path.clone(),
+            "category": category.clone(),
+            "topic": topic.clone(),
+        }),
+    );
 
     let entry = MemoryEntry {
         id: id.clone(),
-        path: params.path,
+        path,
         summary,
         text: params.text,
         importance: params.importance,
         timestamp: timestamp.clone(),
-        category: params.category,
-        topic: params.topic,
+        category,
+        topic,
         keywords: params.keywords,
         persons: params.persons,
         entities: params.entities,
@@ -44,7 +60,7 @@ pub(super) async fn handle_save_memory(
         access_count: 0,
         last_access: None,
         revision: 1,
-        metadata: serde_json::json!({}),
+        metadata,
         vector: params.vector,
     };
 
@@ -134,11 +150,24 @@ pub(super) async fn handle_save_memory(
 
 pub(super) async fn handle_search_memory(
     server: &MemoryServer,
-    params: SearchMemoryParams,
+    mut params: SearchMemoryParams,
 ) -> Result<String, String> {
     if memory_core::should_skip_query(&params.query) {
         return serde_json::to_string(&json!([]))
             .map_err(|e| format!("Failed to serialize: {}", e));
+    }
+
+    if params.query_vec.is_none() && (server.global_vec_available || server.project_vec_available) {
+        match server.llm.embed_voyage(&params.query, "query").await {
+            Ok(query_vec) => {
+                params.query_vec = Some(query_vec);
+            }
+            Err(e) => {
+                eprintln!(
+                    "[search_memory] query embedding failed, falling back to lexical-only search: {e}"
+                );
+            }
+        }
     }
 
     let pipeline_enabled = server.pipeline_enabled;

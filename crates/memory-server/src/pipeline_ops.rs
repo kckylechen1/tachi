@@ -28,8 +28,19 @@ pub(super) async fn handle_extract_facts(
         .with_store_for_scope(target_db, |store| {
             let mut saved = 0;
             for fact in &facts {
+                let metadata = crate::provenance::inject_provenance(
+                    server,
+                    serde_json::json!({"source": source.clone()}),
+                    "extract_facts",
+                    "fact_extraction",
+                    Some("project"),
+                    target_db,
+                    serde_json::json!({
+                        "extract_source": source.clone(),
+                    }),
+                );
                 let Some(entry) =
-                    fact_to_entry(fact, "extraction", serde_json::json!({"source": source}))
+                    fact_to_entry(fact, "extraction", metadata)
                 else {
                     continue;
                 };
@@ -104,13 +115,26 @@ pub(super) async fn handle_ingest_event(
                 let saved = server.with_store_for_scope(target_db, |store| {
                     let mut saved = 0;
                     for fact in &facts {
+                        let metadata = crate::provenance::inject_provenance(
+                            &server,
+                            serde_json::json!({
+                                "conversation_id": conversation_id.clone(),
+                                "turn_id": turn_id.clone(),
+                            }),
+                            "ingest_event",
+                            "conversation_ingest",
+                            Some("project"),
+                            target_db,
+                            serde_json::json!({
+                                "conversation_id": conversation_id.clone(),
+                                "turn_id": turn_id.clone(),
+                                "event_hash": eh.clone(),
+                            }),
+                        );
                         let Some(entry) = fact_to_entry(
                             fact,
                             &format!("conversation:{conversation_id}"),
-                            serde_json::json!({
-                                "conversation_id": conversation_id,
-                                "turn_id": turn_id,
-                            }),
+                            metadata,
                         ) else {
                             continue;
                         };

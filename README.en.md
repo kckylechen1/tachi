@@ -151,6 +151,11 @@ Please install the Tachi memory extension for OpenClaw:
 4. Configure API keys in the project root `.env` file (see `.env.example`):
    - VOYAGE_API_KEY (Embedding + Rerank)
    - SILICONFLOW_API_KEY (Extraction)
+
+Operational notes:
+- Current OpenClaw runtime topology is per-agent: `data/agents/<agent>/memory.db`.
+- The root `data/memory.db` is legacy-only and should be treated as historical or migration data, not the active write target.
+- If you want the latest local binary after a release, prefer `brew reinstall tachi` after the tap formula is updated, or point agents directly at a freshly built `target/release/memory-server`.
 ```
 
 ---
@@ -171,10 +176,12 @@ Please install the Tachi memory extension for OpenClaw:
 - **🔀 MCP Proxy**: Register child MCP servers once in Tachi — with `tool_exposure=flatten` they appear as `server__tool`, or with `tool_exposure=gateway` they stay compact behind `hub_call`. Shared connection pool with lazy-connect, idle cleanup, circuit breaker, and per-child concurrency control. Sanitized env with 21 preserved system variables. Transport aliases (`http`, `streamable-http` → `sse`). No more zombie processes.
 - **🗑️ Memory Lifecycle Management**: Full lifecycle control with `delete_memory` (permanent removal with CASCADE cleanup), `archive_memory` (soft-delete with recovery), and `memory_gc` (prune stale access history, old events, and audit log entries).
 - **🧹 Noise Filtering**: Automatic rejection of junk text on save (`is_noise_text`) and meaningless queries on search (`should_skip_query`). Saves embedding API costs and keeps the memory store clean. Bypassable via `force=true`.
+- **🩺 Vector Backfill Maintenance**: `tachi backfill-vectors --db <path> [--dry-run]` audits any store for missing embeddings and fills them in batch, which is especially useful after migrations or when agent-local DBs fall behind.
 - **⏰ Background Garbage Collection**: Periodic background GC timer (default: every 6 hours, configurable via `MEMORY_GC_INTERVAL_SECS`). Keeps growing tables bounded without manual intervention.
 - **🕸️ Knowledge Graph Tools**: Direct graph manipulation via `add_edge` and `get_edges` MCP tools. Create causal, temporal, and entity relationship edges with metadata and weights.
 - **🔗 Auto-Link on Save**: `save_memory` automatically discovers existing memories sharing the same entities and creates graph edges between them (async, non-blocking). Enabled by default, disable with `auto_link=false`.
 - **👤 Agent Profiles**: Each agent session can register its identity via `agent_register` — declaring an agent ID, display name, capabilities, tool allowlist (glob patterns), and per-agent rate limit overrides. Query the current profile with `agent_whoami`. Profiles are session-scoped and in-memory.
+- **🧾 Provenance on Write**: New writes now carry `metadata.provenance` with the calling tool, resolved DB scope/path, registered agent profile, and optional `TACHI_PROFILE` / `TACHI_DOMAIN` tags so conflicts and stale memories are easier to audit later.
 - **🤝 Cross-Agent Handoff**: When an agent session ends, it can leave a structured handoff memo via `handoff_leave` (summary, next steps, target agent, context). The next agent calls `handoff_check` at startup to pick up pending work. Memos are persisted both in-memory and to the global store (`category="handoff"`) for cross-restart durability.
 - **⚡ Rate Limiter & Loop Detection**: Per-session sliding window RPM enforcement and identical-call burst detection (same tool + args within 60s). Default: RPM unlimited, burst limit 8. Configurable via `RATE_LIMIT_RPM` and `RATE_LIMIT_BURST` env vars, or per-agent via `agent_register`.
 - **📤 Skill Export**: `hub_export_skills` exports Hub skills to agent-specific formats — Claude (SKILL.md + symlinks), OpenClaw (plugin manifest), Cursor (.mdc rules), and generic (raw markdown). Supports visibility filtering, skill ID selection, agent-local scope filtering, and clean mode.

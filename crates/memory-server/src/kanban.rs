@@ -475,6 +475,22 @@ pub(super) async fn handle_post_card(
     add_trimmed_str_to_metadata(&mut metadata, "project_id", &params.project_id);
     add_trimmed_str_to_metadata(&mut metadata, "conversation_id", &params.conversation_id);
     add_trimmed_str_to_metadata(&mut metadata, "agent_session_id", &params.agent_session_id);
+    metadata = crate::provenance::inject_provenance(
+        server,
+        metadata,
+        "post_card",
+        "kanban_card",
+        Some("global"),
+        DbScope::Global,
+        json!({
+            "from_agent": params.from_agent.clone(),
+            "to_agent": params.to_agent.clone(),
+            "workspace_id": params.workspace_id.clone(),
+            "project_id": params.project_id.clone(),
+            "conversation_id": params.conversation_id.clone(),
+            "agent_session_id": params.agent_session_id.clone(),
+        }),
+    );
 
     let entry = MemoryEntry {
         id: card_id.clone(),

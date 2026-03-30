@@ -17,6 +17,7 @@ mod memory_ops;
 mod memory_search_ops;
 mod pack_ops;
 mod pipeline_ops;
+mod provenance;
 mod project_db_ops;
 mod prompts;
 mod sandbox_ops;
@@ -207,6 +208,18 @@ enum Commands {
     Hub {
         #[command(subcommand)]
         action: HubAction,
+    },
+    /// Backfill missing vector embeddings using Voyage API
+    BackfillVectors {
+        /// Target DB path (defaults to global DB)
+        #[arg(long, value_name = "PATH")]
+        db: Option<PathBuf>,
+        /// Batch size for Voyage API calls (max 128)
+        #[arg(long, default_value_t = 64)]
+        batch_size: usize,
+        /// Only count missing entries, don't embed
+        #[arg(long)]
+        dry_run: bool,
     },
 }
 
@@ -1225,6 +1238,20 @@ impl MemoryServer {
 
         // Also persist to memory for cross-restart durability
         let memo_json = serde_json::to_string(&memo).map_err(|e| format!("serialize: {e}"))?;
+        let metadata = crate::provenance::inject_provenance(
+            self,
+            serde_json::json!({"handoff_memo_id": memo_id.clone()}),
+            "handoff_leave",
+            "handoff_memo",
+            Some("general"),
+            DbScope::Global,
+            serde_json::json!({
+                "from_agent": from_agent.clone(),
+                "target_agent": memo.target_agent.clone(),
+                "next_steps_count": memo.next_steps.len(),
+            }),
+        );
+
         let entry = MemoryEntry {
             id: format!("handoff:{}", memo_id),
             text: format!(
@@ -1255,7 +1282,7 @@ impl MemoryServer {
             last_access: None,
             revision: 1,
             vector: None,
-            metadata: serde_json::json!({"handoff_memo_id": memo_id}),
+            metadata,
         };
         self.with_global_store(|store| store.upsert(&entry).map_err(|e| format!("{e}")))?;
 

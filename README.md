@@ -145,6 +145,11 @@ Tachi 亦化身为 OpenClaw 气海之元婴法宝。
 4. 在项目根目录的 `.env` 中配置 API 密钥（参见 `.env.example`）：
    - VOYAGE_API_KEY (向量与重排)
    - SILICONFLOW_API_KEY (结构化抽取)
+
+运行要诀：
+- OpenClaw 现行运行拓扑，已按灵核各自分库：`data/agents/<agent>/memory.db`。
+- 根目录 `data/memory.db` 今只作旧迹与迁徙之遗库，不再为新记忆默认落点。
+- 若欲就地服用最新二进制，宜待 tap formula 更新后行 `brew reinstall tachi`；抑或令各灵核直指 freshly built 之 `target/release/memory-server`。
 ```
 
 ---
@@ -165,9 +170,11 @@ Tachi 亦化身为 OpenClaw 气海之元婴法宝。
 - **🔀 灵枢转运（MCP 代理）**：只需于万宝楼登入一次子灵枢。若设 `tool_exposure=flatten`，则诸般法器展开为 `server__tool`；若设 `tool_exposure=gateway`，则收束于 `hub_call` 一门透传。共享灵脉连接，闲时自断，熔断护体，并发可控。派发灵气时保殄二十一根系统命脉，输送符箓三别名 (`http`、`streamable-http` 皆可通 `sse`)。僵尸进程，就此绝迹。
 - **🗑️ 轮回生灭（记忆生命周期）**：`delete_memory` 可将一段尘缘彻底贫灭，关联遗孤尽皆归尘；`archive_memory` 可封印封存，他日可解；`memory_gc` 可清扫陈年旧事、发霉记录。
 - **🧹 搭脉过滤（降噪）**：录入时静观材料，若为废料则送客，不开炉炼丹 (`is_noise_text`)；检索时先审问口诀，若为废话则不取经文 (`should_skip_query`)。节省灵石（Embedding API），保藏经阁清明。确需强录者，置 `force=true` 可破例。
+- **🩺 补脉回元（向量回填）**：新添 `tachi backfill-vectors --db <path> [--dry-run]` 之术，可巡检任一藏库缺失 embedding 之条目，并分批补齐，尤宜迁徙后或灵核本地库失配之时。
 - **⏰ 自动扫尘（后台垃圾回收）**：每隔六个时辰，暗卫司自行巡视各大卯册，将过期日志、陈年旧事清却。可置 `MEMORY_GC_INTERVAL_SECS` 调节时辰，完全无需掌师亲临。
 - **🕸️ 因果网结（图谱操作）**：可用 `add_edge` 新结因果缘线，以 `get_edges` 查探千丝网络。支持因果、时序、实体三种羁绊，各带元数据与权重。
 - **🔗 缘线自织（自动链接）**：`save_memory` 每录新识，便自行侦查天下哪家与之共享同一实体，暗中编织因果线（异步无阻）。默认开启，置 `auto_link=false` 可禁。
+- **🧾 血缘留痕（写入 provenance）**：诸般主要入库之术，今皆自带 `metadata.provenance`，记其所由法器、所归库域、所落路径、当前灵核身令，以及可选之 `TACHI_PROFILE` / `TACHI_DOMAIN` 印记，便于他日审狱纠谬。
 - **👤 灵核身令（Agent Profile）**：各路灵核入阵时可呈报名帖（`agent_register`），注明名号、所长、法器许可（glob 匹配）。另设 `agent_whoami` 供查验当前道号。一令一境，互不串扰。
 - **🤝 跨界交接（Handoff 令牌）**：灵核甲临退之际，以 `handoff_leave` 留下交接令牌（任务摘要、后续要务、目标灵核、附加情境），灵核乙入场时以 `handoff_check` 接领。令牌兼存内存与持久记忆（`category="handoff"`），跨重启亦不失。
 - **⚡ 关隘限速（Rate Limiter）**：每会话设滑窗限速（RPM）与重复探测（同术同参 60 秒内连发超阈则断）。默认 RPM 不限、重复阈值 8。可由 `RATE_LIMIT_RPM`、`RATE_LIMIT_BURST` 设定，或经 `agent_register` 逐灵核覆写。

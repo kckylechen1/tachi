@@ -79,17 +79,42 @@ fn evaluate_cli_capability_enabled(
     }
 }
 
-fn run_cli_command(command: Commands, db_path: &PathBuf) -> Result<(), Box<dyn std::error::Error>> {
+async fn run_cli_command(
+    command: Commands,
+    db_path: &PathBuf,
+) -> Result<(), Box<dyn std::error::Error>> {
     match command {
         Commands::Serve => Ok(()),
         Commands::Search { query, path, top_k } => {
             let store = open_cli_store(db_path)?;
             let path_prefix = path.clone();
+            let query_vec = if store.vec_available {
+                match crate::llm::LlmClient::new() {
+                    Ok(llm) => match llm.embed_voyage(&query, "query").await {
+                        Ok(vec) => Some(vec),
+                        Err(e) => {
+                            eprintln!(
+                                "[cli search] query embedding failed, falling back to lexical-only search: {e}"
+                            );
+                            None
+                        }
+                    },
+                    Err(e) => {
+                        eprintln!(
+                            "[cli search] LLM client init failed, falling back to lexical-only search: {e}"
+                        );
+                        None
+                    }
+                }
+            } else {
+                None
+            };
             let results = store.search(
                 &query,
                 Some(SearchOptions {
                     top_k,
                     path_prefix,
+                    query_vec,
                     ..Default::default()
                 }),
             )?;
@@ -153,6 +178,9 @@ fn run_cli_command(command: Commands, db_path: &PathBuf) -> Result<(), Box<dyn s
                 object.insert("kanban_cards_pruned".into(), json!(kanban_deleted));
             }
             print_pretty_json(&gc)
+        }
+        Commands::BackfillVectors { .. } => {
+            unreachable!("BackfillVectors is handled in async context before this point")
         }
         Commands::Hub { action } => {
             let store = open_cli_store(db_path)?;
@@ -338,8 +366,23 @@ async fn tokio_main(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         tokio::fs::create_dir_all(parent).await?;
     }
 
+    // BackfillVectors needs async (LLM client), handle it here before sync dispatch
+    if let Commands::BackfillVectors {
+        db,
+        batch_size,
+        dry_run,
+    } = &command
+    {
+        let target_path = if let Some(p) = db {
+            expand_user_path(p.to_string_lossy().as_ref())
+        } else {
+            global_db_path.clone()
+        };
+        return run_backfill_vectors(&target_path, *batch_size, *dry_run).await;
+    }
+
     if !matches!(command, Commands::Serve) {
-        return run_cli_command(command, &global_db_path);
+        return run_cli_command(command, &global_db_path).await;
     }
 
     let gc_enabled = cli
@@ -672,5 +715,93 @@ async fn tokio_main(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
+    Ok(())
+}
+
+/// Backfill missing vector embeddings for a given DB.
+async fn run_backfill_vectors(
+    db_path: &PathBuf,
+    batch_size: usize,
+    dry_run: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use crate::llm::LlmClient;
+
+    let db_str = db_path.to_str().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("DB path contains invalid UTF-8: {}", db_path.display()),
+        )
+    })?;
+
+    let store = MemoryStore::open(db_str)?;
+    let (total, with_vec) = store.vector_stats()?;
+    let missing = total - with_vec;
+
+    println!("DB:      {}", db_path.display());
+    println!("Total:   {total}");
+    println!("Vectors: {with_vec}");
+    println!("Missing: {missing}");
+
+    if missing == 0 {
+        println!("\n✅ All entries have vectors!");
+        return Ok(());
+    }
+
+    if dry_run {
+        println!("\n(dry-run mode, no changes made)");
+        return Ok(());
+    }
+
+    let llm = LlmClient::new().map_err(|e| format!("LLM client init failed: {e}"))?;
+    let entries = store.entries_missing_vectors()?;
+
+    let batch_size = batch_size.min(128).max(1);
+    let total_missing = entries.len();
+    let mut processed = 0usize;
+
+    println!("\nBackfilling {total_missing} entries (batch_size={batch_size})...\n");
+
+    // Re-open as mutable for update_enrichment_fields
+    drop(store);
+    let mut store = MemoryStore::open(db_str)?;
+
+    for chunk in entries.chunks(batch_size) {
+        let texts: Vec<String> = chunk
+            .iter()
+            .map(|(_, text, summary, _)| {
+                let t = text.trim();
+                let s = if t.len() < 10 { summary.as_str() } else { t };
+                if s.len() > 8000 { s[..8000].to_string() } else { s.to_string() }
+            })
+            .collect();
+
+        match llm.embed_voyage_batch(&texts, "document").await {
+            Ok(vecs) => {
+                for (i, (id, _, _, revision)) in chunk.iter().enumerate() {
+                    if i < vecs.len() {
+                        match store.update_enrichment_fields(id, None, Some(&vecs[i]), *revision) {
+                            Ok(true) => {}
+                            Ok(false) => eprintln!("  WARN: revision mismatch for {id}, skipped"),
+                            Err(e) => eprintln!("  WARN: DB write failed for {id}: {e}"),
+                        }
+                    }
+                }
+                processed += chunk.len();
+                println!("  [{processed}/{total_missing}] ✓ batch of {}", chunk.len());
+            }
+            Err(e) => {
+                eprintln!("  ERROR: Voyage API failed: {e}");
+                eprintln!("  Stopping. {processed} entries saved successfully.");
+                break;
+            }
+        }
+
+        if processed < total_missing {
+            tokio::time::sleep(Duration::from_millis(300)).await;
+        }
+    }
+
+    let (total, final_vec) = store.vector_stats()?;
+    println!("\n✅ Done! Vectors: {with_vec} → {final_vec} / {total}");
     Ok(())
 }

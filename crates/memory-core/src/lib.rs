@@ -155,6 +155,42 @@ impl MemoryStore {
         )
     }
 
+    /// List entries that are missing vector embeddings.
+    /// Returns (id, text, summary, revision) tuples.
+    pub fn entries_missing_vectors(
+        &self,
+    ) -> Result<Vec<(String, String, String, i64)>, MemoryError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, text, summary, revision FROM memories
+             WHERE id NOT IN (SELECT id FROM memories_vec)
+             ORDER BY rowid",
+        )?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, i64>(3)?,
+                ))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    /// Get total memory count and vector count.
+    pub fn vector_stats(&self) -> Result<(i64, i64), MemoryError> {
+        let total: i64 = self
+            .conn
+            .query_row("SELECT COUNT(*) FROM memories", [], |r| r.get(0))?;
+        let with_vec: i64 = self
+            .conn
+            .query_row("SELECT COUNT(DISTINCT id) FROM memories_vec", [], |r| {
+                r.get(0)
+            })?;
+        Ok((total, with_vec))
+    }
+
     /// Hybrid search: Text + FTS5 + optional vector channel.
     pub fn search(
         &self,

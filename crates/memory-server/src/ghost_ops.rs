@@ -313,6 +313,24 @@ pub(super) async fn handle_ghost_promote(
 
         let text = payload_to_text(&payload);
         let memory_id = format!("ghost:{}", params.message_id);
+        let metadata = crate::provenance::inject_provenance(
+            server,
+            json!({
+                "ghost_message_id": params.message_id.clone(),
+                "ghost_topic": topic.clone(),
+                "ghost_publisher": publisher.clone(),
+                "payload": payload.clone(),
+            }),
+            "ghost_promote",
+            "ghost_message",
+            Some("general"),
+            DbScope::Global,
+            json!({
+                "message_id": params.message_id.clone(),
+                "topic": topic.clone(),
+                "publisher": publisher.clone(),
+            }),
+        );
         let entry = MemoryEntry {
             id: memory_id.clone(),
             path: target_path.clone(),
@@ -332,12 +350,7 @@ pub(super) async fn handle_ghost_promote(
             access_count: 0,
             last_access: None,
             revision: 1,
-            metadata: json!({
-                "ghost_message_id": params.message_id,
-                "ghost_topic": topic,
-                "ghost_publisher": publisher,
-                "payload": payload,
-            }),
+            metadata,
             vector: None,
         };
 

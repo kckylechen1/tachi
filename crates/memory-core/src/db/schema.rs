@@ -134,8 +134,7 @@ pub fn init_schema(conn: &Connection) -> Result<(), MemoryError> {
         CREATE INDEX IF NOT EXISTS idx_hub_cap_type ON hub_capabilities(type);
         CREATE INDEX IF NOT EXISTS idx_hub_cap_name ON hub_capabilities(name);
         CREATE INDEX IF NOT EXISTS idx_hub_cap_enabled ON hub_capabilities(enabled);
-        CREATE INDEX IF NOT EXISTS idx_hub_cap_review_status ON hub_capabilities(review_status);
-        CREATE INDEX IF NOT EXISTS idx_hub_cap_health_status ON hub_capabilities(health_status);
+        -- review_status / health_status indexes are created after ensure_column migrations
 
         CREATE TABLE IF NOT EXISTS hub_version_routes (
             alias_id TEXT PRIMARY KEY,
@@ -450,6 +449,8 @@ pub fn init_schema(conn: &Connection) -> Result<(), MemoryError> {
         CREATE INDEX IF NOT EXISTS idx_derived_source       ON derived_items(source);
         CREATE INDEX IF NOT EXISTS idx_derived_path         ON derived_items(path);
         CREATE INDEX IF NOT EXISTS idx_derived_created_at   ON derived_items(created_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_hub_cap_review_status ON hub_capabilities(review_status);
+        CREATE INDEX IF NOT EXISTS idx_hub_cap_health_status ON hub_capabilities(health_status);
     "#,
     )?;
 
