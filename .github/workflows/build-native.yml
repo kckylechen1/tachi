@@ -19,6 +19,8 @@ jobs:
             os: macos-14
           - target: x86_64-apple-darwin
             os: macos-13
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
           - target: x86_64-unknown-linux-gnu
             os: ubuntu-latest
           - target: aarch64-unknown-linux-gnu
@@ -45,16 +47,13 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y gcc-aarch64-linux-gnu g++-aarch64-linux-gnu
 
-      - name: Install napi-rs CLI
-        run: npm install -g @napi-rs/cli
-
       - name: Install node deps
         working-directory: crates/memory-node
         run: npm install
 
       - name: Build native module
         working-directory: crates/memory-node
-        run: napi build --platform --release --cargo-cwd . --target ${{ matrix.target }}
+        run: npx napi build --platform --release --cargo-cwd . --target ${{ matrix.target }}
         env:
           CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
 
@@ -68,7 +67,7 @@ jobs:
   publish:
     needs: build
     runs-on: ubuntu-latest
-    name: Publish @memory-core/node to npm
+    name: Publish @chaoxlabs/tachi-node to npm
     permissions:
       contents: read
       id-token: write
@@ -81,8 +80,9 @@ jobs:
           node-version: 20
           registry-url: https://registry.npmjs.org
 
-      - name: Install napi-rs CLI
-        run: npm install -g @napi-rs/cli
+      - name: Install node deps
+        working-directory: crates/memory-node
+        run: npm install
 
       - name: Download all artifacts
         uses: actions/download-artifact@v4
@@ -91,15 +91,51 @@ jobs:
 
       - name: Move artifacts
         working-directory: crates/memory-node
-        run: napi artifacts -d artifacts
+        run: npx napi artifacts -d artifacts
 
-      - name: Publish
+      - name: Verify prepublish output
         working-directory: crates/memory-node
         run: |
-          napi prepublish -t npm
-          npm publish --access public
+          npx napi prepublish -t npm
+          echo "=== Checking platform sub-packages ==="
+          for dir in npm/*/; do
+            if [ -f "$dir/package.json" ]; then
+              PKG_NAME=$(node -e "console.log(require('./$dir/package.json').name)")
+              echo "✅ $dir → $PKG_NAME"
+              # Verify package name follows @chaoxlabs/tachi-node-* pattern
+              if [[ "$PKG_NAME" != @chaoxlabs/tachi-node-* ]]; then
+                echo "❌ Unexpected package name: $PKG_NAME (expected @chaoxlabs/tachi-node-*)"
+                exit 1
+              fi
+            fi
+          done
+
+      - name: Publish platform packages
+        working-directory: crates/memory-node
+        run: |
+          for dir in npm/*/; do
+            if [ -f "$dir/package.json" ]; then
+              cd "$dir"
+              npm publish --access public || true
+              cd -
+            fi
+          done
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - name: Publish main package
+        working-directory: crates/memory-node
+        run: npm publish --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - name: Verify published packages
+        run: |
+          sleep 15
+          for pkg in tachi-node tachi-node-darwin-arm64 tachi-node-darwin-x64 tachi-node-linux-x64-gnu tachi-node-linux-arm64-gnu tachi-node-win32-x64-msvc; do
+            echo -n "@chaoxlabs/$pkg: "
+            npm view "@chaoxlabs/$pkg" version 2>/dev/null || echo "⚠ not found yet (may need index time)"
+          done
 
   package-plugin:
     needs: publish

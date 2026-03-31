@@ -2,7 +2,7 @@
 #
 # One-command installer for Sigil Memory (OpenClaw Plugin)
 # Usage:
-#   curl -fsSL https://raw.githubusercontent.com/nicekid1/Sigil/main/scripts/install.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/kckylechen1/tachi/main/scripts/install.sh | bash
 #   # or with options:
 #   bash install.sh --version 0.1.0
 #
@@ -10,7 +10,7 @@ set -euo pipefail
 
 VERSION="${SIGIL_VERSION:-latest}"
 PLUGIN_DIR="${SIGIL_PLUGIN_DIR:-$HOME/.openclaw/extensions/memory-hybrid-bridge}"
-REPO="nicekid1/Sigil"
+REPO="kckylechen1/tachi"
 
 # ── Parse args ────────────────────────────────────────────────
 while [[ $# -gt 0 ]]; do

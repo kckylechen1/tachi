@@ -29,4 +29,26 @@ export declare class JsMemoryStore {
   getAll(limit?: number | undefined | null): string
   /** Returns true if the sqlite-vec extension was loaded successfully. */
   get vecAvailable(): boolean
+  /** Add or update an edge in the memory graph. `edge_json` is a JSON string of MemoryEdge. */
+  addEdge(edgeJson: string): void
+  /** Remove an edge. Returns true if found and deleted. */
+  removeEdge(sourceId: string, targetId: string, relation: string): boolean
+  /**
+   * Get edges for a memory ID. Returns JSON string of MemoryEdge[].
+   * direction: "outgoing", "incoming", or "both"
+   */
+  getEdges(memoryId: string, direction?: string | undefined | null, relationFilter?: string | undefined | null): string
+  /** BFS graph expansion from seed IDs. Returns JSON string of GraphExpandResult. */
+  graphExpand(seedIdsJson: string, maxHops?: number | undefined | null, relationFilter?: string | undefined | null): string
+  /** Register a hub capability. `cap_json` is a JSON string of HubCapability. */
+  hubRegister(capJson: string): void
+  /**
+   * Discover hub capabilities. Returns JSON string of HubCapability[].
+   * Optional query for search, optional cap_type filter.
+   */
+  hubDiscover(query?: string | undefined | null, capType?: string | undefined | null): string
+  /** Get a single hub capability by ID. Returns JSON string or null. */
+  hubGet(id: string): string | null
+  /** Record feedback for a hub capability invocation. */
+  hubFeedback(id: string, success: boolean, rating?: number | undefined | null): void
 }
