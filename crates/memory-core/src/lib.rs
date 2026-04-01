@@ -16,7 +16,9 @@ pub mod vault;
 pub use error::MemoryError;
 pub use hub::{HubCapability, VirtualCapabilityBinding};
 pub use noise::{is_noise_text, should_skip_query};
-pub use pack::{AgentKind, AgentProjection, Pack};
+pub use pack::{
+    AgentKind, AgentProjection, Pack, PackAssetRef, PackManifest, PackManifestMeta, PackOverlay,
+};
 pub use scorer::HybridWeights;
 pub use search::{hybrid_search, SearchOptions};
 pub use types::{
@@ -183,11 +185,11 @@ impl MemoryStore {
         let total: i64 = self
             .conn
             .query_row("SELECT COUNT(*) FROM memories", [], |r| r.get(0))?;
-        let with_vec: i64 = self
-            .conn
-            .query_row("SELECT COUNT(DISTINCT id) FROM memories_vec", [], |r| {
-                r.get(0)
-            })?;
+        let with_vec: i64 =
+            self.conn
+                .query_row("SELECT COUNT(DISTINCT id) FROM memories_vec", [], |r| {
+                    r.get(0)
+                })?;
         Ok((total, with_vec))
     }
 

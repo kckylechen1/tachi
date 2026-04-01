@@ -1640,7 +1640,7 @@ impl MemoryServer {
     }
 
     #[tool(
-        description = "Project a pack's skills to one or more agents. Converts SKILL.md files to each agent's native format (e.g. .mdc rules for Cursor) and copies them to the agent's skill directory."
+        description = "Project a pack's skills, workflows, and host overlays to one or more agents. Converts SKILL.md files to each agent's native format (e.g. .mdc rules for Cursor) and emits a tachi-projection manifest for adapters such as OpenClaw."
     )]
     async fn pack_project(
         &self,

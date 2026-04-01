@@ -4,6 +4,8 @@
 // Packs are installed once in Tachi and projected to any agent in its native format.
 
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
+use std::collections::BTreeMap;
 
 /// Known agent types that Tachi can project skills to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -13,6 +15,7 @@ pub enum AgentKind {
     Codex,
     Cursor,
     Gemini,
+    OpenClaw,
     OpenCode,
     Antigravity,
     Trae,
@@ -27,6 +30,7 @@ impl AgentKind {
             AgentKind::Codex => "codex",
             AgentKind::Cursor => "cursor",
             AgentKind::Gemini => "gemini",
+            AgentKind::OpenClaw => "openclaw",
             AgentKind::OpenCode => "opencode",
             AgentKind::Antigravity => "antigravity",
             AgentKind::Trae => "trae",
@@ -41,6 +45,7 @@ impl AgentKind {
             "codex" => Some(AgentKind::Codex),
             "cursor" => Some(AgentKind::Cursor),
             "gemini" => Some(AgentKind::Gemini),
+            "openclaw" => Some(AgentKind::OpenClaw),
             "opencode" => Some(AgentKind::OpenCode),
             "antigravity" => Some(AgentKind::Antigravity),
             "trae" => Some(AgentKind::Trae),
@@ -58,6 +63,7 @@ impl AgentKind {
             AgentKind::Codex => ("~/.codex/skills", "SKILL.md"),
             AgentKind::Cursor => ("~/.cursor/rules", ".mdc"),
             AgentKind::Gemini => ("~/.gemini/skills", "SKILL.md"),
+            AgentKind::OpenClaw => ("~/.openclaw/plugins", "tachi-projection.json"),
             AgentKind::OpenCode => ("~/.opencode/skills", "SKILL.md"),
             AgentKind::Antigravity => ("~/.claude/skills", "SKILL.md"), // shares Claude format
             AgentKind::Trae => ("~/.trae/skills", "SKILL.md"),
@@ -65,6 +71,83 @@ impl AgentKind {
             AgentKind::Generic => ("~/.tachi/skills", "SKILL.md"),
         }
     }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct PackManifest {
+    #[serde(default)]
+    pub schema_version: String,
+
+    #[serde(default)]
+    pub pack: PackManifestMeta,
+
+    #[serde(default)]
+    pub services: Vec<String>,
+
+    #[serde(default)]
+    pub skills: Vec<PackAssetRef>,
+
+    #[serde(default)]
+    pub workflows: Vec<PackAssetRef>,
+
+    #[serde(default)]
+    pub runtime: Vec<PackAssetRef>,
+
+    #[serde(default)]
+    pub overlays: BTreeMap<String, PackOverlay>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct PackManifestMeta {
+    #[serde(default)]
+    pub id: Option<String>,
+
+    #[serde(default)]
+    pub name: Option<String>,
+
+    #[serde(default)]
+    pub version: Option<String>,
+
+    #[serde(default)]
+    pub description: Option<String>,
+
+    #[serde(default)]
+    pub source: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct PackAssetRef {
+    pub path: String,
+
+    #[serde(default)]
+    pub target: Option<String>,
+
+    #[serde(default)]
+    pub kind: Option<String>,
+
+    #[serde(default)]
+    pub description: Option<String>,
+
+    #[serde(default)]
+    pub metadata: Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct PackOverlay {
+    #[serde(default)]
+    pub files: Vec<PackAssetRef>,
+
+    #[serde(default)]
+    pub commands: Vec<PackAssetRef>,
+
+    #[serde(default)]
+    pub hooks: Vec<PackAssetRef>,
+
+    #[serde(default)]
+    pub agents: Vec<PackAssetRef>,
+
+    #[serde(default)]
+    pub manifest: Option<Value>,
 }
 
 /// A registered skill pack in the Tachi registry.

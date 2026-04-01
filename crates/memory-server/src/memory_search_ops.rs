@@ -114,7 +114,7 @@ pub(super) async fn handle_save_memory(
         let auto_link_entities = entry.entities.clone();
         let auto_link_named_project = params.project.clone();
         let auto_link_target_db = target_db;
-        
+
         tokio::spawn(async move {
             for entity in &auto_link_entities {
                 let query = entity.clone();
@@ -129,7 +129,7 @@ pub(super) async fn handle_save_memory(
                         )
                         .map_err(|e| format!("{}", e))
                 };
-                
+
                 let search_res = if let Some(ref p) = auto_link_named_project {
                     auto_link_server.with_named_project_store_read(p, search_action)
                 } else {

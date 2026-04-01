@@ -205,7 +205,7 @@ impl MemoryServer {
         let db_str = db_path.to_str().ok_or_else(|| {
             format!("Project DB path contains invalid UTF-8: {}", db_path.display())
         })?;
-        
+
         // Use global rw_gate for write lock to avoid concurrent SQLITE_BUSY issues for named projects.
         // It's a coarse lock, but named project writes are fast and this prevents concurrent overlaps.
         let _gate = write_or_recover(&self.global_rw_gate, "named_project_rw_gate");
