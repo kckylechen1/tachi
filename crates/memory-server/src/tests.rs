@@ -373,6 +373,7 @@ async fn ghost_promote_writes_memory_and_marks_message_promoted() {
         .get_memory(Parameters(GetMemoryParams {
             id: memory_id,
             include_archived: false,
+            project: None,
         }))
         .await
         .expect("get_memory should succeed");
@@ -1186,6 +1187,7 @@ async fn save_memory_includes_provenance_for_registered_agent() {
             id: None,
             force: true,
             auto_link: false,
+            project: None,
         }))
         .await
         .expect("save_memory should succeed");
@@ -1199,6 +1201,7 @@ async fn save_memory_includes_provenance_for_registered_agent() {
         .get_memory(Parameters(GetMemoryParams {
             id,
             include_archived: false,
+            project: None,
         }))
         .await
         .expect("get_memory should succeed");
@@ -1243,6 +1246,7 @@ async fn post_card_includes_provenance_context() {
         .get_memory(Parameters(GetMemoryParams {
             id: card_id,
             include_archived: false,
+            project: None,
         }))
         .await
         .expect("get_memory should succeed");
@@ -2239,6 +2243,7 @@ async fn handoff_leave_persists_to_memory_store() {
         .get_memory(Parameters(GetMemoryParams {
             id: format!("handoff:{}", memo_id),
             include_archived: false,
+            project: None,
         }))
         .await
         .expect("get_memory for handoff should succeed");
@@ -2678,4 +2683,587 @@ async fn test_projection_list_filter_by_agent() {
         }
     }
     let _ = std::fs::remove_dir_all(&pack_dir);
+}
+
+#[tokio::test]
+async fn hub_feedback_records_success_and_rating() {
+    let server = make_server();
+
+    // Register a capability first
+    let cap = HubCapability {
+        id: "mcp:feedback-test".to_string(),
+        cap_type: "mcp".to_string(),
+        name: "feedback-test".to_string(),
+        version: 1,
+        description: "test feedback capability".to_string(),
+        definition: r#"{"transport":"stdio","command":"echo","args":["test"]}"#.to_string(),
+        enabled: true,
+        review_status: "approved".to_string(),
+        health_status: "healthy".to_string(),
+        last_error: None,
+        last_success_at: None,
+        last_failure_at: None,
+        fail_streak: 0,
+        active_version: None,
+        exposure_mode: "gateway".to_string(),
+        uses: 0,
+        successes: 0,
+        failures: 0,
+        avg_rating: 0.0,
+        last_used: None,
+        created_at: String::new(),
+        updated_at: String::new(),
+    };
+
+    server
+        .with_global_store(|store| {
+            store
+                .hub_register(&cap)
+                .map_err(|e| format!("register failed: {e}"))
+        })
+        .expect("failed to register capability");
+
+    // Record successful feedback with rating
+    let feedback = server
+        .hub_feedback(Parameters(HubFeedbackParams {
+            id: "mcp:feedback-test".to_string(),
+            success: true,
+            rating: Some(4.5),
+        }))
+        .await
+        .expect("hub_feedback should succeed");
+
+    let feedback_json: Value = serde_json::from_str(&feedback).unwrap();
+    assert!(feedback_json["recorded"].as_bool().unwrap());
+    assert_eq!(feedback_json["id"], "mcp:feedback-test");
+
+    // Record failure feedback without rating
+    let feedback_fail = server
+        .hub_feedback(Parameters(HubFeedbackParams {
+            id: "mcp:feedback-test".to_string(),
+            success: false,
+            rating: None,
+        }))
+        .await
+        .expect("hub_feedback for failure should succeed");
+
+    let fail_json: Value = serde_json::from_str(&feedback_fail).unwrap();
+    assert!(fail_json["recorded"].as_bool().unwrap());
+}
+
+#[tokio::test]
+async fn hub_stats_returns_capability_counts() {
+    let server = make_server();
+
+    // Register a capability
+    let cap = HubCapability {
+        id: "mcp:stats-test".to_string(),
+        cap_type: "mcp".to_string(),
+        name: "stats-test".to_string(),
+        version: 1,
+        description: "test stats capability".to_string(),
+        definition: r#"{"transport":"stdio","command":"echo","args":["test"]}"#.to_string(),
+        enabled: true,
+        review_status: "approved".to_string(),
+        health_status: "healthy".to_string(),
+        last_error: None,
+        last_success_at: None,
+        last_failure_at: None,
+        fail_streak: 0,
+        active_version: None,
+        exposure_mode: "gateway".to_string(),
+        uses: 0,
+        successes: 0,
+        failures: 0,
+        avg_rating: 0.0,
+        last_used: None,
+        created_at: String::new(),
+        updated_at: String::new(),
+    };
+
+    server
+        .with_global_store(|store| {
+            store
+                .hub_register(&cap)
+                .map_err(|e| format!("register failed: {e}"))
+        })
+        .expect("failed to register capability");
+
+    // Get stats
+    let stats = server
+        .hub_stats()
+        .await
+        .expect("hub_stats should succeed");
+
+    let stats_json: Value = serde_json::from_str(&stats).unwrap();
+    assert!(stats_json["total_capabilities"].as_u64().unwrap() >= 1);
+    assert!(stats_json["by_type"]["mcp"].as_u64().is_some());
+}
+
+#[tokio::test]
+async fn hub_disconnect_returns_ok_for_nonexistent_server() {
+    let server = make_server();
+
+    // Disconnect should succeed even for non-existent server (idempotent)
+    let result = server
+        .hub_disconnect(Parameters(HubDisconnectParams {
+            server_id: "mcp:nonexistent".to_string(),
+        }))
+        .await;
+
+    // Should not error - disconnect is idempotent
+    assert!(result.is_ok(), "hub_disconnect should not fail for nonexistent server");
+}
+
+#[tokio::test]
+async fn sandbox_check_respects_access_rules() {
+    let server = make_server();
+
+    // Set up a sandbox rule allowing read access for a specific role
+    server
+        .sandbox_set_rule(Parameters(SandboxSetRuleParams {
+            agent_role: "test-role".to_string(),
+            path_pattern: "/test/*".to_string(),
+            access_level: "read".to_string(),
+        }))
+        .await
+        .expect("sandbox_set_rule should succeed");
+
+    // Check read access - should be allowed
+    let check_read = server
+        .sandbox_check(Parameters(SandboxCheckParams {
+            agent_role: "test-role".to_string(),
+            path: "/test/something".to_string(),
+            operation: "read".to_string(),
+        }))
+        .await
+        .expect("sandbox_check should succeed");
+
+    let read_json: Value = serde_json::from_str(&check_read).unwrap();
+    assert!(read_json["allowed"].as_bool().unwrap());
+
+    // Check write access on read-only path - should be denied
+    let check_write = server
+        .sandbox_check(Parameters(SandboxCheckParams {
+            agent_role: "test-role".to_string(),
+            path: "/test/something".to_string(),
+            operation: "write".to_string(),
+        }))
+        .await
+        .expect("sandbox_check should succeed");
+
+    let write_json: Value = serde_json::from_str(&check_write).unwrap();
+    assert!(!write_json["allowed"].as_bool().unwrap());
+}
+
+#[tokio::test]
+async fn sandbox_set_rule_updates_existing_rule() {
+    let server = make_server();
+
+    // Set initial rule with read access
+    server
+        .sandbox_set_rule(Parameters(SandboxSetRuleParams {
+            agent_role: "update-role".to_string(),
+            path_pattern: "/sensitive/*".to_string(),
+            access_level: "read".to_string(),
+        }))
+        .await
+        .expect("sandbox_set_rule should succeed");
+
+    // Update to write access
+    server
+        .sandbox_set_rule(Parameters(SandboxSetRuleParams {
+            agent_role: "update-role".to_string(),
+            path_pattern: "/sensitive/*".to_string(),
+            access_level: "write".to_string(),
+        }))
+        .await
+        .expect("sandbox_set_rule update should succeed");
+
+    // Verify write access is now allowed
+    let check_write = server
+        .sandbox_check(Parameters(SandboxCheckParams {
+            agent_role: "update-role".to_string(),
+            path: "/sensitive/data".to_string(),
+            operation: "write".to_string(),
+        }))
+        .await
+        .expect("sandbox_check should succeed");
+
+    let write_json: Value = serde_json::from_str(&check_write).unwrap();
+    assert!(write_json["allowed"].as_bool().unwrap());
+}
+
+#[tokio::test]
+async fn sandbox_policy_prevents_unregistered_capability_startup() {
+    let server = make_server();
+
+    // Register a capability without a policy
+    let cap = HubCapability {
+        id: "mcp:unregistered-policy".to_string(),
+        cap_type: "mcp".to_string(),
+        name: "unregistered-policy".to_string(),
+        version: 1,
+        description: "test capability without policy".to_string(),
+        definition: r#"{"transport":"stdio","command":"echo","args":["test"]}"#.to_string(),
+        enabled: true,
+        review_status: "approved".to_string(),
+        health_status: "healthy".to_string(),
+        last_error: None,
+        last_success_at: None,
+        last_failure_at: None,
+        fail_streak: 0,
+        active_version: None,
+        exposure_mode: "gateway".to_string(),
+        uses: 0,
+        successes: 0,
+        failures: 0,
+        avg_rating: 0.0,
+        last_used: None,
+        created_at: String::new(),
+        updated_at: String::new(),
+    };
+
+    server
+        .with_global_store(|store| {
+            store
+                .hub_register(&cap)
+                .map_err(|e| format!("register failed: {e}"))
+        })
+        .expect("failed to register capability");
+
+    // Try to call without setting policy - should fail with policy error
+    let result = server
+        .proxy_call_internal("unregistered-policy", "test_tool", None)
+        .await;
+
+    assert!(result.is_err(), "proxy_call should fail without sandbox policy");
+    let err_msg = result.unwrap_err().to_string();
+    assert!(
+        err_msg.contains("no sandbox policy") || err_msg.contains("Sandbox"),
+        "Error should mention sandbox policy: {}",
+        err_msg
+    );
+}
+
+#[tokio::test]
+async fn vault_remove_deletes_secret_and_audit_records() {
+    let server = make_server();
+
+    // Initialize vault
+    server
+        .vault_init(Parameters(VaultInitParams {
+            password: "test-password".to_string(),
+        }))
+        .await
+        .expect("vault_init should succeed");
+
+    // Set a secret
+    server
+        .vault_set(Parameters(VaultSetParams {
+            name: "DELETE_ME".to_string(),
+            value: "secret-value".to_string(),
+            secret_type: "api_key".to_string(),
+            description: "to be deleted".to_string(),
+            allowed_agents: None,
+            enable_rotation: false,
+            rotation_strategy: None,
+        }))
+        .await
+        .expect("vault_set should succeed");
+
+    // Verify secret exists
+    let get_result = server
+        .vault_get(Parameters(VaultGetParams {
+            name: "DELETE_ME".to_string(),
+            agent_id: None,
+            auto_rotate: false,
+        }))
+        .await;
+    assert!(get_result.is_ok(), "secret should exist before removal");
+
+    // Remove the secret
+    server
+        .vault_remove(Parameters(VaultRemoveParams {
+            name: "DELETE_ME".to_string(),
+        }))
+        .await
+        .expect("vault_remove should succeed");
+
+    // Verify secret no longer exists
+    let get_after = server
+        .vault_get(Parameters(VaultGetParams {
+            name: "DELETE_ME".to_string(),
+            agent_id: None,
+            auto_rotate: false,
+        }))
+        .await;
+    assert!(get_after.is_err(), "secret should not exist after removal");
+}
+
+#[tokio::test]
+async fn vault_list_filters_by_secret_type() {
+    let server = make_server();
+
+    // Initialize vault
+    server
+        .vault_init(Parameters(VaultInitParams {
+            password: "test-password".to_string(),
+        }))
+        .await
+        .expect("vault_init should succeed");
+
+    // Set secrets of different types
+    server
+        .vault_set(Parameters(VaultSetParams {
+            name: "API_KEY_1".to_string(),
+            value: "api-value".to_string(),
+            secret_type: "api_key".to_string(),
+            description: "API key".to_string(),
+            allowed_agents: None,
+            enable_rotation: false,
+            rotation_strategy: None,
+        }))
+        .await
+        .expect("vault_set api_key should succeed");
+
+    server
+        .vault_set(Parameters(VaultSetParams {
+            name: "OAUTH_TOKEN".to_string(),
+            value: "oauth-value".to_string(),
+            secret_type: "oauth_token".to_string(),
+            description: "OAuth token".to_string(),
+            allowed_agents: None,
+            enable_rotation: false,
+            rotation_strategy: None,
+        }))
+        .await
+        .expect("vault_set oauth_token should succeed");
+
+    // List all secrets (no filter)
+    let all = server
+        .vault_list(Parameters(VaultListParams { secret_type: None }))
+        .await
+        .expect("vault_list all should succeed");
+    let all_json: Value = serde_json::from_str(&all).unwrap();
+    assert_eq!(all_json["secrets"].as_array().unwrap().len(), 2);
+
+    // List only api_key type
+    let api_only = server
+        .vault_list(Parameters(VaultListParams {
+            secret_type: Some("api_key".to_string()),
+        }))
+        .await
+        .expect("vault_list api_key should succeed");
+    let api_json: Value = serde_json::from_str(&api_only).unwrap();
+    assert_eq!(api_json["secrets"].as_array().unwrap().len(), 1);
+    assert_eq!(api_json["secrets"][0]["name"], "API_KEY_1");
+}
+
+#[tokio::test]
+async fn ghost_reflect_creates_reflection_entry() {
+    let server = make_server();
+
+    let reflect = server
+        .ghost_reflect(Parameters(GhostReflectParams {
+            agent_id: "test-agent".to_string(),
+            summary: "Test reflection about recent interactions".to_string(),
+            topic: Some("testing".to_string()),
+            promote_rule: false,
+            metadata: None,
+        }))
+        .await
+        .expect("ghost_reflect should succeed");
+
+    let reflect_json: Value = serde_json::from_str(&reflect).unwrap();
+    assert!(reflect_json["reflection_id"].as_str().is_some());
+    assert_eq!(reflect_json["promote_rule"], false);
+}
+
+#[tokio::test]
+async fn ghost_reflect_with_promote_creates_rule() {
+    let server = make_server();
+
+    let reflect = server
+        .ghost_reflect(Parameters(GhostReflectParams {
+            agent_id: "test-agent".to_string(),
+            summary: "Important insight that should become a rule".to_string(),
+            topic: Some("rules".to_string()),
+            promote_rule: true,
+            metadata: None,
+        }))
+        .await
+        .expect("ghost_reflect with promote should succeed");
+
+    let reflect_json: Value = serde_json::from_str(&reflect).unwrap();
+    assert!(reflect_json["reflection_id"].as_str().is_some());
+    assert_eq!(reflect_json["promote_rule"], true);
+    assert!(reflect_json["rule_id"].as_str().is_some());
+}
+
+#[tokio::test]
+async fn kanban_update_to_expired_status_prevents_further_updates() {
+    let server = make_server();
+
+    // Post a card
+    let post = server
+        .post_card(Parameters(PostCardParams {
+            from_agent: "sender".to_string(),
+            to_agent: "receiver".to_string(),
+            title: "Test Card".to_string(),
+            body: "Test body".to_string(),
+            card_type: "request".to_string(),
+            priority: "medium".to_string(),
+            workspace_id: None,
+            project_id: None,
+            conversation_id: None,
+            thread_id: None,
+            agent_session_id: None,
+        }))
+        .await
+        .expect("post_card should succeed");
+
+    let post_json: Value = serde_json::from_str(&post).unwrap();
+    let card_id = post_json["card_id"].as_str().unwrap();
+
+    // Update to expired status
+    server
+        .update_card(Parameters(UpdateCardParams {
+            card_id: card_id.to_string(),
+            new_status: "expired".to_string(),
+            response_text: None,
+        }))
+        .await
+        .expect("update_card to expired should succeed");
+
+    let inbox = server
+        .check_inbox(Parameters(CheckInboxParams {
+            agent_id: "receiver".to_string(),
+            status_filter: Some("open".to_string()),
+            since: None,
+            limit: 100,
+            include_broadcast: true,
+            workspace_id: None,
+            conversation_id: None,
+        }))
+        .await
+        .expect("check_inbox should succeed");
+
+    let inbox_json: Value = serde_json::from_str(&inbox).unwrap();
+    let cards = inbox_json["cards"].as_array().unwrap();
+    assert!(
+        cards.iter().all(|c| c["id"].as_str().unwrap() != card_id),
+        "expired card should not appear in inbox with open filter"
+    );
+}
+
+#[tokio::test]
+async fn ghost_subscribe_respects_topic_filter() {
+    let server = make_server();
+
+    // Publish to specific topic
+    server
+        .ghost_publish(Parameters(GhostPublishParams {
+            topic: "filtered-topic".to_string(),
+            payload: json!({"message": "test"}),
+            publisher: "test-pub".to_string(),
+        }))
+        .await
+        .expect("ghost_publish should succeed");
+
+    // Subscribe to that topic
+    let sub = server
+        .ghost_subscribe(Parameters(GhostSubscribeParams {
+            agent_id: "test-sub".to_string(),
+            topics: vec!["filtered-topic".to_string()],
+        }))
+        .await
+        .expect("ghost_subscribe should succeed");
+
+    let sub_json: Value = serde_json::from_str(&sub).unwrap();
+    assert!(sub_json["messages"].as_array().is_some());
+}
+
+#[tokio::test]
+async fn vc_register_and_bind_workflow() {
+    let server = make_server();
+
+    // First register a concrete capability
+    let cap = HubCapability {
+        id: "mcp:concrete".to_string(),
+        cap_type: "mcp".to_string(),
+        name: "concrete".to_string(),
+        version: 1,
+        description: "concrete capability".to_string(),
+        definition: r#"{"transport":"stdio","command":"echo","args":["test"]}"#.to_string(),
+        enabled: true,
+        review_status: "approved".to_string(),
+        health_status: "healthy".to_string(),
+        last_error: None,
+        last_success_at: None,
+        last_failure_at: None,
+        fail_streak: 0,
+        active_version: None,
+        exposure_mode: "gateway".to_string(),
+        uses: 0,
+        successes: 0,
+        failures: 0,
+        avg_rating: 0.0,
+        last_used: None,
+        created_at: String::new(),
+        updated_at: String::new(),
+    };
+
+    server
+        .with_global_store(|store| {
+            store
+                .hub_register(&cap)
+                .map_err(|e| format!("register failed: {e}"))
+        })
+        .expect("failed to register capability");
+
+    // Register virtual capability
+    let vc_reg = server
+        .vc_register(Parameters(VirtualCapabilityRegisterParams {
+            id: "vc:test".to_string(),
+            name: "Test Virtual Capability".to_string(),
+            description: "Virtual capability for testing".to_string(),
+            contract: "test".to_string(),
+            routing_strategy: "priority".to_string(),
+            input_schema: None,
+            tags: vec!["test".to_string()],
+            scope: "project".to_string(),
+        }))
+        .await
+        .expect("vc_register should succeed");
+
+    let vc_json: Value = serde_json::from_str(&vc_reg).unwrap();
+    assert_eq!(vc_json["id"], "vc:test");
+
+    // Bind virtual to concrete
+    let bind = server
+        .vc_bind(Parameters(VirtualCapabilityBindParams {
+            vc_id: "vc:test".to_string(),
+            capability_id: "mcp:concrete".to_string(),
+            priority: 100,
+            enabled: true,
+            version_pin: None,
+            metadata: None,
+        }))
+        .await
+        .expect("vc_bind should succeed");
+
+    let bind_json: Value = serde_json::from_str(&bind).unwrap();
+    assert!(bind_json["updated"].as_bool().unwrap());
+
+    // Resolve should return the concrete capability
+    let resolve = server
+        .vc_resolve(Parameters(VirtualCapabilityResolveParams {
+            id: "vc:test".to_string(),
+        }))
+        .await
+        .expect("vc_resolve should succeed");
+
+    let resolve_json: Value = serde_json::from_str(&resolve).unwrap();
+    assert_eq!(resolve_json["resolved_id"], "mcp:concrete");
 }
