@@ -146,7 +146,7 @@ Please install the Tachi memory extension for OpenClaw:
    The script automates cloning, compiling the extension, and symlinking to the OpenClaw plugin directory.
    If Cargo is installed, it will additionally build the optional NAPI native module for acceleration; otherwise it runs in MCP-only mode.
 
-3. Enable `memory-hybrid-bridge` in `plugins.allow` and assign `plugins.slots.memory` to `memory-hybrid-bridge`.
+3. Enable `tachi` in `plugins.allow` and assign `plugins.slots.memory` to `tachi`.
 
 4. Configure API keys in the project root `.env` file (see `.env.example`):
    - VOYAGE_API_KEY (Embedding + Rerank)

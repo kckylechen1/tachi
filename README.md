@@ -140,7 +140,7 @@ Tachi 亦化身为 OpenClaw 气海之元婴法宝。
    此脚本将负责拉取代码、编译扩展并在 extensions 库中建立软链��。
    若系统安装了 Cargo，会额外编译 NAPI 原生模块（可选加速路径）；否则以 MCP-only 模式运行。
 
-3. 执行完成后请打开 `plugins.allow` 参数权限，并将 `plugins.slots.memory` 设置为 `memory-hybrid-bridge`。
+3. 执行完成后请打开 `plugins.allow` 参数权限，并将 `plugins.slots.memory` 设置为 `tachi`。
 
 4. 在项目根目录的 `.env` 中配置 API 密钥（参见 `.env.example`）：
    - VOYAGE_API_KEY (向量与重排)
