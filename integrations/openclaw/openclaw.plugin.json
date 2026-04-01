@@ -1,6 +1,6 @@
 {
-  "id": "memory-hybrid-bridge",
-  "name": "Memory Hybrid Bridge",
+  "id": "tachi",
+  "name": "Tachi",
   "description": "Advanced structured memory with LLM extraction and hybrid retrieval",
   "kind": "memory",
   "entry": "./index.js",

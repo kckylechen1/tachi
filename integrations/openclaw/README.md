@@ -19,21 +19,24 @@ OpenClaw Gateway (Node.js)
 
 ## 安装
 
-### 方式一：brew install（推荐）
+### 一键安装（推荐）
 
 ```bash
-brew tap kckylechen1/tachi && brew install tachi
+curl -fsSL https://raw.githubusercontent.com/kckylechen1/tachi/main/scripts/install.sh | bash
 ```
 
-插件会自动在 PATH 中查找 `tachi` 二进制。
+该脚本会：
+- 通过 Homebrew 安装或升级 `tachi`
+- 下载并安装 OpenClaw `tachi` 插件
+- 自动更新 `~/.openclaw/openclaw.json` 中的 `plugins.allow`、`plugins.load.paths` 与 `plugins.slots.memory`
 
-### 方式二：源码构建
+### 仅安装 OpenClaw 插件
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/kckylechen1/tachi/main/scripts/install_openclaw_ext.sh | bash
 ```
 
-需要 `git` + `node` + `npm`。如果安装了 `cargo`，会额外编译 NAPI 原生模块；否则以 MCP-only 模式运行。
+这是兼容旧流程的包装脚本，等价于执行 `scripts/install.sh --skip-brew`。
 
 ## 关键文件
 

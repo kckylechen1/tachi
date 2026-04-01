@@ -1,8 +1,8 @@
 {
-  "name": "memory-hybrid-bridge",
+  "name": "tachi",
   "version": "0.3.0",
   "private": true,
-  "description": "OpenClaw lifecycle plugin for hybrid memory bridge",
+  "description": "OpenClaw lifecycle plugin for Tachi memory and hub access",
   "type": "module",
   "main": "./index.js",
   "exports": {

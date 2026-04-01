@@ -1,59 +1,88 @@
 #!/usr/bin/env bash
 #
-# One-command installer for Sigil Memory (OpenClaw Plugin)
+# One-command installer for Tachi + OpenClaw plugin.
 # Usage:
 #   curl -fsSL https://raw.githubusercontent.com/kckylechen1/tachi/main/scripts/install.sh | bash
-#   # or with options:
-#   bash install.sh --version 0.1.0
+#   bash install.sh --version 0.12.3
 #
 set -euo pipefail
 
-VERSION="${SIGIL_VERSION:-latest}"
-PLUGIN_DIR="${SIGIL_PLUGIN_DIR:-$HOME/.openclaw/extensions/memory-hybrid-bridge}"
+VERSION="${TACHI_VERSION:-latest}"
+PLUGIN_DIR="${TACHI_OPENCLAW_PLUGIN_DIR:-${SIGIL_PLUGIN_DIR:-$HOME/.openclaw/extensions/tachi}}"
 REPO="kckylechen1/tachi"
+SKIP_BREW=0
+SKIP_PLUGIN=0
 
-# ── Parse args ────────────────────────────────────────────────
+print_help() {
+  echo "Usage: install.sh [options]"
+  echo "  --version <ver>     Release version to install (default: latest)"
+  echo "  --dir <path>        OpenClaw plugin install dir (default: ~/.openclaw/extensions/tachi)"
+  echo "  --skip-brew         Skip installing/updating the Tachi Homebrew package"
+  echo "  --skip-plugin       Skip installing/updating the OpenClaw plugin"
+  echo "  -h, --help          Show this help"
+}
+
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --version) VERSION="$2"; shift 2 ;;
-    --dir)     PLUGIN_DIR="$2"; shift 2 ;;
+    --dir) PLUGIN_DIR="$2"; shift 2 ;;
+    --skip-brew) SKIP_BREW=1; shift ;;
+    --skip-plugin) SKIP_PLUGIN=1; shift ;;
     -h|--help)
-      echo "Usage: install.sh [--version <ver>] [--dir <path>]"
-      echo "  --version  Version to install (default: latest)"
-      echo "  --dir      Plugin install path (default: ~/.openclaw/extensions/memory-hybrid-bridge)"
-      exit 0 ;;
-    *) echo "Unknown option: $1"; exit 1 ;;
+      print_help
+      exit 0
+      ;;
+    *)
+      echo "Unknown option: $1"
+      print_help
+      exit 1
+      ;;
   esac
 done
 
-# ── Prereqs ───────────────────────────────────────────────────
 echo "========================================================="
-echo "🧠 Installing Sigil Memory (OpenClaw Plugin)"
+echo "🧠 Installing Tachi + OpenClaw Plugin"
 echo "========================================================="
 echo ""
 
-for cmd in node npm curl; do
-  if ! command -v "$cmd" >/dev/null 2>&1; then
-    echo "❌ Required command not found: $cmd"
+require_cmd() {
+  if ! command -v "$1" >/dev/null 2>&1; then
+    echo "❌ Required command not found: $1"
     exit 1
   fi
-done
+}
 
-NODE_MAJOR=$(node -e "console.log(process.versions.node.split('.')[0])")
-if [ "$NODE_MAJOR" -lt 18 ]; then
-  echo "❌ Node.js >= 18 required (found v$(node -v))"
-  exit 1
+if [ "$SKIP_BREW" -eq 0 ]; then
+  require_cmd brew
+fi
+if [ "$SKIP_PLUGIN" -eq 0 ]; then
+  require_cmd node
+  require_cmd npm
+fi
+require_cmd curl
+
+if [ "$SKIP_PLUGIN" -eq 0 ]; then
+  NODE_MAJOR=$(node -e "console.log(process.versions.node.split('.')[0])")
+  if [ "$NODE_MAJOR" -lt 18 ]; then
+    echo "❌ Node.js >= 18 required (found $(node -v))"
+    exit 1
+  fi
 fi
 
-# ── Resolve version ──────────────────────────────────────────
+resolve_latest_version() {
+  curl -fsSL "https://api.github.com/repos/$REPO/releases/latest" | node -e "
+    let data = '';
+    process.stdin.on('data', chunk => data += chunk);
+    process.stdin.on('end', () => {
+      const tag = JSON.parse(data).tag_name || '';
+      process.stdout.write(tag.replace(/^v/, ''));
+    });
+  "
+}
+
 if [ "$VERSION" = "latest" ]; then
   echo ">> Fetching latest release..."
-  VERSION=$(curl -fsSL "https://api.github.com/repos/$REPO/releases/latest" | node -e "
-    let d=''; process.stdin.on('data',c=>d+=c); process.stdin.on('end',()=>{
-      const tag = JSON.parse(d).tag_name || '';
-      console.log(tag.replace(/^v/,''));
-    })
-  ")
+  VERSION=$(resolve_latest_version)
   if [ -z "$VERSION" ]; then
     echo "❌ Could not determine latest version. Use --version to specify."
     exit 1
@@ -61,114 +90,166 @@ if [ "$VERSION" = "latest" ]; then
 fi
 echo "   Version: $VERSION"
 
-# ── Download tarball ─────────────────────────────────────────
-TARBALL_URL="https://github.com/$REPO/releases/download/v${VERSION}/memory-hybrid-bridge-v${VERSION}.tar.gz"
-TMPDIR=$(mktemp -d)
-TARBALL="$TMPDIR/plugin.tar.gz"
-
-echo ">> Downloading from $TARBALL_URL..."
-if ! curl -fSL -o "$TARBALL" "$TARBALL_URL"; then
-  echo "❌ Download failed. Check that version v${VERSION} exists at:"
-  echo "   https://github.com/$REPO/releases"
-  rm -rf "$TMPDIR"
-  exit 1
-fi
-
-# ── Install ──────────────────────────────────────────────────
-echo ">> Installing to $PLUGIN_DIR..."
-mkdir -p "$PLUGIN_DIR"
-
-# Preserve user data (memory.db, audit-log, shadow-store)
-if [ -d "$PLUGIN_DIR/data" ]; then
-  echo "   Preserving existing data/ directory"
-  mv "$PLUGIN_DIR/data" "$TMPDIR/data_backup"
-fi
-
-# Extract (overwrites old JS/config files)
-tar -xzf "$TARBALL" -C "$PLUGIN_DIR"
-
-# Restore data
-if [ -d "$TMPDIR/data_backup" ]; then
-  mv "$TMPDIR/data_backup" "$PLUGIN_DIR/data"
-fi
-mkdir -p "$PLUGIN_DIR/data"
-
-# ── npm install (pulls @chaoxlabs/tachi-node optionally) ─────
-echo ">> Installing dependencies..."
-cd "$PLUGIN_DIR"
-npm install --registry https://registry.npmjs.org 2>&1 | tail -3
-
-# ── Smoke test ───────────────────────────────────────────────
-echo ">> Verifying native module..."
-if node --input-type=module -e "import('@chaoxlabs/tachi-node').then(m => { if(!m.JsMemoryStore) throw new Error('missing export'); console.log('   ✅ Native module loaded OK') })" 2>/dev/null; then
-  :
-else
-  echo "   ⚠ Native module not available — running in MCP-only mode."
-  echo "   Install 'tachi' via: brew tap kckylechen1/tachi && brew install tachi"
-fi
-
-# ── Auto-configure openclaw.json ─────────────────────────────
-OPENCLAW_JSON="$HOME/.openclaw/openclaw.json"
-if [ -f "$OPENCLAW_JSON" ]; then
+install_tachi_brew() {
   echo ""
-  echo ">> Checking openclaw.json..."
+  echo ">> Installing/updating Tachi via Homebrew..."
+  brew tap kckylechen1/tachi >/dev/null
 
-  ALREADY_CONFIGURED=$(node -e "
-    const c = require('$OPENCLAW_JSON');
-    const allow = c.plugins?.allow || [];
-    const paths = c.plugins?.load?.paths || [];
-    const ok = allow.includes('memory-hybrid-bridge') && paths.includes('$PLUGIN_DIR');
-    console.log(ok ? 'yes' : 'no');
-  " 2>/dev/null || echo "no")
-
-  if [ "$ALREADY_CONFIGURED" = "yes" ]; then
-    echo "   Already configured ✓"
+  if brew list tachi >/dev/null 2>&1; then
+    if brew upgrade tachi; then
+      :
+    else
+      echo "   brew upgrade returned non-zero, attempting reinstall..."
+      brew reinstall tachi
+    fi
   else
-    echo "   Adding plugin to openclaw.json..."
-    node -e "
-      const fs = require('fs');
-      const c = JSON.parse(fs.readFileSync('$OPENCLAW_JSON', 'utf8'));
-
-      if (!c.plugins) c.plugins = {};
-      if (!c.plugins.allow) c.plugins.allow = [];
-      if (!c.plugins.allow.includes('memory-hybrid-bridge')) c.plugins.allow.push('memory-hybrid-bridge');
-
-      if (!c.plugins.load) c.plugins.load = {};
-      if (!c.plugins.load.paths) c.plugins.load.paths = [];
-      if (!c.plugins.load.paths.includes('$PLUGIN_DIR')) c.plugins.load.paths.push('$PLUGIN_DIR');
-
-      if (!c.plugins.slots) c.plugins.slots = {};
-      c.plugins.slots.memory = 'memory-hybrid-bridge';
-
-      if (!c.plugins.entries) c.plugins.entries = {};
-      if (!c.plugins.entries['memory-hybrid-bridge']) {
-        c.plugins.entries['memory-hybrid-bridge'] = { enabled: true, config: {} };
-      }
-
-      fs.writeFileSync('$OPENCLAW_JSON', JSON.stringify(c, null, 2) + '
-');
-      console.log('   ✅ openclaw.json updated');
-    " 2>/dev/null || echo "   ⚠ Could not auto-configure. Please add manually (see below)."
+    brew install tachi
   fi
+
+  echo "   Installed binary: $(command -v tachi || echo 'not on PATH yet')"
+  if command -v tachi >/dev/null 2>&1; then
+    echo "   Tachi version: $(tachi --version || true)"
+  fi
+}
+
+download_plugin_tarball() {
+  local tarball="$1"
+  local primary_url="https://github.com/$REPO/releases/download/v${VERSION}/tachi-openclaw-v${VERSION}.tar.gz"
+  local legacy_url="https://github.com/$REPO/releases/download/v${VERSION}/memory-hybrid-bridge-v${VERSION}.tar.gz"
+
+  echo ">> Downloading OpenClaw plugin release asset..."
+  if curl -fSL -o "$tarball" "$primary_url"; then
+    echo "   Downloaded: $primary_url"
+    return 0
+  fi
+
+  echo "   Primary asset not found, falling back to legacy asset name..."
+  if curl -fSL -o "$tarball" "$legacy_url"; then
+    echo "   Downloaded: $legacy_url"
+    return 0
+  fi
+
+  echo "❌ Download failed. Checked:"
+  echo "   $primary_url"
+  echo "   $legacy_url"
+  return 1
+}
+
+configure_openclaw_json() {
+  local openclaw_json="$HOME/.openclaw/openclaw.json"
+  if [ ! -f "$openclaw_json" ]; then
+    echo "   openclaw.json not found at $openclaw_json; skipping auto-config."
+    return 0
+  fi
+
+  echo ">> Updating openclaw.json..."
+  node - "$openclaw_json" "$PLUGIN_DIR" <<'NODE'
+const fs = require("fs");
+const [jsonPath, pluginDir] = process.argv.slice(2);
+const config = JSON.parse(fs.readFileSync(jsonPath, "utf8"));
+
+if (!config.plugins) config.plugins = {};
+if (!config.plugins.allow) config.plugins.allow = [];
+config.plugins.allow = config.plugins.allow.filter((id) => id !== "memory-hybrid-bridge");
+if (!config.plugins.allow.includes("tachi")) config.plugins.allow.push("tachi");
+
+if (!config.plugins.load) config.plugins.load = {};
+if (!config.plugins.load.paths) config.plugins.load.paths = [];
+if (!config.plugins.load.paths.includes(pluginDir)) config.plugins.load.paths.push(pluginDir);
+
+if (!config.plugins.slots) config.plugins.slots = {};
+config.plugins.slots.memory = "tachi";
+
+if (!config.plugins.entries) config.plugins.entries = {};
+delete config.plugins.entries["memory-hybrid-bridge"];
+if (!config.plugins.entries.tachi) {
+  config.plugins.entries.tachi = { enabled: true, config: {} };
+} else {
+  config.plugins.entries.tachi.enabled = true;
+}
+
+fs.writeFileSync(jsonPath, `${JSON.stringify(config, null, 2)}\n`);
+NODE
+  echo "   ✅ openclaw.json updated"
+}
+
+install_openclaw_plugin() {
+  local tmpdir
+  tmpdir=$(mktemp -d)
+  local tarball="$tmpdir/plugin.tar.gz"
+
+  download_plugin_tarball "$tarball"
+
+  echo ">> Installing OpenClaw plugin to $PLUGIN_DIR..."
+  mkdir -p "$PLUGIN_DIR"
+
+  if [ -d "$PLUGIN_DIR/data" ]; then
+    echo "   Preserving existing data/ directory"
+    mv "$PLUGIN_DIR/data" "$tmpdir/data_backup"
+  fi
+
+  find "$PLUGIN_DIR" -mindepth 1 -maxdepth 1 ! -name data -exec rm -rf {} +
+
+  tar -xzf "$tarball" -C "$PLUGIN_DIR"
+
+  if [ -d "$tmpdir/data_backup" ]; then
+    mv "$tmpdir/data_backup" "$PLUGIN_DIR/data"
+  fi
+  mkdir -p "$PLUGIN_DIR/data"
+
+  echo ">> Installing plugin dependencies..."
+  (
+    cd "$PLUGIN_DIR"
+    npm install --omit=dev --registry https://registry.npmjs.org
+  )
+
+  echo ">> Verifying OpenClaw plugin..."
+  node -e "import('node:url').then(({ pathToFileURL }) => import(pathToFileURL(process.argv[1]).href)).then(() => console.log('   ✅ Plugin load smoke test passed')).catch((err) => { console.error(err); process.exit(1); })" "$PLUGIN_DIR/index.js"
+
+  echo ">> Verifying native module..."
+  if (
+    cd "$PLUGIN_DIR"
+    node --input-type=module -e "import('@chaoxlabs/tachi-node').then(m => { if (!m.JsMemoryStore) throw new Error('missing export'); console.log('   ✅ Native module loaded OK') })"
+  ) 2>/dev/null; then
+    :
+  else
+    echo "   ⚠ Native module not available — OpenClaw will run in MCP-first mode."
+  fi
+
+  configure_openclaw_json
+
+  rm -rf "$tmpdir"
+}
+
+if [ "$SKIP_BREW" -eq 0 ]; then
+  install_tachi_brew
+else
+  echo ">> Skipping Homebrew install (--skip-brew)"
 fi
 
-# ── Cleanup ──────────────────────────────────────────────────
-rm -rf "$TMPDIR"
+if [ "$SKIP_PLUGIN" -eq 0 ]; then
+  install_openclaw_plugin
+else
+  echo ">> Skipping OpenClaw plugin install (--skip-plugin)"
+fi
 
-# ── Done ─────────────────────────────────────────────────────
 echo ""
 echo "========================================================="
-echo "🎉 Sigil Memory installed successfully!"
+echo "🎉 Tachi installation complete"
 echo "========================================================="
+echo ""
+if [ "$SKIP_BREW" -eq 0 ]; then
+  echo "Tachi CLI:"
+  echo "  $(command -v tachi || echo 'tachi not on PATH yet')"
+fi
+if [ "$SKIP_PLUGIN" -eq 0 ]; then
+  echo "OpenClaw plugin path:"
+  echo "  $PLUGIN_DIR"
+  echo "OpenClaw plugin id:"
+  echo "  tachi"
+fi
 echo ""
 echo "Next steps:"
-echo "  1. Configure API keys in .env (copy from .env.example):"
-echo "     - VOYAGE_API_KEY     → Voyage AI  (https://dash.voyageai.com/)"
-echo "     - SILICONFLOW_API_KEY → SiliconFlow (https://cloud.siliconflow.cn/)"
-echo "     See integrations/openclaw/.env.example for all options."
-echo "  2. Install the Tachi MCP server if not already present:"
-echo "     brew tap kckylechen1/tachi && brew install tachi"
-echo "  3. Restart OpenClaw gateway"
-echo ""
-echo "Plugin path: $PLUGIN_DIR"
-echo "Data path:   $PLUGIN_DIR/data"
+echo "  1. Configure API keys (VOYAGE_API_KEY, SILICONFLOW_API_KEY)"
+echo "  2. Restart the OpenClaw gateway"
+echo "  3. Verify Tachi with: tachi --help"

@@ -91,7 +91,7 @@ export const memoryHybridBridgePlugin = {
       return await initStores.get(paths.db)!;
     }
 
-    api.logger.info(`memory-hybrid-bridge: registered (dynamic agent-scoping enabled)`);
+    api.logger.info(`tachi: registered (dynamic agent-scoping enabled)`);
 
     // --- Search Logic ---
     // Full hybrid search (FTS + Vec) — calls Voyage API for query embedding.
@@ -119,7 +119,7 @@ export const memoryHybridBridgePlugin = {
         return rerank({ config, query, results: hybridResults, topK, logger: api.logger });
       } catch (err) {
         // Fallback path: keep memory search available if vector channel fails.
-        api.logger.warn(`memory-hybrid-bridge: hybrid search failed, fallback to FTS: ${String(err)}`);
+        api.logger.warn(`tachi: hybrid search failed, fallback to FTS: ${String(err)}`);
         const { docs, scores } = await store.search(
           query,
           undefined,
@@ -154,7 +154,7 @@ export const memoryHybridBridgePlugin = {
     // ========================================================================
     // Tools — register as memory_search / memory_get so the agent's
     // natural tool calls hit the hybrid shadow store directly.
-    // Requires plugins.slots.memory = "memory-hybrid-bridge" in openclaw.json.
+    // Requires plugins.slots.memory = "tachi" in openclaw.json.
     // ========================================================================
 
     function formatSearchResults(
@@ -403,7 +403,7 @@ export const memoryHybridBridgePlugin = {
 
         return { prependContext: injectBlock };
       } catch (err) {
-        api.logger.warn(`memory-hybrid-bridge [${agentId}]: recall failed: ${String(err)}`);
+        api.logger.warn(`tachi [${agentId}]: recall failed: ${String(err)}`);
       }
     });
 
@@ -472,17 +472,17 @@ export const memoryHybridBridgePlugin = {
             // sqlite-vec KNN can fail across vec0 versions.
             // Dedup is best-effort; don't block memory writes.
             api.logger.warn(
-              `memory-hybrid-bridge [${agentId}]: findSimilar failed; skip dedup: ${String(similarErr)}`,
+              `tachi [${agentId}]: findSimilar failed; skip dedup: ${String(similarErr)}`,
             );
           }
           if (similar.length > 0) {
             const top = similar[0];
             if (top.similarity >= config.dedupThreshold) {
-              api.logger.info(`memory-hybrid-bridge [${agentId}]: skipping duplicate (sim=${top.similarity.toFixed(3)})`);
+              api.logger.info(`tachi [${agentId}]: skipping duplicate (sim=${top.similarity.toFixed(3)})`);
               return;
             }
             if (top.similarity >= config.mergeThreshold) {
-              api.logger.info(`memory-hybrid-bridge [${agentId}]: merging with ${top.entry.id} (sim=${top.similarity.toFixed(3)})`);
+              api.logger.info(`tachi [${agentId}]: merging with ${top.entry.id} (sim=${top.similarity.toFixed(3)})`);
               const merged = await mergeMemoryEntries({ config, existing: top.entry, incoming: extracted, logger: api.logger });
               if (merged) {
                 const mergedVec = await getEmbedding({ config, text: merged.text, logger: api.logger });
@@ -499,9 +499,9 @@ export const memoryHybridBridgePlugin = {
                     agent: agentId,
                   });
                 } catch (auditErr) {
-                  api.logger.warn(`memory-hybrid-bridge [${agentId}]: audit-log write failed: ${String(auditErr)}`);
+                  api.logger.warn(`tachi [${agentId}]: audit-log write failed: ${String(auditErr)}`);
                 }
-                api.logger.info(`memory-hybrid-bridge [${agentId}]: merged memory: ${merged.id}`);
+                api.logger.info(`tachi [${agentId}]: merged memory: ${merged.id}`);
                 return;
               }
               // Merge failed, fall through to insert as new
@@ -519,32 +519,32 @@ export const memoryHybridBridgePlugin = {
             agent: agentId,
           });
         } catch (auditErr) {
-          api.logger.warn(`memory-hybrid-bridge [${agentId}]: audit-log write failed: ${String(auditErr)}`);
+          api.logger.warn(`tachi [${agentId}]: audit-log write failed: ${String(auditErr)}`);
         }
         api.logger.info(
-          `memory-hybrid-bridge [${agentId}]: auto-captured new memory: ${extracted.id}`,
+          `tachi [${agentId}]: auto-captured new memory: ${extracted.id}`,
         );
       } catch (err) {
         extractFailCount++;
         if (extractFailCount >= EXTRACT_FAIL_THRESHOLD) {
           extractBackoffUntil = Date.now() + EXTRACT_BACKOFF_MS;
           api.logger.warn(
-            `memory-hybrid-bridge [${agentId}]: auto-capture circuit breaker OPEN — ${extractFailCount} consecutive failures, backing off ${EXTRACT_BACKOFF_MS / 1000}s`,
+            `tachi [${agentId}]: auto-capture circuit breaker OPEN — ${extractFailCount} consecutive failures, backing off ${EXTRACT_BACKOFF_MS / 1000}s`,
           );
           extractFailCount = 0;
         } else {
           api.logger.warn(
-            `memory-hybrid-bridge [${agentId}]: auto-capture failed (${extractFailCount}/${EXTRACT_FAIL_THRESHOLD}): ${String(err)}`,
+            `tachi [${agentId}]: auto-capture failed (${extractFailCount}/${EXTRACT_FAIL_THRESHOLD}): ${String(err)}`,
           );
         }
       }
     });
 
     api.registerService({
-      id: "memory-hybrid-bridge",
-      start: () => api.logger.info("memory-hybrid-bridge: service started"),
+      id: "tachi",
+      start: () => api.logger.info("tachi: service started"),
       stop: async () => {
-        api.logger.info("memory-hybrid-bridge: shutting down...");
+        api.logger.info("tachi: shutting down...");
         const entries = [...initStores.entries()];
         initStores.clear();
         for (const [, storePromise] of entries) {
@@ -553,7 +553,7 @@ export const memoryHybridBridgePlugin = {
             await store.close();
           } catch { /* store never initialized successfully */ }
         }
-        api.logger.info("memory-hybrid-bridge: service stopped");
+        api.logger.info("tachi: service stopped");
       },
     });
   },

@@ -129,8 +129,16 @@ Tachi can be integrated as a native OpenClaw extension plugin.
 ```text
 Please install the Tachi memory extension for OpenClaw:
 
-1. Install the Tachi MCP server (recommended):
-   brew tap kckylechen1/tachi && brew install tachi
+1. One-command install for Tachi + the OpenClaw plugin (recommended):
+   bash -c "$(curl -fsSL https://raw.githubusercontent.com/kckylechen1/tachi/main/scripts/install.sh)"
+
+   The installer will:
+   - install or upgrade `tachi` through Homebrew
+   - download and install the OpenClaw `tachi` plugin
+   - auto-update `~/.openclaw/openclaw.json` when present, including `plugins.allow`, `plugins.load.paths`, and `plugins.slots.memory = "tachi"`
+
+   If you only want the legacy OpenClaw-plugin-only flow, run:
+   bash -c "$(curl -fsSL https://raw.githubusercontent.com/kckylechen1/tachi/main/scripts/install_openclaw_ext.sh)"
 
    Optional: auto-detect local agent configs and inject a Tachi MCP entry:
    python3 scripts/setup_agent_mcp.py --apply
@@ -141,14 +149,11 @@ Please install the Tachi memory extension for OpenClaw:
    # By default this also syncs local agent mcp configs and consolidates direct MCP entries registered in Hub under tachi
    # Skip this behavior with: python3 scripts/register_mcps_to_hub.py --no-sync-agent-config
 
-2. Deploy the OpenClaw extension:
-   bash -c "$(curl -fsSL https://raw.githubusercontent.com/kckylechen1/tachi/main/scripts/install_openclaw_ext.sh)"
-   The script automates cloning, compiling the extension, and symlinking to the OpenClaw plugin directory.
-   If Cargo is installed, it will additionally build the optional NAPI native module for acceleration; otherwise it runs in MCP-only mode.
+2. If the installer cannot locate `openclaw.json`, confirm manually:
+   - `plugins.allow` includes `tachi`
+   - `plugins.slots.memory` is set to `tachi`
 
-3. Enable `tachi` in `plugins.allow` and assign `plugins.slots.memory` to `tachi`.
-
-4. Configure API keys in the project root `.env` file (see `.env.example`):
+3. Configure API keys in the project root `.env` file (see `.env.example`):
    - VOYAGE_API_KEY (Embedding + Rerank)
    - SILICONFLOW_API_KEY (Extraction)
 

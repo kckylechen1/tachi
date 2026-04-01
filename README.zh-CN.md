@@ -126,8 +126,16 @@ Tachi 支持以外部扩展插件的形式桥接运行于 OpenClaw 内核。
 ```text
 请协助执行自动化安装流，在 OpenClaw 中扩展部署 Tachi 组件。
 
-1. 安装 Tachi MCP 服务（推荐）：
-   brew tap kckylechen1/tachi && brew install tachi
+1. 一键安装 Tachi + OpenClaw 扩展（推荐）：
+   bash -c "$(curl -fsSL https://raw.githubusercontent.com/kckylechen1/tachi/main/scripts/install.sh)"
+
+   该脚本会自动：
+   - 通过 Homebrew 安装或升级 `tachi`
+   - 下载并安装 OpenClaw `tachi` 插件
+   - 若检测到 `~/.openclaw/openclaw.json`，则自动写入 `plugins.allow`、`plugins.load.paths` 与 `plugins.slots.memory = "tachi"`
+
+   如仅需安装 OpenClaw 插件兼容旧流程，可执行：
+   bash -c "$(curl -fsSL https://raw.githubusercontent.com/kckylechen1/tachi/main/scripts/install_openclaw_ext.sh)"
 
    可选：自动扫描本机常见 Agent 配置并写入 Tachi MCP 入口：
    python3 scripts/setup_agent_mcp.py --apply
@@ -138,14 +146,11 @@ Tachi 支持以外部扩展插件的形式桥接运行于 OpenClaw 内核。
    # 默认会自动同步常见 Agent 的 mcp 配置，并把 Hub 中已注册 MCP 的直连项收敛到 tachi
    # 如需跳过：python3 scripts/register_mcps_to_hub.py --no-sync-agent-config
 
-2. 部署 OpenClaw 扩展：
-   bash -c "$(curl -fsSL https://raw.githubusercontent.com/kckylechen1/tachi/main/scripts/install_openclaw_ext.sh)"
-   此脚本将负责拉取代码、编译扩展并在 extensions 库中建立软链接。
-   若系统安装了 Cargo，会额外编译 NAPI 原生模块（可选加速路径）；否则以 MCP-only 模式运行。
+2. 若脚本未能自动找到 `openclaw.json`，请手动确认：
+   - `plugins.allow` 中包含 `tachi`
+   - `plugins.slots.memory` 设置为 `tachi`
 
-3. 执行完成后请打开 `plugins.allow` 参数权限，并将 `plugins.slots.memory` 设置为 `tachi`。
-
-4. 在项目根目录的 `.env` 中配置 API 密钥（参见 `.env.example`）：
+3. 在项目根目录的 `.env` 中配置 API 密钥（参见 `.env.example`）：
    - VOYAGE_API_KEY (向量与重排)
    - SILICONFLOW_API_KEY (结构化抽取)
 
