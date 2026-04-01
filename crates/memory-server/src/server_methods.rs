@@ -153,25 +153,44 @@ impl MemoryServer {
         }
     }
 
-    /// Open a named project's DB for a read-only operation.
-    /// Resolves to `~/.tachi/projects/{name}/memory.db`.
-    pub(super) fn with_named_project_store_read<T>(
+    pub(super) fn with_store_for_scope_read<T>(
         &self,
-        project_name: &str,
+        scope: DbScope,
         f: impl FnOnce(&mut MemoryStore) -> Result<T, String>,
     ) -> Result<T, String> {
+        match scope {
+            DbScope::Global => self.with_global_store_read(f),
+            DbScope::Project => self.with_project_store_read(f),
+        }
+    }
+
+    /// Resolve a named project's DB path: `~/.tachi/projects/{name}/memory.db`
+    pub(super) fn resolve_named_project_db_path(project_name: &str) -> Result<PathBuf, String> {
         let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
         let app_home = std::env::var("TACHI_HOME")
             .map(|v| if v.starts_with("~/") { home.join(&v[2..]) } else { PathBuf::from(v) })
             .unwrap_or_else(|_| home.join(".tachi"));
         let db_path = app_home.join("projects").join(project_name).join("memory.db");
         if !db_path.exists() {
-            return Err(format!(
+            Err(format!(
                 "Project '{}' not found (expected DB at {})",
                 project_name,
                 db_path.display()
-            ));
+            ))
+        } else {
+            Ok(db_path)
         }
+    }
+
+    /// Open a named project's DB for a read-only operation.
+    pub(super) fn with_named_project_store_read<T>(
+        &self,
+        project_name: &str,
+        f: impl FnOnce(&mut MemoryStore) -> Result<T, String>,
+    ) -> Result<T, String> {
+        let db_path = Self::resolve_named_project_db_path(project_name)?;
+        // Use global rw_gate for reader concurrency protection (prevents schema swap while reading)
+        let _gate = read_or_recover(&self.global_rw_gate, "named_project_rw_gate");
         let mut store = Self::open_read_store(&db_path, &format!("named-project:{}", project_name))?;
         f(&mut store)
     }
@@ -182,21 +201,14 @@ impl MemoryServer {
         project_name: &str,
         f: impl FnOnce(&mut MemoryStore) -> Result<T, String>,
     ) -> Result<T, String> {
-        let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
-        let app_home = std::env::var("TACHI_HOME")
-            .map(|v| if v.starts_with("~/") { home.join(&v[2..]) } else { PathBuf::from(v) })
-            .unwrap_or_else(|_| home.join(".tachi"));
-        let db_path = app_home.join("projects").join(project_name).join("memory.db");
-        if !db_path.exists() {
-            return Err(format!(
-                "Project '{}' not found (expected DB at {})",
-                project_name,
-                db_path.display()
-            ));
-        }
+        let db_path = Self::resolve_named_project_db_path(project_name)?;
         let db_str = db_path.to_str().ok_or_else(|| {
             format!("Project DB path contains invalid UTF-8: {}", db_path.display())
         })?;
+        
+        // Use global rw_gate for write lock to avoid concurrent SQLITE_BUSY issues for named projects.
+        // It's a coarse lock, but named project writes are fast and this prevents concurrent overlaps.
+        let _gate = write_or_recover(&self.global_rw_gate, "named_project_rw_gate");
         let mut store = MemoryStore::open(db_str).map_err(|e| format!("open named project store: {e}"))?;
         f(&mut store)
     }

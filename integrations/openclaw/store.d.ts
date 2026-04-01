@@ -1,5 +1,5 @@
 import type { MemoryEntry } from "./config.js";
-import { type HybridScore } from "./mcp-client.js";
+import { MemoryMcpClient, type HybridScore } from "./mcp-client.js";
 type LoggerLike = {
     info?: (message: string) => void;
     warn?: (message: string) => void;
@@ -52,6 +52,7 @@ export declare class MemoryStore {
     constructor(dbPath: string, napiStore: NapiMemoryStore | null, logger?: LoggerLike | undefined);
     private isMcpAvailable;
     private withBackend;
+    getMcpClient(): MemoryMcpClient | null;
     close(): Promise<void>;
     upsert(entry: MemoryEntry): Promise<void>;
     get(id: string): Promise<MemoryEntry | undefined>;

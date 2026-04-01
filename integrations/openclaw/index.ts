@@ -38,7 +38,7 @@ function resolveConfigPath(api: OpenClawPluginApi, configuredPath: string): stri
 // ============================================================================
 
 export const memoryHybridBridgePlugin = {
-  id: "memory-hybrid-bridge",
+  id: "tachi",
   name: "Memory Hybrid Bridge",
   kind: "memory" as const,
   description:
@@ -48,6 +48,12 @@ export const memoryHybridBridgePlugin = {
     const config = bridgeConfigSchema.parse(api.pluginConfig);
 
     const initStores = new Map<string, Promise<MemoryStore>>();
+
+    // Circuit breaker for auto-capture extraction
+    let extractFailCount = 0;
+    let extractBackoffUntil = 0;
+    const EXTRACT_FAIL_THRESHOLD = 3;
+    const EXTRACT_BACKOFF_MS = 5 * 60 * 1000; // 5 minutes
 
     function getResolvedPaths(agentId?: string) {
       // main and ops share the default store; other agents get scoped paths
@@ -279,6 +285,76 @@ export const memoryHybridBridgePlugin = {
       },
     });
 
+    // ── Tachi Passthrough Tools ──────────────────────────────────
+
+    api.registerTool({
+      name: "tachi_ghost_publish",
+      label: "Ghost Whisper",
+      description: "Publish a message to a Ghost Whispers topic for inter-agent communication.",
+      parameters: Type.Object({
+        topic: Type.String({ description: "Topic name (e.g. 'build-status', 'alerts')" }),
+        payload: Type.String({ description: "Message content" }),
+      }),
+      async execute(_toolCallId, params, _signal, _context) {
+        const { topic, payload } = params as { topic: string; payload: string };
+        const agentId = (_context as any)?.agentId || "main";
+        const store = await ensureStore(agentId);
+        const client = store.getMcpClient();
+        if (!client) return { content: [{ type: "text" as const, text: "MCP client not available" }] };
+        const result = await client.callTool("ghost_publish", { topic, payload, publisher: agentId });
+        return { content: [{ type: "text" as const, text: JSON.stringify(result) }] };
+      },
+    });
+
+    api.registerTool({
+      name: "tachi_kanban_post",
+      label: "Kanban Post",
+      description: "Post a kanban card to another agent or broadcast.",
+      parameters: Type.Object({
+        to_agent: Type.String({ description: "Destination agent ID, or '*' for broadcast" }),
+        title: Type.String({ description: "Card title" }),
+        body: Type.String({ description: "Card body content" }),
+        priority: Type.Optional(Type.String({ description: "Priority: low | medium | high | critical (default: medium)" })),
+      }),
+      async execute(_toolCallId, params, _signal, _context) {
+        const { to_agent, title, body, priority } = params as { to_agent: string; title: string; body: string; priority?: string };
+        const agentId = (_context as any)?.agentId || "main";
+        const store = await ensureStore(agentId);
+        const client = store.getMcpClient();
+        if (!client) return { content: [{ type: "text" as const, text: "MCP client not available" }] };
+        const result = await client.callTool("post_card", { from_agent: agentId, to_agent, title, body, priority: priority || "medium" });
+        return { content: [{ type: "text" as const, text: JSON.stringify(result) }] };
+      },
+    });
+
+    api.registerTool({
+      name: "tachi_save_memory",
+      label: "Save Memory (Tachi)",
+      description: "Save a memory entry directly to Tachi with full metadata.",
+      parameters: Type.Object({
+        text: Type.String({ description: "Memory text content" }),
+        path: Type.Optional(Type.String({ description: "Hierarchical path (e.g. /project/notes)" })),
+        importance: Type.Optional(Type.Number({ description: "0.0-1.0 importance score" })),
+        keywords: Type.Optional(Type.Array(Type.String(), { description: "Keyword tags" })),
+        category: Type.Optional(Type.String({ description: "Category: fact | decision | preference | entity | other" })),
+      }),
+      async execute(_toolCallId, params, _signal, _context) {
+        const { text, path: memPath, importance, keywords, category } = params as { text: string; path?: string; importance?: number; keywords?: string[]; category?: string };
+        const agentId = (_context as any)?.agentId || "main";
+        const store = await ensureStore(agentId);
+        const client = store.getMcpClient();
+        if (!client) return { content: [{ type: "text" as const, text: "MCP client not available" }] };
+        const result = await client.callTool("save_memory", {
+          text,
+          path: memPath || `/openclaw/agent-${agentId}`,
+          importance: importance ?? 0.7,
+          keywords: keywords || [],
+          category: category || "fact",
+        });
+        return { content: [{ type: "text" as const, text: JSON.stringify(result) }] };
+      },
+    });
+
     // C1 fix: accept ctx as 2nd param — agentId lives in ctx, not event
     api.on("before_agent_start", async (event: any, ctx: any) => {
       const query = event.prompt;
@@ -301,7 +377,29 @@ export const memoryHybridBridgePlugin = {
           ].join("\n");
         });
 
-        const injectBlock = `\n<relevant-structured-memories>\n${memoryLines.join("\n\n")}\n</relevant-structured-memories>\n`;
+        // Extract entity graph connections from results
+        const allEntities = new Set<string>();
+        for (const h of filtered) {
+          if (h.entry.entities) {
+            for (const e of h.entry.entities) allEntities.add(e);
+          }
+        }
+        const entityLinks: string[] = [];
+        if (allEntities.size > 0) {
+          // Group entities by which memories mention them together
+          for (const h of filtered) {
+            if (h.entry.entities && h.entry.entities.length >= 2) {
+              entityLinks.push(h.entry.entities.join(" ↔ "));
+            }
+          }
+        }
+
+        let injectBlock = `\n<relevant-structured-memories>\n${memoryLines.join("\n\n")}\n`;
+        if (entityLinks.length > 0) {
+          const uniqueLinks = [...new Set(entityLinks)];
+          injectBlock += `\nEntity connections: ${uniqueLinks.join(", ")}\n`;
+        }
+        injectBlock += `</relevant-structured-memories>\n`;
 
         return { prependContext: injectBlock };
       } catch (err) {
@@ -332,6 +430,9 @@ export const memoryHybridBridgePlugin = {
       const triggered = keywords.some((kw: string) => lower.includes(kw.toLowerCase()));
 
       if (!triggered && fullText.length < config.captureMinChars) return;
+
+      // Circuit breaker: skip extraction if LLM is known to be down
+      if (Date.now() < extractBackoffUntil) return;
 
       try {
         const { audit } = getResolvedPaths(agentId);
@@ -387,6 +488,7 @@ export const memoryHybridBridgePlugin = {
                 const mergedVec = await getEmbedding({ config, text: merged.text, logger: api.logger });
                 if (mergedVec) merged.vector = mergedVec;
                 await store.upsert(merged);
+                extractFailCount = 0;
                 // W5 fix: audit-log in separate try/catch
                 try {
                   await appendAuditLog(audit, {
@@ -408,6 +510,7 @@ export const memoryHybridBridgePlugin = {
         }
 
         await store.upsert(extracted);
+        extractFailCount = 0;
         // W5 fix: audit-log in separate try/catch
         try {
           await appendAuditLog(audit, {
@@ -422,9 +525,18 @@ export const memoryHybridBridgePlugin = {
           `memory-hybrid-bridge [${agentId}]: auto-captured new memory: ${extracted.id}`,
         );
       } catch (err) {
-        api.logger.warn(
-          `memory-hybrid-bridge [${agentId}]: auto-capture failed: ${String(err)}`,
-        );
+        extractFailCount++;
+        if (extractFailCount >= EXTRACT_FAIL_THRESHOLD) {
+          extractBackoffUntil = Date.now() + EXTRACT_BACKOFF_MS;
+          api.logger.warn(
+            `memory-hybrid-bridge [${agentId}]: auto-capture circuit breaker OPEN — ${extractFailCount} consecutive failures, backing off ${EXTRACT_BACKOFF_MS / 1000}s`,
+          );
+          extractFailCount = 0;
+        } else {
+          api.logger.warn(
+            `memory-hybrid-bridge [${agentId}]: auto-capture failed (${extractFailCount}/${EXTRACT_FAIL_THRESHOLD}): ${String(err)}`,
+          );
+        }
       }
     });
 

@@ -359,6 +359,11 @@ impl MemoryStore {
         db::gc_tables(&mut self.conn)
     }
 
+    /// Archive low-importance memories not accessed in `stale_days`.
+    pub fn archive_stale_memories(&self, stale_days: u32) -> Result<u64, MemoryError> {
+        db::archive_stale_memories(&self.conn, stale_days)
+    }
+
     // ─── Hard State Operations ────────────────────────────────────────────────
 
     /// Set a deterministic key-value state.

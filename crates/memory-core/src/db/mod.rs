@@ -49,7 +49,7 @@ pub use sqlite_vec::{register_sqlite_vec, serialize_f32, try_load_sqlite_vec};
 pub use state::{
     count_derived_by_source, get_state, list_derived_by_source, save_derived, set_state,
 };
-pub use stats_gc::{gc_tables, stats};
+pub use stats_gc::{archive_stale_memories, gc_tables, stats};
 pub use vault_db::{
     vault_count_entries, vault_delete_entry, vault_delete_rotation, vault_entry_exists,
     vault_get_config, vault_get_entry, vault_get_rotation, vault_insert_audit, vault_list_entries,

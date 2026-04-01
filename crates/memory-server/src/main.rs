@@ -4,6 +4,7 @@
 // Stateless design: each tool opens its own DB connection per-request.
 
 mod bootstrap;
+mod clawdoctor;
 mod dlq_ops;
 mod ghost_ops;
 mod graph_state_ops;
@@ -86,7 +87,8 @@ use crate::skill_chain_ops::handle_chain_skills;
 use crate::tool_params::*;
 use crate::utils::{
     find_git_root, is_active_global_rule, is_trusted_command, lock_or_recover, parse_env_bool,
-    parse_env_u64, read_or_recover, stable_hash, value_to_template_text, write_or_recover,
+    parse_env_u64, read_or_recover, sanitize_safe_path_name, stable_hash,
+    value_to_template_text, write_or_recover,
 };
 use crate::vault_ops::{
     handle_vault_get, handle_vault_init, handle_vault_list, handle_vault_lock, handle_vault_remove,
@@ -131,6 +133,7 @@ struct EnrichmentItem {
     needs_embedding: bool,
     needs_summary: bool,
     target_db: DbScope,
+    named_project: Option<String>,
     revision: i64,
 }
 
@@ -174,6 +177,25 @@ struct Cli {
     /// Interval between background GC runs in seconds (overrides MEMORY_GC_INTERVAL_SECS)
     #[arg(long)]
     gc_interval_secs: Option<u64>,
+
+    /// Enable clawdoctor: periodic OpenClaw health check + auto-restart
+    /// (overrides CLAWDOCTOR_ENABLED)
+    #[arg(long)]
+    clawdoctor: Option<bool>,
+
+    /// OpenClaw gateway URL for clawdoctor health checks
+    /// (overrides CLAWDOCTOR_URL, default: http://127.0.0.1:18789)
+    #[arg(long)]
+    clawdoctor_url: Option<String>,
+
+    /// Clawdoctor check interval in seconds (overrides CLAWDOCTOR_INTERVAL_SECS, default: 300)
+    #[arg(long)]
+    clawdoctor_interval_secs: Option<u64>,
+
+    /// Consecutive failures before clawdoctor triggers a restart
+    /// (overrides CLAWDOCTOR_FAIL_THRESHOLD, default: 3)
+    #[arg(long)]
+    clawdoctor_fail_threshold: Option<u32>,
 
     /// CLI command (defaults to `serve` when omitted)
     #[command(subcommand)]
@@ -715,11 +737,19 @@ impl MemoryServer {
             let new_summary = summaries[i].as_deref();
 
             if new_vec.is_some() || new_summary.is_some() {
-                match self.with_store_for_scope(item.target_db, |store| {
+                let update_action = |store: &mut MemoryStore| {
                     store
                         .update_enrichment_fields(&item.id, new_summary, new_vec, item.revision)
                         .map_err(|e| format!("Failed to update enriched entry: {e}"))
-                }) {
+                };
+
+                let res = if let Some(ref project_name) = item.named_project {
+                    self.with_named_project_store(project_name, update_action)
+                } else {
+                    self.with_store_for_scope(item.target_db, update_action)
+                };
+
+                match res {
                     Ok(true) => {}
                     Ok(false) => eprintln!(
                         "[enrichment-batcher] discarded {} (revision changed)",

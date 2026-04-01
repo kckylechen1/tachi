@@ -383,4 +383,7 @@ export class MemoryMcpClient {
     async memoryStats() {
         return await this.callJson("memory_stats", {});
     }
+    async callTool(toolName, args) {
+        return await this.callJson(toolName, args);
+    }
 }

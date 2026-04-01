@@ -65,6 +65,26 @@ pub(super) fn is_trusted_command(cmd: &str) -> bool {
     false
 }
 
+pub(super) fn sanitize_safe_path_name(name: &str) -> String {
+    let sanitized: String = name
+        .trim()
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.') {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    let sanitized = sanitized.trim_matches(|ch| matches!(ch, '.' | '_' | '-'));
+    if sanitized.is_empty() {
+        "unnamed".to_string()
+    } else {
+        sanitized.to_string()
+    }
+}
+
 pub(super) fn value_to_template_text(v: &Value) -> String {
     if let Some(s) = v.as_str() {
         s.to_string()

@@ -79,6 +79,34 @@ pub fn gc_tables(conn: &mut Connection) -> Result<serde_json::Value, MemoryError
     }))
 }
 
+// ─── AUTO-ARCHIVE STALE MEMORIES ──────────────────────────────────────────────
+
+/// Archive low-importance memories that haven't been accessed in `stale_days`.
+/// Returns the number of memories archived.
+pub fn archive_stale_memories(conn: &Connection, stale_days: u32) -> Result<u64, MemoryError> {
+    // Archive low-importance memories not accessed in N days
+    let affected1 = conn.execute(
+        "UPDATE memories SET archived = 1
+         WHERE archived = 0
+           AND last_access IS NOT NULL
+           AND last_access < datetime('now', '-' || ?1 || ' days')
+           AND importance < 0.5",
+        params![stale_days],
+    )?;
+
+    // Archive very low importance memories never accessed and older than N days
+    let affected2 = conn.execute(
+        "UPDATE memories SET archived = 1
+         WHERE archived = 0
+           AND last_access IS NULL
+           AND timestamp < datetime('now', '-' || ?1 || ' days')
+           AND importance < 0.3",
+        params![stale_days],
+    )?;
+
+    Ok((affected1 + affected2) as u64)
+}
+
 // ─── STATS ────────────────────────────────────────────────────────────────────
 
 /// Get aggregate statistics about the memory store.

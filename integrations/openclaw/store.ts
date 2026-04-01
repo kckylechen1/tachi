@@ -219,6 +219,10 @@ export class MemoryStore {
     throw new Error(`memory-hybrid-bridge: no backend available for ${operation} (NAPI absent, MCP unavailable)`);
   }
 
+  getMcpClient(): MemoryMcpClient | null {
+    return this.mcpClient;
+  }
+
   async close(): Promise<void> {
     await this.mcpClient?.close();
   }

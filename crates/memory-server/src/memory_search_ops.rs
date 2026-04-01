@@ -94,6 +94,7 @@ pub(super) async fn handle_save_memory(
             needs_embedding,
             needs_summary,
             target_db,
+            named_project: params.project.clone(),
             revision: 1,
         });
     }
@@ -111,10 +112,13 @@ pub(super) async fn handle_save_memory(
         let auto_link_server = server.clone();
         let auto_link_id = id.clone();
         let auto_link_entities = entry.entities.clone();
+        let auto_link_named_project = params.project.clone();
+        let auto_link_target_db = target_db;
+        
         tokio::spawn(async move {
             for entity in &auto_link_entities {
                 let query = entity.clone();
-                if let Ok(results) = auto_link_server.with_global_store_read(|store| {
+                let search_action = |store: &mut MemoryStore| {
                     store
                         .search(
                             &query,
@@ -124,7 +128,15 @@ pub(super) async fn handle_save_memory(
                             }),
                         )
                         .map_err(|e| format!("{}", e))
-                }) {
+                };
+                
+                let search_res = if let Some(ref p) = auto_link_named_project {
+                    auto_link_server.with_named_project_store_read(p, search_action)
+                } else {
+                    auto_link_server.with_store_for_scope_read(auto_link_target_db, search_action)
+                };
+
+                if let Ok(results) = search_res {
                     for result in results {
                         if result.entry.id == auto_link_id {
                             continue;
@@ -146,9 +158,14 @@ pub(super) async fn handle_save_memory(
                                 valid_from: String::new(),
                                 valid_to: None,
                             };
-                            let _ = auto_link_server.with_global_store(|store| {
+                            let save_edge_action = |store: &mut MemoryStore| {
                                 store.add_edge(&edge).map_err(|e| format!("{}", e))
-                            });
+                            };
+                            let _ = if let Some(ref p) = auto_link_named_project {
+                                auto_link_server.with_named_project_store(p, save_edge_action)
+                            } else {
+                                auto_link_server.with_store_for_scope(auto_link_target_db, save_edge_action)
+                            };
                         }
                     }
                 }
@@ -239,18 +256,29 @@ pub(super) async fn handle_search_memory(
     if let Some(ref role) = params.agent_role {
         deduped_results.retain(|(result, db_scope)| {
             let allowed = match db_scope {
-                DbScope::Global => server.with_global_store(|store| {
+                DbScope::Global => server.with_global_store_read(|store| {
                     store
                         .check_sandbox_access(role, &result.entry.path, "read")
                         .map(|(allowed, _)| allowed)
                         .map_err(|e| format!("{e}"))
                 }),
-                DbScope::Project => server.with_project_store(|store| {
-                    store
-                        .check_sandbox_access(role, &result.entry.path, "read")
-                        .map(|(allowed, _)| allowed)
-                        .map_err(|e| format!("{e}"))
-                }),
+                DbScope::Project => {
+                    if let Some(ref p) = params.project {
+                        server.with_named_project_store_read(p, |store| {
+                            store
+                                .check_sandbox_access(role, &result.entry.path, "read")
+                                .map(|(allowed, _)| allowed)
+                                .map_err(|e| format!("{e}"))
+                        })
+                    } else {
+                        server.with_project_store_read(|store| {
+                            store
+                                .check_sandbox_access(role, &result.entry.path, "read")
+                                .map(|(allowed, _)| allowed)
+                                .map_err(|e| format!("{e}"))
+                        })
+                    }
+                }
             };
             allowed.unwrap_or(true)
         });

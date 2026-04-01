@@ -54,6 +54,7 @@ export declare class MemoryMcpClient {
     }>>;
     deleteMemory(id: string): Promise<boolean>;
     memoryStats(): Promise<unknown>;
+    callTool(toolName: string, args: Record<string, unknown>): Promise<unknown>;
 }
 export {};
 //# sourceMappingURL=mcp-client.d.ts.map

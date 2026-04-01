@@ -251,8 +251,8 @@ fn project_pack_to_agent(pack: &Pack, agent: AgentKind) -> Result<(String, u32),
     let (base_dir_template, _file_ext) = agent.skill_target();
     let home = dirs::home_dir().ok_or_else(|| "Cannot determine home directory".to_string())?;
     let base_dir = base_dir_template.replace("~", &home.to_string_lossy());
-    let pack_short_name = pack.id.split('/').last().unwrap_or(&pack.id);
-    let target_dir = PathBuf::from(&base_dir).join(pack_short_name);
+    let pack_short_name = sanitize_safe_path_name(pack.id.split('/').last().unwrap_or(&pack.id));
+    let target_dir = PathBuf::from(&base_dir).join(&pack_short_name);
 
     // Create target directory
     std::fs::create_dir_all(&target_dir)
@@ -279,7 +279,7 @@ fn project_pack_to_agent(pack: &Pack, agent: AgentKind) -> Result<(String, u32),
         }
         AgentKind::Cursor => {
             // Cursor: Uses .mdc rule files in ~/.cursor/rules/
-            count = project_skills_as_cursor_rules(&source_dir, &target_dir, pack_short_name)?;
+            count = project_skills_as_cursor_rules(&source_dir, &target_dir, &pack_short_name)?;
         }
         AgentKind::Gemini | AgentKind::OpenCode | AgentKind::Trae | AgentKind::Generic => {
             // Generic: Copy SKILL.md files into target directory

@@ -10,6 +10,44 @@ fn ensure_test_env() {
     });
 }
 
+fn home_test_lock() -> &'static std::sync::Mutex<()> {
+    static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+    LOCK.get_or_init(|| std::sync::Mutex::new(()))
+}
+
+struct TempHomeGuard {
+    _guard: std::sync::MutexGuard<'static, ()>,
+    original_home: Option<std::ffi::OsString>,
+    temp_home: std::path::PathBuf,
+}
+
+impl TempHomeGuard {
+    fn new() -> Self {
+        let guard = home_test_lock().lock().unwrap_or_else(|e| e.into_inner());
+        let original_home = std::env::var_os("HOME");
+        let temp_home =
+            std::env::temp_dir().join(format!("tachi-test-home-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&temp_home).expect("create temp home");
+        std::env::set_var("HOME", &temp_home);
+        Self {
+            _guard: guard,
+            original_home,
+            temp_home,
+        }
+    }
+}
+
+impl Drop for TempHomeGuard {
+    fn drop(&mut self) {
+        if let Some(home) = self.original_home.as_ref() {
+            std::env::set_var("HOME", home);
+        } else {
+            std::env::remove_var("HOME");
+        }
+        let _ = std::fs::remove_dir_all(&self.temp_home);
+    }
+}
+
 fn make_server() -> MemoryServer {
     ensure_test_env();
     let db_path = std::env::temp_dir().join(format!(
@@ -474,7 +512,7 @@ fn filter_mcp_tools_respects_allow_and_deny_permissions() {
 }
 
 #[tokio::test]
-async fn hub_register_discovery_failure_disables_capability_and_clears_proxy_tools() {
+async fn hub_register_defers_mcp_discovery_until_review() {
     let server = make_server();
     let params = HubRegisterParams {
         id: "mcp:discovery-fails".to_string(),
@@ -483,7 +521,7 @@ async fn hub_register_discovery_failure_disables_capability_and_clears_proxy_too
         description: "test discovery failure".to_string(),
         definition: json!({
             "transport": "stdio",
-            "command": "/usr/bin/true",
+            "command": "/tmp/not-on-allowlist",
             "args": [],
         })
         .to_string(),
@@ -499,35 +537,25 @@ async fn hub_register_discovery_failure_disables_capability_and_clears_proxy_too
         serde_json::from_str(&response).expect("hub_register response should be JSON");
 
     assert_eq!(data.get("enabled"), Some(&json!(false)));
-    assert!(
-        data.get("discovery_error")
-            .and_then(|v| v.as_str())
-            .is_some(),
-        "expected discovery_error in response: {data}"
-    );
+    assert_eq!(data.get("review_status"), Some(&json!("pending")));
+    assert_eq!(data.get("discovery"), Some(&json!("deferred")));
 
     let cap = server
         .get_capability("mcp:discovery-fails")
         .expect("capability should be persisted");
-    assert!(
-        !cap.enabled,
-        "capability should be disabled after discovery failure"
-    );
+    assert!(!cap.enabled, "capability should stay disabled until review");
 
     let def: serde_json::Value =
         serde_json::from_str(&cap.definition).expect("stored definition should be valid JSON");
-    assert_eq!(def.get("discovery_status"), Some(&json!("failed")));
     assert!(
-        def.get("last_discovery_error")
-            .and_then(|v| v.as_str())
-            .is_some(),
-        "stored definition should include last_discovery_error"
+        def.get("discovery_status").is_none(),
+        "registration should not persist discovery results before approval"
     );
 
     let proxy_tools = server.proxy_tools.lock().unwrap_or_else(|e| e.into_inner());
     assert!(
         !proxy_tools.contains_key("discovery-fails"),
-        "failed capability should not leave proxy tools cached"
+        "pending capability should not cache proxy tools"
     );
 }
 
@@ -2357,6 +2385,52 @@ async fn hub_export_skills_generic_writes_files() {
     let _ = std::fs::remove_dir_all(&export_dir);
 }
 
+#[tokio::test]
+async fn hub_export_skills_sanitizes_skill_file_names() {
+    let server = make_server();
+    let export_dir =
+        std::env::temp_dir().join(format!("tachi-export-sanitize-{}", uuid::Uuid::new_v4()));
+
+    server
+        .hub_register(Parameters(HubRegisterParams {
+            id: "skill:..".to_string(),
+            cap_type: "skill".to_string(),
+            name: "dot-skill".to_string(),
+            description: "sanitized export skill".to_string(),
+            definition: json!({
+                "prompt": "Export safely.",
+                "content": "# Sanitized Skill",
+                "inputSchema": {"type": "object"},
+            })
+            .to_string(),
+            version: 1,
+            scope: "global".to_string(),
+        }))
+        .await
+        .expect("register sanitized skill");
+
+    let result = server
+        .hub_export_skills(Parameters(ExportSkillsParams {
+            agent: "generic".to_string(),
+            skill_ids: Some(vec!["skill:..".to_string()]),
+            visibility: "all".to_string(),
+            output_dir: Some(export_dir.display().to_string()),
+            clean: false,
+        }))
+        .await
+        .expect("hub_export_skills generic should succeed");
+    let json: serde_json::Value = serde_json::from_str(&result).expect("should be JSON");
+
+    assert!(export_dir.join("unnamed.md").exists());
+    assert_eq!(json["skills"][0]["name"], json!("unnamed"));
+    assert_eq!(
+        json["skills"][0]["file"],
+        json!(export_dir.join("unnamed.md"))
+    );
+
+    let _ = std::fs::remove_dir_all(&export_dir);
+}
+
 // ─── Pack System Tests ────────────────────────────────────────────────────────
 
 #[tokio::test]
@@ -2499,8 +2573,9 @@ async fn test_pack_get_not_found() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "current_thread")]
 async fn test_pack_project_with_skill_files() {
+    let _temp_home = TempHomeGuard::new();
     let server = make_server();
 
     // Create a temp directory with SKILL.md files to act as a pack source
@@ -2537,7 +2612,7 @@ async fn test_pack_project_with_skill_files() {
         .await
         .expect("register skill pack");
 
-    // Project to generic agent (uses ~/.tachi/skills)
+    // Project to generic agent.
     let result = server
         .pack_project(Parameters(PackProjectParams {
             pack_id: "test/skillpack".to_string(),
@@ -2578,6 +2653,51 @@ async fn test_pack_project_with_skill_files() {
     let _ = std::fs::remove_dir_all(&pack_dir);
 }
 
+#[tokio::test(flavor = "current_thread")]
+async fn test_pack_project_sanitizes_pack_target_directory() {
+    let _temp_home = TempHomeGuard::new();
+    let server = make_server();
+    let pack_dir =
+        std::env::temp_dir().join(format!("tachi-test-pack-sanitize-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&pack_dir).unwrap();
+    std::fs::write(pack_dir.join("SKILL.md"), "# Root Skill").unwrap();
+
+    server
+        .pack_register(Parameters(PackRegisterParams {
+            id: "test/..".to_string(),
+            name: Some("Sanitized Pack".to_string()),
+            source: Some("local".to_string()),
+            version: Some("1.0.0".to_string()),
+            description: None,
+            local_path: Some(pack_dir.display().to_string()),
+            metadata: None,
+        }))
+        .await
+        .expect("register sanitized pack");
+
+    let result = server
+        .pack_project(Parameters(PackProjectParams {
+            pack_id: "test/..".to_string(),
+            agents: vec!["generic".to_string()],
+        }))
+        .await
+        .expect("pack_project should succeed");
+    let json: Value = serde_json::from_str(&result).unwrap();
+    let projections = json["projections"].as_array().unwrap();
+    let projected_path = projections[0]["path"].as_str().unwrap_or("");
+
+    let projected_name = std::path::Path::new(projected_path)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("");
+    assert_eq!(projected_name, "unnamed");
+
+    if !projected_path.is_empty() {
+        let _ = std::fs::remove_dir_all(projected_path);
+    }
+    let _ = std::fs::remove_dir_all(&pack_dir);
+}
+
 #[tokio::test]
 async fn test_pack_project_invalid_agent() {
     let server = make_server();
@@ -2612,8 +2732,9 @@ async fn test_pack_project_invalid_agent() {
     let _ = std::fs::remove_dir_all(&pack_dir);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "current_thread")]
 async fn test_projection_list_filter_by_agent() {
+    let _temp_home = TempHomeGuard::new();
     let server = make_server();
 
     // Create pack source
@@ -2635,7 +2756,7 @@ async fn test_projection_list_filter_by_agent() {
         .await
         .expect("register");
 
-    // Project to generic
+    // Project to generic.
     server
         .pack_project(Parameters(PackProjectParams {
             pack_id: "test/filterpack".to_string(),
@@ -2790,10 +2911,7 @@ async fn hub_stats_returns_capability_counts() {
         .expect("failed to register capability");
 
     // Get stats
-    let stats = server
-        .hub_stats()
-        .await
-        .expect("hub_stats should succeed");
+    let stats = server.hub_stats().await.expect("hub_stats should succeed");
 
     let stats_json: Value = serde_json::from_str(&stats).unwrap();
     assert!(stats_json["total_capabilities"].as_u64().unwrap() >= 1);
@@ -2812,7 +2930,10 @@ async fn hub_disconnect_returns_ok_for_nonexistent_server() {
         .await;
 
     // Should not error - disconnect is idempotent
-    assert!(result.is_ok(), "hub_disconnect should not fail for nonexistent server");
+    assert!(
+        result.is_ok(),
+        "hub_disconnect should not fail for nonexistent server"
+    );
 }
 
 #[tokio::test]
@@ -2937,7 +3058,10 @@ async fn sandbox_policy_prevents_unregistered_capability_startup() {
         .proxy_call_internal("unregistered-policy", "test_tool", None)
         .await;
 
-    assert!(result.is_err(), "proxy_call should fail without sandbox policy");
+    assert!(
+        result.is_err(),
+        "proxy_call should fail without sandbox policy"
+    );
     let err_msg = result.unwrap_err().to_string();
     assert!(
         err_msg.contains("no sandbox policy") || err_msg.contains("Sandbox"),

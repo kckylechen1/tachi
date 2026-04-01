@@ -482,61 +482,25 @@ pub(super) async fn handle_hub_register(
             .to_string();
         server.clear_proxy_tools(&server_name);
 
+        clear_mcp_discovery_metadata(&mut def);
+        server.clear_proxy_tools(&server_name);
+
         if !auto_enabled {
-            clear_mcp_discovery_metadata(&mut def);
             let cmd = def["command"].as_str().unwrap_or("unknown");
             append_warning(
                 &mut resp,
                 format!(
-                    "Command '{}' is not in the trusted allowlist. Capability registered but disabled. Use hub_set_enabled to activate after review.",
+                    "Command '{}' is not in the trusted allowlist. Capability registered in pending review state; approve and enable explicitly before discovery.",
                     cmd
                 ),
             );
-            resp.insert("enabled".into(), json!(false));
-            resp.insert("discovery".into(), json!("skipped (capability disabled)"));
         } else {
-            match server.discover_mcp_tools(&params.id, &def).await {
-                Ok(tools) => {
-                    let total_tools = tools.len();
-                    let filtered_tools = filter_mcp_tools_by_permissions(&def, tools);
-                    let tools_discovered = filtered_tools.len();
-                    let tools_filtered_out = total_tools.saturating_sub(tools_discovered);
-
-                    set_mcp_discovery_success(&mut def, &filtered_tools);
-                    server.cache_proxy_tools(&server_name, filtered_tools);
-
-                    resp.insert("enabled".into(), json!(true));
-                    resp.insert("tools_discovered".into(), json!(tools_discovered));
-                    resp.insert("tools_total".into(), json!(total_tools));
-                    if tools_filtered_out > 0 {
-                        resp.insert("tools_filtered_out".into(), json!(tools_filtered_out));
-                    }
-                    if total_tools > 0 && tools_discovered == 0 {
-                        append_warning(
-                            &mut resp,
-                            "MCP discovery succeeded, but all tools were filtered by permissions",
-                        );
-                    }
-                    if tool_exposure_mode == McpToolExposureMode::Gateway {
-                        append_warning(
-                            &mut resp,
-                            "Direct server__tool exposure is disabled (tool_exposure=gateway); call child tools via hub_call",
-                        );
-                    }
-                }
-                Err(discovery_error) => {
-                    set_mcp_discovery_failure(&mut def, &discovery_error);
-                    server.clear_proxy_tools(&server_name);
-
-                    resp.insert("enabled".into(), json!(false));
-                    resp.insert("discovery_error".into(), json!(discovery_error.clone()));
-                    append_warning(
-                        &mut resp,
-                        "MCP discovery failed; capability registered as disabled. Fix config and re-register to recover.",
-                    );
-                }
-            }
+            append_warning(
+                &mut resp,
+                "MCP discovery is deferred until review approval and enablement.",
+            );
         }
+        resp.insert("discovery".into(), json!("deferred"));
 
         cap_definition = serde_json::to_string(&def)
             .map_err(|e| format!("Failed to serialize MCP definition: {e}"))?;
@@ -943,6 +907,51 @@ pub(super) async fn handle_hub_stats(server: &MemoryServer) -> Result<String, St
     .map_err(|e| format!("serialize: {e}"))
 }
 
+async fn refresh_mcp_capability_state(
+    server: &MemoryServer,
+    target_db: DbScope,
+    cap: &HubCapability,
+) -> Result<HubCapability, String> {
+    let Some(server_name) = cap.id.strip_prefix("mcp:") else {
+        return Ok(cap.clone());
+    };
+
+    if !capability_callable(cap) {
+        server.clear_proxy_tools(server_name);
+        return Ok(cap.clone());
+    }
+
+    let mut updated_cap = cap.clone();
+    let mut def: serde_json::Value = serde_json::from_str(&cap.definition)
+        .map_err(|e| format!("invalid mcp definition JSON: {e}"))?;
+
+    match server.discover_mcp_tools(&cap.id, &def).await {
+        Ok(tools) => {
+            let filtered_tools = filter_mcp_tools_by_permissions(&def, tools);
+            set_mcp_discovery_success(&mut def, &filtered_tools);
+            server.cache_proxy_tools(server_name, filtered_tools);
+            updated_cap.health_status = "healthy".to_string();
+            updated_cap.last_error = None;
+        }
+        Err(discovery_error) => {
+            set_mcp_discovery_failure(&mut def, &discovery_error);
+            server.clear_proxy_tools(server_name);
+            updated_cap.enabled = false;
+            updated_cap.health_status = "unhealthy".to_string();
+            updated_cap.last_error = Some(discovery_error);
+        }
+    }
+
+    updated_cap.definition = serde_json::to_string(&def)
+        .map_err(|e| format!("Failed to serialize MCP definition: {e}"))?;
+    server.with_store_for_scope(target_db, |store| {
+        store
+            .hub_register(&updated_cap)
+            .map_err(|e| format!("hub register updated mcp: {e}"))
+    })?;
+    Ok(updated_cap)
+}
+
 pub(super) async fn handle_hub_review(
     server: &MemoryServer,
     params: HubReviewParams,
@@ -1000,41 +1009,26 @@ pub(super) async fn handle_hub_review(
         }
     }
 
-    if let Some(cap) = cap.as_ref() {
-        if let Some(server_name) = cap.id.strip_prefix("mcp:") {
-            if capability_callable(cap) {
-                match serde_json::from_str::<serde_json::Value>(&cap.definition) {
-                    Ok(def) => {
-                        if let Some(tools_json) = def.get("discovered_tools") {
-                            if let Ok(tools) =
-                                serde_json::from_value::<Vec<rmcp::model::Tool>>(tools_json.clone())
-                            {
-                                server.cache_proxy_tools(
-                                    server_name,
-                                    filter_mcp_tools_by_permissions(&def, tools),
-                                );
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        eprintln!(
-                            "[hub_review] invalid definition JSON for '{}': {}",
-                            cap.id, e
-                        );
-                    }
-                }
+    if let Some(current_cap) = cap.take() {
+        let mut current_cap = current_cap;
+        if current_cap.id.starts_with("mcp:") {
+            let scope = if target_db == "project" {
+                DbScope::Project
             } else {
-                server.clear_proxy_tools(server_name);
+                DbScope::Global
+            };
+            current_cap = refresh_mcp_capability_state(server, scope, &current_cap).await?;
+        }
+
+        if current_cap.id.starts_with("skill:") {
+            if capability_callable(&current_cap) && should_expose_skill_tool(&current_cap) {
+                let _ = server.register_skill_tool(&current_cap);
+            } else {
+                let _ = server.unregister_skill_tool(&current_cap.id);
             }
         }
 
-        if cap.id.starts_with("skill:") {
-            if capability_callable(cap) && should_expose_skill_tool(cap) {
-                let _ = server.register_skill_tool(cap);
-            } else {
-                let _ = server.unregister_skill_tool(&cap.id);
-            }
-        }
+        cap = Some(current_cap);
     }
 
     serde_json::to_string(&json!({
@@ -1332,39 +1326,15 @@ pub(super) async fn handle_hub_set_enabled(
     }
 
     if updated {
-        if let Some(server_name) = params.id.strip_prefix("mcp:") {
-            if params.enabled {
-                if let Ok(cap) = server.get_capability(&params.id) {
-                    match serde_json::from_str::<serde_json::Value>(&cap.definition) {
-                        Ok(def) => {
-                            if let Some(tools_json) = def.get("discovered_tools") {
-                                match serde_json::from_value::<Vec<rmcp::model::Tool>>(
-                                    tools_json.clone(),
-                                ) {
-                                    Ok(tools) => {
-                                        server.cache_proxy_tools(
-                                            server_name,
-                                            filter_mcp_tools_by_permissions(&def, tools),
-                                        );
-                                    }
-                                    Err(e) => {
-                                        eprintln!(
-                                            "[hub_set_enabled] invalid discovered_tools payload for '{}': {}",
-                                            params.id, e
-                                        );
-                                    }
-                                }
-                            }
-                        }
-                        Err(e) => {
-                            eprintln!(
-                                "[hub_set_enabled] invalid definition JSON for '{}': {}",
-                                params.id, e
-                            );
-                        }
-                    }
-                }
-            } else {
+        if params.id.starts_with("mcp:") {
+            if let Ok(cap) = server.get_capability(&params.id) {
+                let scope = if target_db == "project" {
+                    DbScope::Project
+                } else {
+                    DbScope::Global
+                };
+                let _ = refresh_mcp_capability_state(server, scope, &cap).await?;
+            } else if let Some(server_name) = params.id.strip_prefix("mcp:") {
                 server.clear_proxy_tools(server_name);
             }
         }
@@ -1700,8 +1670,8 @@ pub(super) async fn handle_export_skills(
 }
 
 /// Extract skill name from ID (e.g. "skill:code-review" -> "code-review")
-fn skill_name_from_id(id: &str) -> &str {
-    id.strip_prefix("skill:").unwrap_or(id)
+fn skill_name_from_id(id: &str) -> String {
+    sanitize_safe_path_name(id.strip_prefix("skill:").unwrap_or(id))
 }
 
 /// Extract the SKILL.md content from a capability's definition JSON.
@@ -1744,7 +1714,7 @@ fn export_for_claude(
             }
         };
 
-        let skill_dir = tachi_skills_dir.join(name);
+        let skill_dir = tachi_skills_dir.join(&name);
         if let Err(e) = std::fs::create_dir_all(&skill_dir) {
             errors.push(json!({ "id": cap.id, "error": format!("mkdir: {e}") }));
             continue;
@@ -1757,7 +1727,7 @@ fn export_for_claude(
         }
 
         // Create/update symlink in ~/.claude/skills/
-        let link_target = claude_skills_dir.join(name);
+        let link_target = claude_skills_dir.join(&name);
         // Remove stale symlink or directory if it exists
         let _ = std::fs::remove_file(&link_target);
         let _ = std::fs::remove_dir(&link_target);
@@ -1782,7 +1752,8 @@ fn export_for_claude(
 
     // Clean stale skills if requested
     if params.clean {
-        let exported_names: HashSet<&str> = skills.iter().map(|c| skill_name_from_id(&c.id)).collect();
+        let exported_names: HashSet<String> =
+            skills.iter().map(|c| skill_name_from_id(&c.id)).collect();
         if let Ok(entries) = std::fs::read_dir(&claude_skills_dir) {
             for entry in entries.flatten() {
                 let fname = entry.file_name();
@@ -1828,7 +1799,7 @@ fn export_for_openclaw(
             let name = skill_name_from_id(&cap.id);
             let def: serde_json::Value = serde_json::from_str(&cap.definition).ok()?;
             let description = if cap.description.is_empty() {
-                name.to_string()
+                name.clone()
             } else {
                 cap.description.clone()
             };
@@ -1936,7 +1907,8 @@ fn export_for_cursor(
 
     // Clean stale cursor rules if requested
     if params.clean {
-        let exported_names: HashSet<&str> = skills.iter().map(|c| skill_name_from_id(&c.id)).collect();
+        let exported_names: HashSet<String> =
+            skills.iter().map(|c| skill_name_from_id(&c.id)).collect();
         if let Ok(entries) = std::fs::read_dir(&output_dir) {
             for entry in entries.flatten() {
                 let fname = entry.file_name();
