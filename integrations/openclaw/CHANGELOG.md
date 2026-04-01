@@ -1,5 +1,20 @@
 # CHANGELOG
 
+## 0.8.0 - 2026-04-01
+
+### Changed
+
+- OpenClaw integration plugin identity renamed from `memory-hybrid-bridge` to `tachi`.
+- Integration runtime is now single-entry: memory bridge, session intelligence, task tracking, and run audit are loaded from one plugin instead of four separate OpenClaw extensions.
+
+### Added
+
+- Added `compact_context`, todo/spawn tracking tools, and explicit `tachi_*` passthrough tools for skill / hub / vault / ghost / kanban / graph / state / identity / handoff.
+
+### Docs
+
+- README updated to reflect the consolidated architecture and the new `plugins.slots.memory = "tachi"` setup.
+
 ## 0.7.2 - 2026-03-24
 
 ### 依赖升级与底层加固

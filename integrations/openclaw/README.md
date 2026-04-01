@@ -1,12 +1,12 @@
-# memory-hybrid-bridge (OpenClaw Plugin)
+# tachi (OpenClaw Plugin)
 
-OpenClaw 记忆插件 — 通过 Tachi MCP server 提供混合检索（向量 + FTS + 符号 + 衰减），支持 LLM 结构化提取、去重合并、自动上下文注入。
+OpenClaw 统一记忆插件 — 通过 Tachi MCP server 提供混合检索（向量 + FTS + 符号 + 衰减），并合并上下文提纯、任务跟踪、运行审计与 Tachi 子系统直通能力。
 
 ## 架构
 
 ```
 OpenClaw Gateway (Node.js)
-  └─ memory-hybrid-bridge plugin (this package)
+  └─ tachi plugin (this package)
        ├─ MCP client ──→ tachi / memory-server (Rust binary, stdio transport)
        │     └─ SQLite + sqlite-vec (memory.db)
        └─ NAPI fallback (optional @chaoxlabs/tachi-node native binding)
@@ -72,6 +72,9 @@ curl -fsSL https://raw.githubusercontent.com/kckylechen1/tachi/main/scripts/inst
 | `memory_search` | 语义混合检索（向量 + FTS + rerank） |
 | `memory_hybrid_search` | 同上（兼容别名） |
 | `memory_get` | 按 ID 获取单条记忆 |
+| `compact_context` | 提纯当前会话，并将 compact 摘要注入 system event |
+| `todo_write` / `todo_read` / `spawn_tasks` | 会话 todo 与子代理 spawn 跟踪 |
+| `tachi_*` | 直通 skill / hub / vault / ghost / kanban / graph / state / identity / handoff |
 
 ## 注册的 Hooks
 
@@ -79,9 +82,12 @@ curl -fsSL https://raw.githubusercontent.com/kckylechen1/tachi/main/scripts/inst
 |------|------|
 | `before_agent_start` | FTS-only 零延迟检索，注入 `<relevant-structured-memories>` 上下文 |
 | `agent_end` | 自动捕获：LLM 提取 → 嵌入 → 去重/合并 → 写入 |
+| `llm_input` / `llm_output` / `before_compaction` / `after_compaction` | usage + compaction 跟踪 |
+| `after_tool_call` | tooluse 样本、spawn 跟踪、sessions_spawn 审计 |
+| `session_end` / `tool_result_persist` / `subagent_spawned` / `subagent_ended` | snapshot、compact 注入、子代理生命周期审计 |
 
 ## 回滚
 
-1. 在 `openclaw.json` 中禁用 `memory-hybrid-bridge`
+1. 在 `openclaw.json` 中禁用 `tachi`
 2. 如需清理数据：删除 `data/agents/<agent>/memory.db` 或整个插件 `data/agents/` 目录
 3. 重启 OpenClaw gateway
