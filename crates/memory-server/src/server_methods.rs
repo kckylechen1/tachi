@@ -153,6 +153,54 @@ impl MemoryServer {
         }
     }
 
+    /// Open a named project's DB for a read-only operation.
+    /// Resolves to `~/.tachi/projects/{name}/memory.db`.
+    pub(super) fn with_named_project_store_read<T>(
+        &self,
+        project_name: &str,
+        f: impl FnOnce(&mut MemoryStore) -> Result<T, String>,
+    ) -> Result<T, String> {
+        let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
+        let app_home = std::env::var("TACHI_HOME")
+            .map(|v| if v.starts_with("~/") { home.join(&v[2..]) } else { PathBuf::from(v) })
+            .unwrap_or_else(|_| home.join(".tachi"));
+        let db_path = app_home.join("projects").join(project_name).join("memory.db");
+        if !db_path.exists() {
+            return Err(format!(
+                "Project '{}' not found (expected DB at {})",
+                project_name,
+                db_path.display()
+            ));
+        }
+        let mut store = Self::open_read_store(&db_path, &format!("named-project:{}", project_name))?;
+        f(&mut store)
+    }
+
+    /// Open a named project's DB for a write operation.
+    pub(super) fn with_named_project_store<T>(
+        &self,
+        project_name: &str,
+        f: impl FnOnce(&mut MemoryStore) -> Result<T, String>,
+    ) -> Result<T, String> {
+        let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
+        let app_home = std::env::var("TACHI_HOME")
+            .map(|v| if v.starts_with("~/") { home.join(&v[2..]) } else { PathBuf::from(v) })
+            .unwrap_or_else(|_| home.join(".tachi"));
+        let db_path = app_home.join("projects").join(project_name).join("memory.db");
+        if !db_path.exists() {
+            return Err(format!(
+                "Project '{}' not found (expected DB at {})",
+                project_name,
+                db_path.display()
+            ));
+        }
+        let db_str = db_path.to_str().ok_or_else(|| {
+            format!("Project DB path contains invalid UTF-8: {}", db_path.display())
+        })?;
+        let mut store = MemoryStore::open(db_str).map_err(|e| format!("open named project store: {e}"))?;
+        f(&mut store)
+    }
+
     pub(super) fn resolve_write_scope(&self, requested: &str) -> (DbScope, Option<String>) {
         if requested == "global" {
             (DbScope::Global, None)

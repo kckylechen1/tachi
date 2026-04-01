@@ -61,6 +61,11 @@ pub(super) struct SaveMemoryParams {
     /// Auto-link: create graph edges to memories sharing the same entities (default: true)
     #[serde(default = "default_auto_link")]
     pub auto_link: bool,
+
+    /// Optional project name to target a specific project DB (e.g. "hapi", "sigil").
+    /// If omitted, uses the default project DB configured at startup.
+    #[serde(default)]
+    pub project: Option<String>,
 }
 
 fn default_auto_link() -> bool {
@@ -176,6 +181,11 @@ pub(super) struct SearchMemoryParams {
     /// Optional agent role for sandbox filtering (e.g. "finance", "code-review")
     #[serde(default)]
     pub agent_role: Option<String>,
+
+    /// Optional project name to search a specific project DB (e.g. "hapi", "sigil").
+    /// If omitted, searches the default project DB configured at startup.
+    #[serde(default)]
+    pub project: Option<String>,
 }
 
 impl SearchMemoryParams {
@@ -313,6 +323,11 @@ pub(super) struct GetMemoryParams {
     /// Whether to include archived entries
     #[serde(default)]
     pub include_archived: bool,
+
+    /// Optional project name to search a specific project DB (e.g. "hapi", "sigil").
+    /// If omitted, searches the default project DB configured at startup.
+    #[serde(default)]
+    pub project: Option<String>,
 }
 
 #[allow(dead_code)]

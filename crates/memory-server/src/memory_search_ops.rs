@@ -19,7 +19,12 @@ pub(super) async fn handle_save_memory(
         .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
     let timestamp = Utc::now().to_rfc3339();
     let requested_scope = params.scope.clone();
-    let (target_db, warning) = server.resolve_write_scope(&requested_scope);
+    let named_project = params.project.clone();
+    let (target_db, warning) = if named_project.is_some() {
+        (DbScope::Project, None) // Will use named project below
+    } else {
+        server.resolve_write_scope(&requested_scope)
+    };
 
     let summary = params.summary;
     let needs_summary = summary.is_empty();
@@ -64,11 +69,19 @@ pub(super) async fn handle_save_memory(
         vector: params.vector,
     };
 
-    server.with_store_for_scope(target_db, |store| {
-        store
-            .upsert(&entry)
-            .map_err(|e| format!("Failed to save memory: {}", e))
-    })?;
+    if let Some(ref project_name) = named_project {
+        server.with_named_project_store(project_name, |store| {
+            store
+                .upsert(&entry)
+                .map_err(|e| format!("Failed to save memory to '{}': {}", project_name, e))
+        })?;
+    } else {
+        server.with_store_for_scope(target_db, |store| {
+            store
+                .upsert(&entry)
+                .map_err(|e| format!("Failed to save memory: {}", e))
+        })?;
+    }
 
     // Queue enrichment (embedding + summary) via the batcher instead of
     // spawning a per-item task. The batcher accumulates items and calls
@@ -183,7 +196,17 @@ pub(super) async fn handle_search_memory(
     })?;
     combined_results.extend(global_results.into_iter().map(|r| (r, DbScope::Global)));
 
-    if server.has_project_db() {
+    // Search project DB — either named project or default
+    if let Some(ref project_name) = params.project {
+        let project_results = server.with_named_project_store_read(project_name, |store| {
+            let vec_avail = store.vec_available;
+            let project_opts = params.to_search_options(vec_avail);
+            store
+                .search(&params.query, Some(project_opts))
+                .map_err(|e| format!("Search failed in project DB '{}': {}", project_name, e))
+        })?;
+        combined_results.extend(project_results.into_iter().map(|r| (r, DbScope::Project)));
+    } else if server.has_project_db() {
         let project_opts = params.to_search_options(server.project_vec_available);
 
         let project_results = server.with_project_store_read(|store| {

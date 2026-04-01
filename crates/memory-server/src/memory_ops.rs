@@ -4,7 +4,19 @@ pub(super) async fn handle_get_memory(
     server: &MemoryServer,
     params: GetMemoryParams,
 ) -> Result<String, String> {
-    if server.has_project_db() {
+    // Check named project DB first, then default project DB
+    if let Some(ref project_name) = params.project {
+        let project_entry = server.with_named_project_store_read(project_name, |store| {
+            store
+                .get_with_options(&params.id, params.include_archived)
+                .map_err(|e| format!("Failed to get memory from project '{}': {}", project_name, e))
+        })?;
+
+        if let Some(entry) = project_entry {
+            return serde_json::to_string(&slim_entry(&entry, DbScope::Project))
+                .map_err(|e| format!("Failed to serialize: {}", e));
+        }
+    } else if server.has_project_db() {
         let project_entry = server.with_project_store_read(|store| {
             store
                 .get_with_options(&params.id, params.include_archived)
