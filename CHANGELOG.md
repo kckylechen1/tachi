@@ -5,6 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.12.3] - 2026-04-01
+
+### Added
+- **Named project targeting for core memory APIs**: `save_memory`, `search_memory`, and `get_memory` now accept an optional `project` parameter so callers can explicitly target `~/.tachi/projects/<name>/memory.db` instead of relying only on the daemon’s current default project DB.
+- **Server-side named project helpers**: `memory-server` gained `with_named_project_store()` and `with_named_project_store_read()` to open project DBs by name for both read and write paths.
+
+### Changed
+- **OpenClaw integration naming**: the OpenClaw-side memory plugin is now documented and configured as `tachi` instead of `memory-hybrid-bridge`.
+- **OpenClaw integration topology**: docs now reflect the consolidated single-plugin runtime that combines memory, session intelligence, task tracking, and run audit.
+
+### Tests
+- **Expanded coverage for named project params**: test suite updated so `get_memory` / `save_memory` round-trips include the new `project` field, plus regression coverage for the new server-side path.
+
 ## [0.12.2] - 2026-03-30
 
 ### Fixed
