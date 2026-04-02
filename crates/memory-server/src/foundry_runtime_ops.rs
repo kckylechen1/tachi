@@ -50,6 +50,15 @@ struct SessionCaptureDraft {
     location: String,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+struct CompactContextDraft {
+    compacted_text: String,
+    #[serde(default)]
+    salient_topics: Vec<String>,
+    #[serde(default)]
+    durable_signals: Vec<String>,
+}
+
 fn default_capture_category() -> String {
     "fact".to_string()
 }
@@ -1209,6 +1218,26 @@ fn build_prepend_context(rows: &[Value]) -> String {
     block
 }
 
+fn estimate_token_count(text: &str) -> usize {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        0
+    } else {
+        trimmed.chars().count().div_ceil(4)
+    }
+}
+
+fn parse_compact_context_response(raw: &str) -> Result<CompactContextDraft, String> {
+    let json_str = llm::LlmClient::strip_code_fence(raw);
+    let parsed: CompactContextDraft = serde_json::from_str(json_str).map_err(|e| {
+        format!(
+            "Failed to parse compact_context JSON: {e} — response was: {}",
+            json_str
+        )
+    })?;
+    Ok(parsed)
+}
+
 fn parse_session_capture_response(raw: &str) -> Result<Vec<SessionCaptureDraft>, String> {
     let json_str = llm::LlmClient::strip_code_fence(raw);
     let parsed: Vec<SessionCaptureDraft> = serde_json::from_str(json_str).map_err(|e| {
@@ -1262,6 +1291,86 @@ async fn rerank_rows(
             rows.into_iter().take(top_k).collect()
         }
     }
+}
+
+pub(super) async fn handle_compact_context(
+    server: &MemoryServer,
+    params: CompactContextParams,
+) -> Result<String, String> {
+    let combined_text = params
+        .messages
+        .iter()
+        .map(|message| format!("{}: {}", message.role.trim(), message.content.trim()))
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    if combined_text.trim().is_empty() {
+        return serde_json::to_string(&json!({
+            "status": "skipped",
+            "reason": "empty_messages",
+            "compacted_text": "",
+            "estimated_tokens": 0,
+            "captured_memory_ids": [],
+            "queued_job_ids": [],
+        }))
+        .map_err(|e| format!("Failed to serialize compact_context response: {e}"));
+    }
+
+    let payload = json!({
+        "agent_id": params.agent_id,
+        "conversation_id": params.conversation_id,
+        "window_id": params.window_id,
+        "trigger": params.trigger,
+        "target_tokens": params.target_tokens.max(32),
+        "current_summary": params.current_summary,
+        "messages": params.messages,
+    });
+    let request = serde_json::to_string_pretty(&payload)
+        .map_err(|e| format!("Failed to serialize compaction payload: {e}"))?;
+    let raw = server
+        .llm
+        .call_llm(
+            crate::prompts::COMPACT_CONTEXT_PROMPT,
+            &request,
+            None,
+            0.1,
+            params.max_output_tokens.max(128).min(u32::MAX as usize) as u32,
+        )
+        .await?;
+    let draft = parse_compact_context_response(&raw)?;
+    let compacted_text = draft.compacted_text.trim().to_string();
+    let estimated_tokens = estimate_token_count(&compacted_text);
+
+    let status = if compacted_text.is_empty() {
+        "skipped"
+    } else {
+        "completed"
+    };
+
+    let mut response = serde_json::Map::new();
+    response.insert("status".into(), json!(status));
+    response.insert("trigger".into(), json!(params.trigger));
+    response.insert("conversation_id".into(), json!(params.conversation_id));
+    response.insert("window_id".into(), json!(params.window_id));
+    response.insert("compacted_text".into(), json!(compacted_text));
+    response.insert("estimated_tokens".into(), json!(estimated_tokens));
+    response.insert("target_tokens".into(), json!(params.target_tokens.max(32)));
+    response.insert("salient_topics".into(), json!(dedup_strings(draft.salient_topics)));
+    response.insert(
+        "durable_signals".into(),
+        json!(dedup_strings(draft.durable_signals)),
+    );
+    response.insert("captured_memory_ids".into(), json!(Vec::<String>::new()));
+    response.insert("queued_job_ids".into(), json!(Vec::<String>::new()));
+    if params.persist {
+        response.insert(
+            "warning".into(),
+            json!("persist_requested_but_deferred"),
+        );
+    }
+
+    serde_json::to_string(&Value::Object(response))
+        .map_err(|e| format!("Failed to serialize compact_context response: {e}"))
 }
 
 pub(super) async fn handle_recall_context(
@@ -1589,6 +1698,28 @@ mod tests {
 
         assert_eq!(parsed.len(), 1);
         assert_eq!(parsed[0].category, "decision");
+    }
+
+    #[test]
+    fn parse_compact_context_response_accepts_json_object() {
+        let parsed = parse_compact_context_response(
+            r#"{
+              "compacted_text":"保留了用户偏好和当前 blocker。",
+              "salient_topics":["preferences", "blockers"],
+              "durable_signals":["用户偏好统一由 Tachi 维护记忆"]
+            }"#,
+        )
+        .expect("response should parse");
+
+        assert!(parsed.compacted_text.contains("blocker"));
+        assert_eq!(parsed.salient_topics.len(), 2);
+    }
+
+    #[test]
+    fn estimate_token_count_rounds_by_char_quarters() {
+        assert_eq!(estimate_token_count(""), 0);
+        assert_eq!(estimate_token_count("1234"), 1);
+        assert_eq!(estimate_token_count("12345"), 2);
     }
 
     #[test]

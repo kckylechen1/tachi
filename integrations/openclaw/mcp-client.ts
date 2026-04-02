@@ -43,6 +43,19 @@ type RecallContextOptions = {
   min_score?: number;
 };
 
+type CompactContextParams = {
+  agent_id: string;
+  conversation_id: string;
+  window_id: string;
+  trigger?: string;
+  messages: Array<{ role: string; content: string }>;
+  current_summary?: string;
+  path_prefix?: string;
+  target_tokens?: number;
+  max_output_tokens?: number;
+  persist?: boolean;
+};
+
 type LaunchConfig = {
   command: string;
   args: string[];
@@ -493,6 +506,17 @@ export class MemoryMcpClient {
     force?: boolean;
   }): Promise<unknown> {
     return await this.callJson<unknown>("capture_session", params);
+  }
+
+  async compactContext(
+    params: CompactContextParams,
+  ): Promise<{
+    status: string;
+    compacted_text: string;
+    estimated_tokens: number;
+    queued_job_ids?: string[];
+  }> {
+    return await this.callJson("compact_context", params);
   }
 
   async findSimilarMemory(

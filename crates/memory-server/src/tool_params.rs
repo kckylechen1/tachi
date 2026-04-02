@@ -420,6 +420,18 @@ fn default_capture_min_chars() -> usize {
     24
 }
 
+fn default_compact_trigger() -> String {
+    "token_pressure".to_string()
+}
+
+fn default_compact_target_tokens() -> usize {
+    256
+}
+
+fn default_compact_max_output_tokens() -> usize {
+    700
+}
+
 #[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub(super) struct RecallContextParams {
@@ -493,6 +505,50 @@ pub(super) struct CaptureSessionParams {
     /// Force capture even when the window is short
     #[serde(default)]
     pub force: bool,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub(super) struct CompactContextParams {
+    /// Canonical agent id for pathing / provenance
+    pub agent_id: String,
+
+    /// Conversation identifier
+    pub conversation_id: String,
+
+    /// Idempotency key for the compacted window
+    pub window_id: String,
+
+    /// Runtime trigger reason
+    #[serde(default = "default_compact_trigger")]
+    pub trigger: String,
+
+    /// Messages in the soon-to-be-evicted window
+    pub messages: Vec<Message>,
+
+    /// Optional prior compact summary for iterative rollups
+    #[serde(default)]
+    pub current_summary: Option<String>,
+
+    /// Optional base path for future persistence / provenance
+    #[serde(default)]
+    pub path_prefix: Option<String>,
+
+    /// Optional named project DB
+    #[serde(default)]
+    pub project: Option<String>,
+
+    /// Approximate target token budget for the compacted block
+    #[serde(default = "default_compact_target_tokens")]
+    pub target_tokens: usize,
+
+    /// Max output tokens for the model call
+    #[serde(default = "default_compact_max_output_tokens")]
+    pub max_output_tokens: usize,
+
+    /// Whether Tachi should later persist durable facts from this window
+    #[serde(default)]
+    pub persist: bool,
 }
 
 fn default_virtual_binding_priority() -> i32 {

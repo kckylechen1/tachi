@@ -20,6 +20,7 @@ mod memory_ops;
 mod memory_search_ops;
 mod pack_ops;
 mod pipeline_ops;
+mod profiles;
 mod project_db_ops;
 mod prompts;
 mod provenance;
@@ -40,8 +41,9 @@ use crate::foundry_ops::{
     handle_synthesize_agent_evolution,
 };
 use crate::foundry_runtime_ops::{
-    enqueue_foundry_capture_maintenance, handle_capture_session, handle_recall_context,
-    run_foundry_maintenance_worker, FoundryMaintenanceItem, FoundryWorkerStats,
+    enqueue_foundry_capture_maintenance, handle_capture_session, handle_compact_context,
+    handle_recall_context, run_foundry_maintenance_worker, FoundryMaintenanceItem,
+    FoundryWorkerStats,
 };
 use crate::ghost_ops::{
     handle_ghost_ack, handle_ghost_promote, handle_ghost_publish, handle_ghost_reflect,
@@ -85,6 +87,7 @@ use crate::pack_ops::{
 use crate::pipeline_ops::{
     handle_extract_facts, handle_get_pipeline_status, handle_ingest_event, handle_sync_memories,
 };
+use crate::profiles::ToolProfile;
 use crate::project_db_ops::handle_tachi_init_project_db;
 use crate::sandbox_ops::{
     handle_sandbox_check, handle_sandbox_exec_audit, handle_sandbox_get_policy,
@@ -178,6 +181,10 @@ struct Cli {
     /// Disable project DB entirely (force single-DB mode)
     #[arg(long)]
     no_project_db: bool,
+
+    /// Built-in tool surface profile: ide | runtime | workflow | admin
+    #[arg(long)]
+    profile: Option<String>,
 
     /// Enable/disable background database GC (overrides MEMORY_GC_ENABLED)
     #[arg(long)]
@@ -468,6 +475,8 @@ struct MemoryServer {
     // ─── Agent Profile ───────────────────────────────────────────────────────
     /// Per-session agent profile (set via agent_register tool).
     agent_profile: Arc<StdRwLock<Option<AgentProfile>>>,
+    /// Default host-facing tool profile for this server instance.
+    tool_profile: Arc<StdRwLock<Option<ToolProfile>>>,
     // ─── Cross-Agent Handoff ─────────────────────────────────────────────────
     /// Pending handoff memos from previous agent sessions.
     handoff_memos: Arc<StdMutex<Vec<HandoffMemo>>>,
@@ -631,6 +640,7 @@ impl MemoryServer {
             rate_limit_rpm: parse_env_u64("RATE_LIMIT_RPM").unwrap_or(DEFAULT_RATE_LIMIT_RPM),
             rate_limit_burst: parse_env_u64("RATE_LIMIT_BURST").unwrap_or(DEFAULT_RATE_LIMIT_BURST),
             agent_profile: Arc::new(StdRwLock::new(None)),
+            tool_profile: Arc::new(StdRwLock::new(None)),
             handoff_memos: Arc::new(StdMutex::new(Vec::new())),
         };
 
@@ -1200,6 +1210,16 @@ impl MemoryServer {
         Parameters(params): Parameters<CaptureSessionParams>,
     ) -> Result<String, String> {
         handle_capture_session(self, params).await
+    }
+
+    #[tool(
+        description = "Compact a soon-to-be-evicted session window into a ready-to-inject context block. Designed for host runtimes that know when token pressure requires compaction."
+    )]
+    async fn compact_context(
+        &self,
+        Parameters(params): Parameters<CompactContextParams>,
+    ) -> Result<String, String> {
+        handle_compact_context(self, params).await
     }
 
     #[tool(

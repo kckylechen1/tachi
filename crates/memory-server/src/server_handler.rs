@@ -14,20 +14,7 @@ impl ServerHandler for MemoryServer {
     {
         async move {
             let all_native = self.tool_router.list_all();
-
-            // Filter native tools by TACHI_EXPOSED_TOOLS whitelist (comma-separated).
-            // If not set, all native tools are exposed (backward compatible).
-            let mut tools: Vec<rmcp::model::Tool> =
-                if let Ok(whitelist) = std::env::var("TACHI_EXPOSED_TOOLS") {
-                    let allowed: std::collections::HashSet<&str> =
-                        whitelist.split(',').map(|s| s.trim()).collect();
-                    all_native
-                        .into_iter()
-                        .filter(|t| allowed.contains(t.name.as_ref()))
-                        .collect()
-                } else {
-                    all_native
-                };
+            let mut tools: Vec<rmcp::model::Tool> = all_native;
 
             // Add proxy tools from registered MCP servers
             let proxy_snapshot = match self.proxy_tools.lock() {
@@ -85,6 +72,16 @@ impl ServerHandler for MemoryServer {
                     tools.extend(poisoned.into_inner().values().cloned());
                 }
             }
+
+            let env_patterns = std::env::var("TACHI_EXPOSED_TOOLS")
+                .ok()
+                .map(|raw| crate::profiles::parse_tool_patterns_csv(&raw))
+                .filter(|patterns| !patterns.is_empty());
+            tools = crate::profiles::filter_tool_defs(
+                tools,
+                self.active_tool_profile(),
+                env_patterns.as_deref(),
+            );
 
             Ok(rmcp::model::ListToolsResult {
                 tools,

@@ -35,6 +35,21 @@ type RecallContextOptions = {
     exclude_topics?: string[];
     min_score?: number;
 };
+type CompactContextParams = {
+    agent_id: string;
+    conversation_id: string;
+    window_id: string;
+    trigger?: string;
+    messages: Array<{
+        role: string;
+        content: string;
+    }>;
+    current_summary?: string;
+    path_prefix?: string;
+    target_tokens?: number;
+    max_output_tokens?: number;
+    persist?: boolean;
+};
 export declare class MemoryMcpClient {
     private readonly dbPath;
     private readonly logger?;
@@ -75,6 +90,12 @@ export declare class MemoryMcpClient {
         scope?: string;
         force?: boolean;
     }): Promise<unknown>;
+    compactContext(params: CompactContextParams): Promise<{
+        status: string;
+        compacted_text: string;
+        estimated_tokens: number;
+        queued_job_ids?: string[];
+    }>;
     findSimilarMemory(queryVec: number[], topK: number): Promise<Array<{
         entry: MemoryEntry;
         similarity: number;

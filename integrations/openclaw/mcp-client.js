@@ -379,6 +379,9 @@ export class MemoryMcpClient {
     async captureSession(params) {
         return await this.callJson("capture_session", params);
     }
+    async compactContext(params) {
+        return await this.callJson("compact_context", params);
+    }
     async findSimilarMemory(queryVec, topK) {
         if (!this.availableTools.has("find_similar_memory")) {
             throw new Error("find_similar_memory tool is unavailable");

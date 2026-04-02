@@ -100,6 +100,26 @@ pub const SESSION_CAPTURE_PROMPT: &str = r#"你是 Neural Foundry 的 session ca
 6) summary 要短，text 要完整；两者不要重复堆砌。
 7) 最多输出 5 条。"#;
 
+/// Compaction prompt — compresses a session window into a reinjectable context block.
+pub const COMPACT_CONTEXT_PROMPT: &str = r#"You are the Neural Foundry compaction engine.
+
+Your task is to compress a soon-to-be-evicted conversation window into a compact context block that can be safely re-injected later.
+
+Output JSON only, no markdown:
+{
+  "compacted_text": "compact replacement context block",
+  "salient_topics": ["topic 1", "topic 2"],
+  "durable_signals": ["stable signal 1", "stable signal 2"]
+}
+
+Rules:
+1) Preserve stable facts, decisions, preferences, blockers, and open threads.
+2) Drop filler, repetition, and transient conversational noise.
+3) Write the compacted_text as a ready-to-inject note block, not as an essay about what you did.
+4) Keep compacted_text within the requested budget.
+5) If the window contains no durable value, return compacted_text as an empty string and keep arrays empty.
+6) Never output anything except valid JSON."#;
+
 /// Agent evolution synthesis prompt — converts evidence into profile-change proposals.
 pub const AGENT_EVOLUTION_SYNTHESIS_PROMPT: &str = r#"You are the Neural Foundry synthesis engine for agent evolution.
 
