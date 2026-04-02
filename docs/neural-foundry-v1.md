@@ -95,12 +95,14 @@ Completed:
 - `capture_session` online API in Tachi
 - Tachi-side rerank for recall results
 - Tachi-side extraction + embedding for captured session memories
+- first Foundry maintenance worker for `memory_rerank`, `memory_distill`, and `forget_sweep`
 - OpenClaw integration updated to prefer the new Tachi APIs
 
 This means OpenClaw now prefers:
 
 - `recall_context` for `before_agent_start`
 - `capture_session` for `agent_end`
+- queued maintenance jobs for post-capture memory upkeep
 
 ### Still using compatibility fallback
 
@@ -108,11 +110,13 @@ The migration is intentionally partial right now.
 
 OpenClaw still keeps local fallback paths for:
 
-- local hybrid search
-- local extraction
-- local merge / dedup flow
+- local FTS search
 
-That fallback is temporary and exists only to keep the plugin usable while the Tachi-side APIs stabilize.
+Tachi still keeps some inline maintenance in the online path for safety:
+
+- inline capture dedup / merge before worker handoff
+
+That remaining compatibility layer is temporary and exists only to keep the plugin usable while the Tachi-side worker pipeline stabilizes.
 
 ## Canonical Data
 
@@ -187,12 +191,22 @@ Already done:
 - online recall moved behind `recall_context`
 - session capture moved behind `capture_session`
 - OpenClaw now prefers Tachi-side online APIs
+- OpenClaw `agent_end` delegates to `capture_session` instead of doing local model calls
+- failed capture windows are spooled locally and replayed on the next healthy Tachi connection
+- inline dedup / merge now runs inside Tachi `capture_session`
+- `recall_context` can auto-scope by `agent_id`, and OpenClaw now passes it through
+- OpenClaw `before_agent_start` uses `recall_context` first, with local FTS fallback only for resilience
+- user-initiated OpenClaw memory search now also degrades only to local FTS fallback instead of local embedding + rerank
+- `capture_session` now queues Foundry maintenance jobs for `memory_rerank`, `memory_distill`, and `forget_sweep`
+- Foundry maintenance now tracks worker counters through `get_pipeline_status`
+- `recall_context` now enforces agent-scoped path policy server-side
+- default agent recall now pulls from both live agent memories and Foundry distill memories
 
 Still missing:
 
-- move dedup / merge fully into Tachi
-- remove OpenClaw local fallback paths
-- add stronger server-side recall filtering and agent-specific path policy
+- remove or further minimize local recall fallback in OpenClaw
+- move more inline dedup / merge and maintenance decisions into the offline worker pipeline
+- harden distill / forget policies beyond the current first-pass worker implementation
 
 ### Phase 3
 
@@ -206,7 +220,7 @@ Add workerized evolution:
 
 Status:
 
-- not started
+- foundations in progress
 
 ### Phase 4
 
@@ -235,9 +249,9 @@ The next implementation slice should stay focused on finishing the OpenClaw-firs
 
 ### Next slice
 
-- move dedup / merge out of the OpenClaw plugin and into Tachi
-- add worker job types for `memory_rerank`, `memory_distill`, and `forget_or_archive`
-- make `capture_session` feed the worker pipeline instead of owning all maintenance inline
+- shrink or remove the remaining local recall fallback in OpenClaw
+- move more capture maintenance out of the online path and into Foundry workers
+- harden `memory_distill` and `forget_sweep` policies with better scoring and archival rules
 
 ### After that
 
@@ -247,6 +261,8 @@ The next implementation slice should stay focused on finishing the OpenClaw-firs
 
 ### Exit criteria for the current migration stage
 
-- OpenClaw no longer needs local extractor / reranker / merge logic for the normal path
-- Tachi owns the online memory flow end-to-end
-- OpenClaw is reduced to lifecycle capture, tool registration, and host formatting
+- OpenClaw no longer needs local extractor / reranker / merge logic for the normal capture path
+- Tachi owns the normal online memory capture flow end-to-end
+- failed capture windows are durable across temporary Tachi outages
+- post-capture maintenance is queued into Foundry workers instead of living entirely inside `capture_session`
+- local recall fallback remains acceptable only as a resilience path, not the primary path

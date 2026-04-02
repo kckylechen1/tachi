@@ -8,6 +8,22 @@ pub(super) struct ResolvedCallTarget {
 }
 
 impl MemoryServer {
+    pub(super) fn enqueue_foundry_job(
+        &self,
+        item: FoundryMaintenanceItem,
+    ) -> Result<(), String> {
+        self.foundry_stats
+            .queued
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        if self.foundry_tx.send(item).is_err() {
+            self.foundry_stats
+                .queued
+                .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+            return Err("foundry maintenance worker unavailable".to_string());
+        }
+        Ok(())
+    }
+
     /// Check if a project DB is available (static startup or hot-swapped).
     pub(super) fn has_project_db(&self) -> bool {
         if self.project_db_path.is_some() {

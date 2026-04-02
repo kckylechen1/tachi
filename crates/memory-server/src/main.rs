@@ -35,7 +35,10 @@ mod vault_ops;
 
 use crate::dlq_ops::{handle_dlq_list, handle_dlq_retry};
 use crate::foundry_ops::handle_synthesize_agent_evolution;
-use crate::foundry_runtime_ops::{handle_capture_session, handle_recall_context};
+use crate::foundry_runtime_ops::{
+    handle_capture_session, handle_recall_context, run_foundry_maintenance_worker,
+    FoundryMaintenanceItem, FoundryWorkerStats,
+};
 use crate::ghost_ops::{
     handle_ghost_ack, handle_ghost_promote, handle_ghost_publish, handle_ghost_reflect,
     handle_ghost_subscribe, handle_ghost_topics,
@@ -435,6 +438,9 @@ struct MemoryServer {
     mcp_tool_exposure_mode: McpToolExposureMode,
     // ─── Enrichment Batcher ──────────────────────────────────────────────────
     enrich_tx: mpsc::UnboundedSender<EnrichmentItem>,
+    // ─── Foundry Maintenance Worker ──────────────────────────────────────────
+    foundry_tx: mpsc::UnboundedSender<FoundryMaintenanceItem>,
+    foundry_stats: Arc<FoundryWorkerStats>,
     // ─── Vault (Encrypted Secret Storage) ────────────────────────────────────
     vault_key: Arc<StdRwLock<Option<[u8; 32]>>>,
     vault_unlock_time: Arc<StdRwLock<Option<Instant>>>,
@@ -562,6 +568,8 @@ impl MemoryServer {
             .unwrap_or(McpToolExposureMode::Flatten);
 
         let (enrich_tx, enrich_rx) = mpsc::unbounded_channel::<EnrichmentItem>();
+        let (foundry_tx, foundry_rx) = mpsc::unbounded_channel::<FoundryMaintenanceItem>();
+        let foundry_stats = Arc::new(FoundryWorkerStats::default());
 
         // Build hot-swap state before moving project_store into the struct
         let hot_project_db = Arc::new(StdRwLock::new(project_store.as_ref().map(|s| {
@@ -602,6 +610,8 @@ impl MemoryServer {
             mcp_discovery_timeout: Duration::from_millis(mcp_discovery_timeout_ms),
             mcp_tool_exposure_mode,
             enrich_tx,
+            foundry_tx,
+            foundry_stats,
             vault_key: Arc::new(StdRwLock::new(None)),
             vault_unlock_time: Arc::new(StdRwLock::new(None)),
             vault_failed_attempts: Arc::new(StdMutex::new((0, None))),
@@ -618,6 +628,10 @@ impl MemoryServer {
         {
             let batcher_server = server.clone();
             tokio::spawn(Self::run_enrichment_batcher(batcher_server, enrich_rx));
+        }
+        {
+            let foundry_server = server.clone();
+            tokio::spawn(run_foundry_maintenance_worker(foundry_server, foundry_rx));
         }
 
         Ok(server)

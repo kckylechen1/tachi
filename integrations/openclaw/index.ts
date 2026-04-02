@@ -3,9 +3,7 @@ import path from "node:path";
 import { Type } from "@sinclair/typebox";
 import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
 import { bridgeConfigSchema, pluginDataDir, workspaceRoot, type MemoryEntry } from "./config.js";
-import { extractMemoryEntry, getEmbedding, mergeMemoryEntries } from "./extractor.js";
 import { getStore, MemoryStore } from "./store.js";
-import { rerank } from "./reranker.js";
 
 // ============================================================================
 // Internal Helpers
@@ -27,6 +25,105 @@ async function appendAuditLog(
   await ensureFile(auditLogPath);
   const line = { ts: new Date().toISOString(), ...payload };
   await fs.appendFile(auditLogPath, `${JSON.stringify(line)}\n`, "utf8");
+}
+
+type CaptureSessionPayload = {
+  conversation_id: string;
+  turn_id: string;
+  agent_id: string;
+  messages: Array<{ role: string; content: string }>;
+  path_prefix?: string;
+  scope?: string;
+  force?: boolean;
+};
+
+function getCaptureSpoolPath(auditLogPath: string): string {
+  return path.resolve(path.dirname(auditLogPath), "capture-spool.jsonl");
+}
+
+async function readCaptureSpool(spoolPath: string): Promise<CaptureSessionPayload[]> {
+  try {
+    const text = await fs.readFile(spoolPath, "utf8");
+    return text
+      .split("\n")
+      .map((line) => line.trim())
+      .filter(Boolean)
+      .map((line) => JSON.parse(line) as CaptureSessionPayload);
+  } catch {
+    return [];
+  }
+}
+
+async function writeCaptureSpool(
+  spoolPath: string,
+  payloads: CaptureSessionPayload[],
+): Promise<void> {
+  if (payloads.length === 0) {
+    try {
+      await fs.unlink(spoolPath);
+    } catch {
+      // nothing to clean up
+    }
+    return;
+  }
+
+  await ensureFile(spoolPath);
+  const body = `${payloads.map((payload) => JSON.stringify(payload)).join("\n")}\n`;
+  await fs.writeFile(spoolPath, body, "utf8");
+}
+
+function capturePayloadKey(payload: CaptureSessionPayload): string {
+  return `${payload.agent_id}:${payload.conversation_id}:${payload.turn_id}`;
+}
+
+async function enqueueCapturePayload(
+  spoolPath: string,
+  payload: CaptureSessionPayload,
+): Promise<number> {
+  const pending = await readCaptureSpool(spoolPath);
+  const key = capturePayloadKey(payload);
+  if (!pending.some((item) => capturePayloadKey(item) === key)) {
+    pending.push(payload);
+    await writeCaptureSpool(spoolPath, pending);
+  }
+  return pending.length;
+}
+
+async function flushCaptureSpool(
+  spoolPath: string,
+  client: NonNullable<MemoryStore["getMcpClient"] extends () => infer T ? T : never>,
+  logger: { warn?: (message: string) => void; info?: (message: string) => void },
+  agentId: string,
+): Promise<{ replayed: number; remaining: number }> {
+  const pending = await readCaptureSpool(spoolPath);
+  if (pending.length === 0) {
+    return { replayed: 0, remaining: 0 };
+  }
+
+  const remaining: CaptureSessionPayload[] = [];
+  let replayed = 0;
+
+  for (let index = 0; index < pending.length; index += 1) {
+    const payload = pending[index];
+    try {
+      const result = await client.captureSession(payload) as any;
+      const status = typeof result?.status === "string" ? result.status : "error";
+      if (status === "completed" || status === "skipped") {
+        replayed += 1;
+        continue;
+      }
+      remaining.push(payload);
+    } catch (err) {
+      logger.warn?.(
+        `tachi [${agentId}]: replay capture spool failed: ${String(err)}`,
+      );
+      remaining.push(payload, ...pending.slice(index + 1));
+      break;
+    }
+  }
+
+  await writeCaptureSpool(spoolPath, remaining);
+  return { replayed, remaining: remaining.length };
 }
 
 function resolveConfigPath(api: OpenClawPluginApi, configuredPath: string): string {
@@ -54,6 +151,26 @@ export const memoryHybridBridgePlugin = {
     let extractBackoffUntil = 0;
     const EXTRACT_FAIL_THRESHOLD = 3;
     const EXTRACT_BACKOFF_MS = 5 * 60 * 1000; // 5 minutes
+
+    function markCaptureHealthy() {
+      extractFailCount = 0;
+    }
+
+    function noteCaptureFailure(agentId: string, error: unknown) {
+      extractFailCount += 1;
+      if (extractFailCount >= EXTRACT_FAIL_THRESHOLD) {
+        extractBackoffUntil = Date.now() + EXTRACT_BACKOFF_MS;
+        api.logger.warn(
+          `tachi [${agentId}]: auto-capture circuit breaker OPEN — ${extractFailCount} consecutive failures, backing off ${EXTRACT_BACKOFF_MS / 1000}s`,
+        );
+        extractFailCount = 0;
+        return;
+      }
+
+      api.logger.warn(
+        `tachi [${agentId}]: auto-capture failed (${extractFailCount}/${EXTRACT_FAIL_THRESHOLD}): ${String(error)}`,
+      );
+    }
 
     function getResolvedPaths(agentId?: string) {
       // main and ops share the default store; other agents get scoped paths
@@ -94,11 +211,11 @@ export const memoryHybridBridgePlugin = {
     api.logger.info(`tachi: registered (dynamic agent-scoping enabled)`);
 
     // --- Search Logic ---
-    // Full hybrid search (FTS + Vec) — calls Voyage API for query embedding.
-    // Used by user-initiated tool calls (memory_search, memory_hybrid_search).
+    // User-initiated search should prefer Tachi server-side recall. Local fallback
+    // stays FTS-only so the plugin does not keep a parallel model pipeline.
     async function performSearch(query: string, agentId?: string, searchTopK?: number) {
-      const store = await ensureStore(agentId);
       const topK = searchTopK ?? config.topK;
+      const store = await ensureStore(agentId);
       const client = store.getMcpClient();
 
       if (client) {
@@ -106,49 +223,19 @@ export const memoryHybridBridgePlugin = {
           const recall = await client.recallContext(query, {
             top_k: topK,
             candidate_multiplier: 3,
+            agent_id: agentId,
           });
           return recall.results;
         } catch (err) {
-          api.logger.warn(`tachi: recall_context failed, fallback to local hybrid search: ${String(err)}`);
+          api.logger.warn(`tachi: recall_context failed, fallback to local FTS search: ${String(err)}`);
         }
       }
 
-      const queryVector = await getEmbedding({ config, text: query, logger: api.logger });
-
-      // Pull more candidates for reranking (3× topK), then rerank down to topK
-      const candidates = topK * 3;
-      try {
-        const { docs, scores } = await store.search(
-          query,
-          queryVector ?? undefined,
-          {
-            top_k: candidates,
-            weights: config.weights
-          }
-        );
-
-        const hybridResults = docs.map((doc) => ({ final_score: scores[doc.id] ?? 0, entry: doc }));
-
-        // Rerank via Voyage rerank-2.5 (falls back to hybrid order on failure)
-        return rerank({ config, query, results: hybridResults, topK, logger: api.logger });
-      } catch (err) {
-        // Fallback path: keep memory search available if vector channel fails.
-        api.logger.warn(`tachi: hybrid search failed, fallback to FTS: ${String(err)}`);
-        const { docs, scores } = await store.search(
-          query,
-          undefined,
-          {
-            top_k: candidates,
-            weights: config.weights
-          }
-        );
-        const hybridResults = docs.map((doc) => ({ final_score: scores[doc.id] ?? 0, entry: doc }));
-        return rerank({ config, query, results: hybridResults, topK, logger: api.logger });
-      }
+      return await performFtsSearch(query, agentId, topK);
     }
 
     // FTS-only search — zero network calls, used for automatic context injection.
-    // Restores the old architecture's zero-latency search for before_agent_start.
+    // Used as the only local resilience path while Tachi owns the main recall logic.
     async function performFtsSearch(query: string, agentId?: string, searchTopK?: number) {
       const store = await ensureStore(agentId);
       const topK = searchTopK ?? config.topK;
@@ -383,6 +470,7 @@ export const memoryHybridBridgePlugin = {
             const recall = await client.recallContext(query, {
               top_k: config.topK,
               candidate_multiplier: 1,
+              agent_id: agentId,
               exclude_topics: ["imsg_conversation"],
             });
             if (recall.prependContext.trim()) {
@@ -468,149 +556,80 @@ export const memoryHybridBridgePlugin = {
 
       try {
         const { audit } = getResolvedPaths(agentId);
-
-        const windowText = recentMsgs
-          .map((m: any, i: number) => `[${i}] ${m.role}: ${msgToText(m)}`)
-          .join("\n\n");
+        const spoolPath = getCaptureSpoolPath(audit);
         const sessionKey = ctx?.sessionKey || `s_${Date.now()}`;
         const conversationId = ctx?.conversationId || ctx?.sessionId || `openclaw:${agentId}`;
-        const sessionMessages = recentMsgs.map((m: any) => ({
-          role: typeof m?.role === "string" ? m.role : "unknown",
-          content: msgToText(m),
-        }));
+        const capturePayload: CaptureSessionPayload = {
+          conversation_id: conversationId,
+          turn_id: sessionKey,
+          agent_id: agentId,
+          messages: recentMsgs.map((m: any) => ({
+            role: typeof m?.role === "string" ? m.role : "unknown",
+            content: msgToText(m),
+          })),
+          path_prefix: `/openclaw/agent-${agentId}`,
+        };
 
         const runtimeStore = await ensureStore(agentId);
         const client = runtimeStore.getMcpClient();
-        if (client) {
-          try {
-            const capture = await client.captureSession({
-              conversation_id: conversationId,
-              turn_id: sessionKey,
-              agent_id: agentId,
-              messages: sessionMessages,
-              path_prefix: `/openclaw/agent-${agentId}`,
-            }) as any;
-
-            const captured = typeof capture?.captured === "number" ? capture.captured : 0;
-            if (captured > 0) {
-              extractFailCount = 0;
-              try {
-                await appendAuditLog(audit, {
-                  action: "capture_session",
-                  captured,
-                  entry_ids: Array.isArray(capture?.ids) ? capture.ids : [],
-                  agent: agentId,
-                });
-              } catch (auditErr) {
-                api.logger.warn(`tachi [${agentId}]: audit-log write failed: ${String(auditErr)}`);
-              }
-              api.logger.info(`tachi [${agentId}]: captured ${captured} memories via Tachi`);
-            }
-
-            if (capture?.status === "completed" || capture?.status === "skipped") {
-              return;
-            }
-          } catch (err) {
-            api.logger.warn(`tachi [${agentId}]: capture_session failed, fallback to local capture: ${String(err)}`);
-          }
+        if (!client) {
+          const queued = await enqueueCapturePayload(spoolPath, capturePayload);
+          noteCaptureFailure(agentId, "MCP client unavailable");
+          api.logger.warn(`tachi [${agentId}]: queued capture payload locally (${queued} pending)`);
+          return;
         }
 
-        const extracted = await extractMemoryEntry({
-          config,
-          inputWindowText: windowText,
-          sourceRefId: sessionKey,
-          agentId,
-          logger: api.logger,
-        });
-
-        if (!extracted) return;
-
-        const vector = await getEmbedding({
-          config,
-          text: extracted.text,
-          logger: api.logger,
-        });
-        if (vector) extracted.vector = vector;
-
-        const store = await ensureStore(agentId);
-
-        // Dedup + Merge via vector similarity (Semantic Synthesis)
-        // >= dedupThreshold (0.95): exact duplicate, skip
-        // >= mergeThreshold (0.85): related, merge via LLM
-        // < mergeThreshold: new entry, insert directly
-        if (extracted.vector && extracted.vector.length > 0) {
-          let similar: Array<{ entry: MemoryEntry; similarity: number }> = [];
-          try {
-            similar = await store.findSimilar(extracted.vector, 1);
-          } catch (similarErr) {
-            // sqlite-vec KNN can fail across vec0 versions.
-            // Dedup is best-effort; don't block memory writes.
-            api.logger.warn(
-              `tachi [${agentId}]: findSimilar failed; skip dedup: ${String(similarErr)}`,
+        try {
+          const replay = await flushCaptureSpool(spoolPath, client, api.logger, agentId);
+          if (replay.replayed > 0) {
+            api.logger.info(
+              `tachi [${agentId}]: replayed ${replay.replayed} queued capture payloads`,
             );
           }
-          if (similar.length > 0) {
-            const top = similar[0];
-            if (top.similarity >= config.dedupThreshold) {
-              api.logger.info(`tachi [${agentId}]: skipping duplicate (sim=${top.similarity.toFixed(3)})`);
-              return;
-            }
-            if (top.similarity >= config.mergeThreshold) {
-              api.logger.info(`tachi [${agentId}]: merging with ${top.entry.id} (sim=${top.similarity.toFixed(3)})`);
-              const merged = await mergeMemoryEntries({ config, existing: top.entry, incoming: extracted, logger: api.logger });
-              if (merged) {
-                const mergedVec = await getEmbedding({ config, text: merged.text, logger: api.logger });
-                if (mergedVec) merged.vector = mergedVec;
-                await store.upsert(merged);
-                extractFailCount = 0;
-                // W5 fix: audit-log in separate try/catch
-                try {
-                  await appendAuditLog(audit, {
-                    action: "merge",
-                    entry_id: merged.id,
-                    merged_with: extracted.id,
-                    similarity: top.similarity,
-                    agent: agentId,
-                  });
-                } catch (auditErr) {
-                  api.logger.warn(`tachi [${agentId}]: audit-log write failed: ${String(auditErr)}`);
-                }
-                api.logger.info(`tachi [${agentId}]: merged memory: ${merged.id}`);
-                return;
-              }
-              // Merge failed, fall through to insert as new
+
+          const capture = await client.captureSession(capturePayload) as any;
+          const status = typeof capture?.status === "string" ? capture.status : "unknown";
+          const captured = typeof capture?.captured === "number" ? capture.captured : 0;
+          markCaptureHealthy();
+
+          if (captured > 0 || status === "completed") {
+            try {
+              await appendAuditLog(audit, {
+                action: "capture_session",
+                status,
+                captured,
+                entry_ids: Array.isArray(capture?.ids) ? capture.ids : [],
+                merged_ids: Array.isArray(capture?.merged_ids) ? capture.merged_ids : [],
+                duplicates_skipped:
+                  typeof capture?.duplicates_skipped === "number"
+                    ? capture.duplicates_skipped
+                    : 0,
+                agent: agentId,
+              });
+            } catch (auditErr) {
+              api.logger.warn(`tachi [${agentId}]: audit-log write failed: ${String(auditErr)}`);
             }
           }
-        }
 
-        await store.upsert(extracted);
-        extractFailCount = 0;
-        // W5 fix: audit-log in separate try/catch
-        try {
-          await appendAuditLog(audit, {
-            action: "append",
-            entry_id: extracted.id,
-            agent: agentId,
-          });
-        } catch (auditErr) {
-          api.logger.warn(`tachi [${agentId}]: audit-log write failed: ${String(auditErr)}`);
+          if (status === "completed" || status === "skipped") {
+            if (captured > 0) {
+              api.logger.info(`tachi [${agentId}]: captured ${captured} memories via Tachi`);
+            }
+            return;
+          }
+
+          const queued = await enqueueCapturePayload(spoolPath, capturePayload);
+          noteCaptureFailure(agentId, `unexpected capture status: ${status}`);
+          api.logger.warn(`tachi [${agentId}]: queued capture payload locally (${queued} pending)`);
+          return;
+        } catch (err) {
+          const queued = await enqueueCapturePayload(spoolPath, capturePayload);
+          noteCaptureFailure(agentId, err);
+          api.logger.warn(`tachi [${agentId}]: queued capture payload locally (${queued} pending)`);
+          return;
         }
-        api.logger.info(
-          `tachi [${agentId}]: auto-captured new memory: ${extracted.id}`,
-        );
       } catch (err) {
-        extractFailCount++;
-        if (extractFailCount >= EXTRACT_FAIL_THRESHOLD) {
-          extractBackoffUntil = Date.now() + EXTRACT_BACKOFF_MS;
-          api.logger.warn(
-            `tachi [${agentId}]: auto-capture circuit breaker OPEN — ${extractFailCount} consecutive failures, backing off ${EXTRACT_BACKOFF_MS / 1000}s`,
-          );
-          extractFailCount = 0;
-        } else {
-          api.logger.warn(
-            `tachi [${agentId}]: auto-capture failed (${extractFailCount}/${EXTRACT_FAIL_THRESHOLD}): ${String(err)}`,
-          );
-        }
+        noteCaptureFailure(agentId, err);
       }
     });
 

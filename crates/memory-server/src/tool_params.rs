@@ -438,6 +438,10 @@ pub(super) struct RecallContextParams {
     #[serde(default)]
     pub path_prefix: Option<String>,
 
+    /// Optional agent id used to auto-scope path_prefix when not explicitly provided
+    #[serde(default)]
+    pub agent_id: Option<String>,
+
     /// Topic names to exclude from the final context block
     #[serde(default)]
     pub exclude_topics: Vec<String>,

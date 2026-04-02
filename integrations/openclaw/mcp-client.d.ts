@@ -31,6 +31,7 @@ type RecallContextOptions = {
     top_k?: number;
     candidate_multiplier?: number;
     path_prefix?: string;
+    agent_id?: string;
     exclude_topics?: string[];
     min_score?: number;
 };

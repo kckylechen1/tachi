@@ -354,6 +354,7 @@ export class MemoryMcpClient {
             top_k: opts?.top_k,
             candidate_multiplier: opts?.candidate_multiplier,
             path_prefix: opts?.path_prefix,
+            agent_id: opts?.agent_id,
             exclude_topics: opts?.exclude_topics,
             min_score: opts?.min_score,
         });

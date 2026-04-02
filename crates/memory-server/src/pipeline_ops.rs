@@ -283,6 +283,13 @@ pub(super) async fn handle_get_pipeline_status(server: &MemoryServer) -> Result<
         let abandoned = dlq.iter().filter(|d| d.status == "abandoned").count();
         (total, pending, resolved, abandoned)
     };
+    let foundry = json!({
+        "queued": server.foundry_stats.queued.load(std::sync::atomic::Ordering::Relaxed),
+        "running": server.foundry_stats.running.load(std::sync::atomic::Ordering::Relaxed),
+        "completed": server.foundry_stats.completed.load(std::sync::atomic::Ordering::Relaxed),
+        "failed": server.foundry_stats.failed.load(std::sync::atomic::Ordering::Relaxed),
+        "skipped": server.foundry_stats.skipped.load(std::sync::atomic::Ordering::Relaxed),
+    });
 
     serde_json::to_string(&json!({
         "status": "running",
@@ -309,6 +316,7 @@ pub(super) async fn handle_get_pipeline_status(server: &MemoryServer) -> Result<
             "max_entries": DLQ_MAX_ENTRIES,
             "ttl_seconds": DLQ_TTL_SECS,
         },
+        "foundry": foundry,
     }))
     .map_err(|e| format!("Failed to serialize response: {}", e))
 }
