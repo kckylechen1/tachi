@@ -165,7 +165,10 @@ fn merge_summary(existing: &str, incoming: &str, merged_text: &str) -> String {
     if incoming.contains(existing) {
         return incoming.to_string();
     }
-    format!("{existing}; {incoming}").chars().take(100).collect()
+    format!("{existing}; {incoming}")
+        .chars()
+        .take(100)
+        .collect()
 }
 
 fn merge_category(existing: &str, incoming: &str) -> String {
@@ -190,7 +193,10 @@ fn merge_metadata(
 
     let mut source_refs = Vec::<serde_json::Value>::new();
     for metadata in [existing, incoming] {
-        if let Some(items) = metadata.get("source_refs").and_then(|value| value.as_array()) {
+        if let Some(items) = metadata
+            .get("source_refs")
+            .and_then(|value| value.as_array())
+        {
             for item in items {
                 if !source_refs.contains(item) {
                     source_refs.push(item.clone());
@@ -289,7 +295,12 @@ fn merge_capture_entries(
         access_count: existing.access_count,
         last_access: existing.last_access.clone(),
         revision: existing.revision + 1,
-        metadata: merge_metadata(&existing.metadata, &incoming.metadata, &incoming.id, similarity),
+        metadata: merge_metadata(
+            &existing.metadata,
+            &incoming.metadata,
+            &incoming.id,
+            similarity,
+        ),
         vector: None,
     }
 }
@@ -569,14 +580,41 @@ fn with_foundry_store_read<T>(
     }
 }
 
-fn build_foundry_event_hash(item: &FoundryMaintenanceItem) -> String {
-    stable_hash(&format!(
+fn memory_claim_signature(entry: &MemoryEntry) -> String {
+    format!(
+        "{}:r{}:vec{}:arch{}",
+        entry.id,
+        entry.revision,
+        if entry.vector.is_some() { 1 } else { 0 },
+        if entry.archived { 1 } else { 0 }
+    )
+}
+
+fn build_foundry_event_hash(
+    server: &MemoryServer,
+    item: &FoundryMaintenanceItem,
+) -> Result<String, String> {
+    let mut signatures = Vec::with_capacity(item.memory_ids.len());
+    for memory_id in &item.memory_ids {
+        let maybe_entry = with_foundry_store_read(server, item, |store| {
+            store
+                .get(memory_id)
+                .map_err(|e| format!("Failed to load memory {} for claim hash: {e}", memory_id))
+        })?;
+        match maybe_entry {
+            Some(entry) => signatures.push(memory_claim_signature(&entry)),
+            None => signatures.push(format!("{memory_id}:missing")),
+        }
+    }
+    signatures.sort();
+
+    Ok(stable_hash(&format!(
         "{}:{}:{}:{}",
         foundry_job_label(&item.job.kind),
         item.named_project.as_deref().unwrap_or("default"),
         item.path_prefix,
-        item.memory_ids.join(","),
-    ))
+        signatures.join(","),
+    )))
 }
 
 fn merge_foundry_metadata(
@@ -683,7 +721,8 @@ async fn process_memory_rerank_job(
             store
                 .get(memory_id)
                 .map_err(|e| format!("Failed to load memory {} for rerank: {e}", memory_id))
-        })? else {
+        })?
+        else {
             continue;
         };
 
@@ -724,9 +763,9 @@ async fn process_memory_rerank_job(
             let similarity = similar.score.vector;
             if similarity >= CAPTURE_DEDUP_THRESHOLD {
                 let changed = with_foundry_store(server, item, |store| {
-                    store
-                        .archive_memory(&entry.id)
-                        .map_err(|e| format!("Failed to archive duplicate memory {}: {e}", entry.id))
+                    store.archive_memory(&entry.id).map_err(|e| {
+                        format!("Failed to archive duplicate memory {}: {e}", entry.id)
+                    })
                 })?;
                 if changed {
                     updated += 1;
@@ -736,7 +775,12 @@ async fn process_memory_rerank_job(
 
             if similarity >= CAPTURE_MERGE_THRESHOLD {
                 let merged = merge_capture_entries(&similar.entry, &entry, similarity);
-                persist_capture_entry(server, item.target_db, item.named_project.as_deref(), &merged)?;
+                persist_capture_entry(
+                    server,
+                    item.target_db,
+                    item.named_project.as_deref(),
+                    &merged,
+                )?;
                 let changed = with_foundry_store(server, item, |store| {
                     store
                         .archive_memory(&entry.id)
@@ -795,7 +839,11 @@ fn build_distill_input(entries: &[MemoryEntry]) -> String {
             format!(
                 "Memory {} | topic={} | importance={:.2}\nSummary: {}\nText: {}",
                 idx + 1,
-                if entry.topic.is_empty() { "unknown" } else { &entry.topic },
+                if entry.topic.is_empty() {
+                    "unknown"
+                } else {
+                    &entry.topic
+                },
                 entry.importance,
                 summary,
                 entry.text.chars().take(320).collect::<String>()
@@ -849,7 +897,11 @@ async fn process_memory_distill_job(
         }),
         "foundry_worker",
         "memory_distill",
-        Some(if item.target_db == DbScope::Project { "project" } else { "global" }),
+        Some(if item.target_db == DbScope::Project {
+            "project"
+        } else {
+            "global"
+        }),
         item.target_db,
         json!({
             "agent_id": agent_id,
@@ -923,9 +975,19 @@ fn process_forget_sweep_job(
             .map_err(|e| format!("Failed to list foundry distill memories: {e}"))
     })?;
 
-    let stale_ids = distill_entries
+    let mut distill_entries = distill_entries
         .into_iter()
         .filter(|entry| entry.source == FOUNDRY_DISTILL_SOURCE)
+        .collect::<Vec<_>>();
+    distill_entries.sort_by(|a, b| {
+        b.timestamp
+            .cmp(&a.timestamp)
+            .then_with(|| b.path.cmp(&a.path))
+            .then_with(|| b.id.cmp(&a.id))
+    });
+
+    let stale_ids = distill_entries
+        .into_iter()
         .skip(FOUNDRY_DISTILL_KEEP)
         .map(|entry| entry.id)
         .collect::<Vec<_>>();
@@ -950,7 +1012,7 @@ async fn handle_foundry_maintenance_item(
     item: &FoundryMaintenanceItem,
 ) -> Result<memory_core::FoundryJobStatus, String> {
     let worker = foundry_worker_name(&item.job.kind);
-    let event_hash = build_foundry_event_hash(item);
+    let event_hash = build_foundry_event_hash(server, item)?;
     let claimed = with_foundry_store(server, item, |store| {
         store
             .try_claim_event(&event_hash, &item.job.id, worker)
@@ -969,8 +1031,7 @@ async fn handle_foundry_maintenance_item(
             .await
             .map(|_| memory_core::FoundryJobStatus::Completed),
         memory_core::FoundryJobKind::ForgetSweep => {
-            process_forget_sweep_job(server, item)
-                .map(|_| memory_core::FoundryJobStatus::Completed)
+            process_forget_sweep_job(server, item).map(|_| memory_core::FoundryJobStatus::Completed)
         }
         _ => Ok(memory_core::FoundryJobStatus::Skipped),
     };
@@ -992,27 +1053,15 @@ pub(super) async fn run_foundry_maintenance_worker(
     mut rx: mpsc::UnboundedReceiver<FoundryMaintenanceItem>,
 ) {
     while let Some(item) = rx.recv().await {
-        server
-            .foundry_stats
-            .queued
-            .fetch_sub(1, Ordering::Relaxed);
-        server
-            .foundry_stats
-            .running
-            .fetch_add(1, Ordering::Relaxed);
+        server.foundry_stats.queued.fetch_sub(1, Ordering::Relaxed);
+        server.foundry_stats.running.fetch_add(1, Ordering::Relaxed);
 
         let result = handle_foundry_maintenance_item(&server, &item).await;
 
-        server
-            .foundry_stats
-            .running
-            .fetch_sub(1, Ordering::Relaxed);
+        server.foundry_stats.running.fetch_sub(1, Ordering::Relaxed);
         match result {
             Ok(memory_core::FoundryJobStatus::Skipped) => {
-                server
-                    .foundry_stats
-                    .skipped
-                    .fetch_add(1, Ordering::Relaxed);
+                server.foundry_stats.skipped.fetch_add(1, Ordering::Relaxed);
             }
             Ok(_) => {
                 server
@@ -1022,10 +1071,7 @@ pub(super) async fn run_foundry_maintenance_worker(
             }
             Err(err) => {
                 eprintln!("[foundry-worker] job {} failed: {err}", item.job.id);
-                server
-                    .foundry_stats
-                    .failed
-                    .fetch_add(1, Ordering::Relaxed);
+                server.foundry_stats.failed.fetch_add(1, Ordering::Relaxed);
             }
         }
     }
@@ -1235,14 +1281,12 @@ pub(super) async fn handle_recall_context(
 
     let candidate_multiplier = params.candidate_multiplier.max(1);
     let candidate_top_k = params.top_k.max(1).saturating_mul(candidate_multiplier);
-    let recall_scope = resolve_recall_scope(
-        params.path_prefix.as_deref(),
-        params.agent_id.as_deref(),
-    );
+    let recall_scope =
+        resolve_recall_scope(params.path_prefix.as_deref(), params.agent_id.as_deref());
     let mut parsed = Vec::<Value>::new();
     let mut seen_ids = HashSet::<String>::new();
     for search_prefix in &recall_scope.search_prefixes {
-        let raw_results = handle_search_memory(
+        let rows = search_memory_rows(
             server,
             SearchMemoryParams {
                 query: params.query.clone(),
@@ -1260,10 +1304,6 @@ pub(super) async fn handle_recall_context(
             },
         )
         .await?;
-
-        let rows: Vec<Value> = serde_json::from_str(&raw_results).map_err(|e| {
-            format!("Failed to parse search_memory results for recall_context: {e}")
-        })?;
         for row in rows {
             let id = value_id(&row);
             if !id.is_empty() && !seen_ids.insert(id) {
@@ -1671,5 +1711,94 @@ mod tests {
         assert!(merged.entities.contains(&"OpenClaw".to_string()));
         assert!(merged.vector.is_none());
         assert_eq!(merged.revision, 3);
+    }
+
+    #[test]
+    fn memory_claim_signature_changes_when_vector_state_changes() {
+        let mut entry = MemoryEntry {
+            id: "m1".to_string(),
+            path: "/openclaw/agent-main/topic".to_string(),
+            summary: "summary".to_string(),
+            text: "text".to_string(),
+            importance: 0.5,
+            timestamp: "2026-04-02T00:00:00Z".to_string(),
+            category: "fact".to_string(),
+            topic: "topic".to_string(),
+            keywords: vec![],
+            persons: vec![],
+            entities: vec![],
+            location: "".to_string(),
+            source: "capture_session".to_string(),
+            scope: "project".to_string(),
+            archived: false,
+            access_count: 0,
+            last_access: None,
+            revision: 1,
+            metadata: json!({}),
+            vector: None,
+        };
+        let before = memory_claim_signature(&entry);
+        entry.vector = Some(vec![0.1, 0.2]);
+        let after = memory_claim_signature(&entry);
+        assert_ne!(before, after);
+    }
+
+    #[test]
+    fn forget_sweep_keeps_newest_distill_entries() {
+        let mut entries = vec![
+            MemoryEntry {
+                id: "old".to_string(),
+                path: "/foundry/agents/main/distilled/20260402T000000".to_string(),
+                summary: "old".to_string(),
+                text: "old".to_string(),
+                importance: 0.7,
+                timestamp: "2026-04-02T00:00:00Z".to_string(),
+                category: "other".to_string(),
+                topic: "foundry_distill".to_string(),
+                keywords: vec![],
+                persons: vec![],
+                entities: vec![],
+                location: "".to_string(),
+                source: FOUNDRY_DISTILL_SOURCE.to_string(),
+                scope: "project".to_string(),
+                archived: false,
+                access_count: 0,
+                last_access: None,
+                revision: 1,
+                metadata: json!({}),
+                vector: None,
+            },
+            MemoryEntry {
+                id: "new".to_string(),
+                path: "/foundry/agents/main/distilled/20260402T010000".to_string(),
+                summary: "new".to_string(),
+                text: "new".to_string(),
+                importance: 0.7,
+                timestamp: "2026-04-02T01:00:00Z".to_string(),
+                category: "other".to_string(),
+                topic: "foundry_distill".to_string(),
+                keywords: vec![],
+                persons: vec![],
+                entities: vec![],
+                location: "".to_string(),
+                source: FOUNDRY_DISTILL_SOURCE.to_string(),
+                scope: "project".to_string(),
+                archived: false,
+                access_count: 0,
+                last_access: None,
+                revision: 1,
+                metadata: json!({}),
+                vector: None,
+            },
+        ];
+        entries.sort_by(|a, b| {
+            b.timestamp
+                .cmp(&a.timestamp)
+                .then_with(|| b.path.cmp(&a.path))
+                .then_with(|| b.id.cmp(&a.id))
+        });
+
+        assert_eq!(entries[0].id, "new");
+        assert_eq!(entries[1].id, "old");
     }
 }

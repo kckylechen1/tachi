@@ -166,7 +166,8 @@ pub(super) async fn handle_save_memory(
                             let _ = if let Some(ref p) = auto_link_named_project {
                                 auto_link_server.with_named_project_store(p, save_edge_action)
                             } else {
-                                auto_link_server.with_store_for_scope(auto_link_target_db, save_edge_action)
+                                auto_link_server
+                                    .with_store_for_scope(auto_link_target_db, save_edge_action)
                             };
                         }
                     }
@@ -180,13 +181,12 @@ pub(super) async fn handle_save_memory(
         .map_err(|e| format!("Failed to serialize response: {}", e))
 }
 
-pub(super) async fn handle_search_memory(
+pub(super) async fn search_memory_rows(
     server: &MemoryServer,
     mut params: SearchMemoryParams,
-) -> Result<String, String> {
+) -> Result<Vec<serde_json::Value>, String> {
     if memory_core::should_skip_query(&params.query) {
-        return serde_json::to_string(&json!([]))
-            .map_err(|e| format!("Failed to serialize: {}", e));
+        return Ok(vec![]);
     }
 
     if params.query_vec.is_none() && (server.global_vec_available || server.project_vec_available) {
@@ -330,7 +330,15 @@ pub(super) async fn handle_search_memory(
         }
     }
 
-    serde_json::to_string(&output).map_err(|e| format!("Failed to serialize response: {}", e))
+    Ok(output)
+}
+
+pub(super) async fn handle_search_memory(
+    server: &MemoryServer,
+    params: SearchMemoryParams,
+) -> Result<String, String> {
+    let rows = search_memory_rows(server, params).await?;
+    serde_json::to_string(&rows).map_err(|e| format!("Failed to serialize response: {}", e))
 }
 
 pub(super) async fn handle_find_similar_memory(

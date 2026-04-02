@@ -168,8 +168,8 @@ fn load_review_state(
     server.with_global_store(|store| {
         match store.get_state_kv(FOUNDRY_PROPOSAL_REVIEW_NAMESPACE, proposal_id) {
             Ok(Some((value, _version))) => {
-                let parsed = serde_json::from_str(&value)
-                    .unwrap_or_else(|_| json!({ "raw": value }));
+                let parsed =
+                    serde_json::from_str(&value).unwrap_or_else(|_| json!({ "raw": value }));
                 Ok(Some(parsed))
             }
             Ok(None) => Ok(None),
@@ -247,7 +247,15 @@ async fn run_agent_evolution_synthesis(
     server: &MemoryServer,
     params: &SynthesizeAgentEvolutionParams,
     job: &memory_core::FoundryJobSpec,
-) -> Result<(memory_core::AgentEvolutionSynthesis, String, String, DbScope), String> {
+) -> Result<
+    (
+        memory_core::AgentEvolutionSynthesis,
+        String,
+        String,
+        DbScope,
+    ),
+    String,
+> {
     let documents = build_documents(params)?;
     let evidence = build_evidence(params)?;
     let payload = build_synthesis_payload(params, &documents, &evidence);
@@ -276,7 +284,9 @@ fn parse_derived_metadata(row: &serde_json::Value) -> serde_json::Value {
         .unwrap_or_else(|| json!({}))
 }
 
-fn parse_derived_synthesis(row: &serde_json::Value) -> Option<memory_core::AgentEvolutionSynthesis> {
+fn parse_derived_synthesis(
+    row: &serde_json::Value,
+) -> Option<memory_core::AgentEvolutionSynthesis> {
     row.get("text")
         .and_then(|value| value.as_str())
         .and_then(|raw| serde_json::from_str(raw).ok())
@@ -320,16 +330,17 @@ fn load_agent_proposal_rows(
     })
 }
 
-fn markdown_heading_title(line: &str) -> Option<String> {
+fn markdown_heading_info(line: &str) -> Option<(usize, String)> {
     let trimmed = line.trim();
     if !trimmed.starts_with('#') {
         return None;
     }
-    let title = trimmed.trim_start_matches('#').trim();
-    if title.is_empty() {
+    let level = trimmed.chars().take_while(|&ch| ch == '#').count();
+    let title = trimmed[level..].trim();
+    if level == 0 || title.is_empty() {
         None
     } else {
-        Some(title.to_string())
+        Some((level, title.to_string()))
     }
 }
 
@@ -352,9 +363,17 @@ fn apply_markdown_section_update(
 
     let lines = content.lines().collect::<Vec<_>>();
     let mut heading_index = None;
+    let mut heading_level = None;
     for (idx, line) in lines.iter().enumerate() {
-        if markdown_heading_title(line)
-            .map(|title| title == section)
+        if markdown_heading_info(line)
+            .map(|(level, title)| {
+                if title == section {
+                    heading_level = Some(level);
+                    true
+                } else {
+                    false
+                }
+            })
             .unwrap_or(false)
         {
             heading_index = Some(idx);
@@ -363,11 +382,14 @@ fn apply_markdown_section_update(
     }
 
     if let Some(start_idx) = heading_index {
+        let start_level = heading_level.unwrap_or(2);
         let mut end_idx = lines.len();
         for idx in (start_idx + 1)..lines.len() {
-            if markdown_heading_title(lines[idx]).is_some() {
-                end_idx = idx;
-                break;
+            if let Some((level, _)) = markdown_heading_info(lines[idx]) {
+                if level <= start_level {
+                    end_idx = idx;
+                    break;
+                }
             }
         }
 
@@ -431,9 +453,111 @@ fn proposal_targets_document(
         .any(|alias| alias == target)
 }
 
-fn write_document_if_requested(path: &str, content: &str) -> Result<(), String> {
-    std::fs::write(path, content)
-        .map_err(|e| format!("Failed to write projected document {path}: {e}"))
+fn projection_allowed_roots() -> Vec<std::path::PathBuf> {
+    let mut roots = Vec::new();
+    if let Ok(cwd) = std::env::current_dir() {
+        roots.push(cwd);
+    }
+    if let Some(git_root) = find_git_root() {
+        roots.push(git_root);
+    }
+    if let Some(home) = dirs::home_dir() {
+        for suffix in [
+            ".openclaw",
+            ".claude",
+            ".codex",
+            ".cursor",
+            ".opencode",
+            ".agents",
+        ] {
+            let root = home.join(suffix);
+            if root.exists() {
+                roots.push(root);
+            }
+        }
+    }
+
+    let mut canonical = roots
+        .into_iter()
+        .filter_map(|root| std::fs::canonicalize(root).ok())
+        .collect::<Vec<_>>();
+    canonical.sort();
+    canonical.dedup();
+    canonical
+}
+
+fn resolve_projection_write_path(path: &str) -> Result<std::path::PathBuf, String> {
+    let trimmed = path.trim();
+    if trimmed.is_empty() {
+        return Err("Projected document path cannot be empty".to_string());
+    }
+
+    let raw = std::path::Path::new(trimmed);
+    let candidates = if raw.is_absolute() {
+        vec![raw.to_path_buf()]
+    } else {
+        let cwd = std::env::current_dir()
+            .map_err(|e| format!("Failed to resolve current directory: {e}"))?;
+        let mut candidates = vec![cwd.join(raw)];
+        if let Some(git_root) = find_git_root() {
+            let repo_candidate = git_root.join(raw);
+            if !candidates
+                .iter()
+                .any(|candidate| candidate == &repo_candidate)
+            {
+                candidates.push(repo_candidate);
+            }
+        }
+        candidates
+    };
+    let file_name = raw.file_name().ok_or_else(|| {
+        format!(
+            "Projected document path '{}' must include a file name",
+            trimmed
+        )
+    })?;
+    let allowed_roots = projection_allowed_roots();
+    let mut last_parent_error = None;
+
+    for candidate in candidates {
+        let parent = match candidate.parent() {
+            Some(parent) => parent,
+            None => continue,
+        };
+        let canonical_parent = match std::fs::canonicalize(parent) {
+            Ok(path) => path,
+            Err(err) => {
+                last_parent_error = Some(format!(
+                    "Failed to resolve parent directory for projected document '{}': {err}",
+                    trimmed
+                ));
+                continue;
+            }
+        };
+        let resolved = canonical_parent.join(file_name);
+        if allowed_roots.iter().any(|root| resolved.starts_with(root)) {
+            return Ok(resolved);
+        }
+    }
+
+    if let Some(err) = last_parent_error {
+        Err(err)
+    } else {
+        Err(format!(
+            "Projected document path '{}' is outside allowed roots",
+            trimmed
+        ))
+    }
+}
+
+async fn write_document_if_requested(path: &str, content: &str) -> Result<(), String> {
+    let resolved = resolve_projection_write_path(path)?;
+    tokio::fs::write(&resolved, content).await.map_err(|e| {
+        format!(
+            "Failed to write projected document {}: {e}",
+            resolved.display()
+        )
+    })
 }
 
 fn mark_proposal_applied(server: &MemoryServer, proposal_id: &str) -> Result<(), String> {
@@ -620,7 +744,11 @@ pub(super) async fn handle_review_agent_evolution_proposal(
         .map_err(|e| format!("Failed to serialize proposal review: {e}"))?;
     server.with_global_store(|store| {
         store
-            .set_state(FOUNDRY_PROPOSAL_REVIEW_NAMESPACE, &params.proposal_id, &value_json)
+            .set_state(
+                FOUNDRY_PROPOSAL_REVIEW_NAMESPACE,
+                &params.proposal_id,
+                &value_json,
+            )
             .map_err(|e| format!("Failed to persist proposal review: {e}"))?;
         Ok(())
     })?;
@@ -724,7 +852,7 @@ pub(super) async fn handle_project_agent_profile(
             let path = doc.path.as_deref().ok_or_else(|| {
                 "project_agent_profile write=true requires document paths".to_string()
             })?;
-            write_document_if_requested(path, &content)?;
+            write_document_if_requested(path, &content).await?;
             true
         } else {
             false
@@ -809,5 +937,30 @@ mod tests {
             apply_markdown_section_update("# Identity\n", Some("Memory Policy"), "write less");
         assert!(updated.contains("## Memory Policy"));
         assert!(updated.contains("write less"));
+    }
+
+    #[test]
+    fn apply_markdown_section_update_replaces_nested_subsections_with_parent() {
+        let original = "# Identity\n\n## Routing\n\nold value\n\n### Detail\n\nkeep with section\n\n## Other\n\nstay\n";
+        let updated = apply_markdown_section_update(original, Some("Routing"), "new value");
+        assert!(updated.contains("## Routing\n\nnew value"));
+        assert!(updated.contains("## Other\n\nstay"));
+        assert!(!updated.contains("### Detail"));
+        assert!(!updated.contains("old value"));
+    }
+
+    #[test]
+    fn resolve_projection_write_path_accepts_repo_relative_file() {
+        let resolved =
+            resolve_projection_write_path("docs/neural-foundry-v1.md").expect("repo path allowed");
+        assert!(resolved.ends_with("docs/neural-foundry-v1.md"));
+    }
+
+    #[test]
+    fn resolve_projection_write_path_rejects_outside_allowed_roots() {
+        let outside = std::env::temp_dir().join("foundry-projection-outside.md");
+        let err = resolve_projection_write_path(outside.to_string_lossy().as_ref())
+            .expect_err("outside path should be rejected");
+        assert!(err.contains("outside allowed roots"));
     }
 }

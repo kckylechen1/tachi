@@ -35,8 +35,8 @@ mod vault_ops;
 
 use crate::dlq_ops::{handle_dlq_list, handle_dlq_retry};
 use crate::foundry_ops::{
-    handle_list_agent_evolution_proposals, handle_queue_agent_evolution,
-    handle_project_agent_profile, handle_review_agent_evolution_proposal,
+    handle_list_agent_evolution_proposals, handle_project_agent_profile,
+    handle_queue_agent_evolution, handle_review_agent_evolution_proposal,
     handle_synthesize_agent_evolution,
 };
 use crate::foundry_runtime_ops::{
@@ -76,7 +76,7 @@ use crate::memory_ops::{
     handle_memory_gc, handle_memory_stats,
 };
 use crate::memory_search_ops::{
-    handle_find_similar_memory, handle_save_memory, handle_search_memory,
+    handle_find_similar_memory, handle_save_memory, handle_search_memory, search_memory_rows,
 };
 use crate::pack_ops::{
     handle_pack_get, handle_pack_list, handle_pack_project, handle_pack_register,
