@@ -38,19 +38,99 @@ fn build_foundry_job(
         target_agent_id: Some(params.agent_id.clone()),
         requested_by,
         created_at: Utc::now().to_rfc3339(),
-        evidence_count: params.evidence.len(),
+        evidence_count: params.evidence.len() + params.evidence_paths.len() + params.memory_queries.len(),
         goal_count: params.goals.len(),
         metadata: json!({
             "display_name": params.display_name,
-            "document_count": params.documents.len(),
+            "document_count": params.documents.len() + params.document_paths.len(),
+            "memory_query_count": params.memory_queries.len(),
         }),
     }
+}
+
+fn has_evolution_inputs(params: &SynthesizeAgentEvolutionParams) -> bool {
+    !params.documents.is_empty()
+        || !params.document_paths.is_empty()
+        || !params.evidence.is_empty()
+        || !params.evidence_paths.is_empty()
+        || !params.memory_queries.is_empty()
+}
+
+fn resolve_foundry_input_path(path: &str) -> Result<std::path::PathBuf, String> {
+    let trimmed = path.trim();
+    if trimmed.is_empty() {
+        return Err("Input path cannot be empty".to_string());
+    }
+
+    let raw = std::path::Path::new(trimmed);
+    let candidates = if raw.is_absolute() {
+        vec![raw.to_path_buf()]
+    } else {
+        let cwd = std::env::current_dir()
+            .map_err(|e| format!("Failed to resolve current directory: {e}"))?;
+        let mut candidates = vec![cwd.join(raw)];
+        if let Some(git_root) = find_git_root() {
+            let repo_candidate = git_root.join(raw);
+            if !candidates.iter().any(|candidate| candidate == &repo_candidate) {
+                candidates.push(repo_candidate);
+            }
+        }
+        candidates
+    };
+
+    let allowed_roots = projection_allowed_roots();
+    for candidate in candidates {
+        let canonical = match std::fs::canonicalize(&candidate) {
+            Ok(path) => path,
+            Err(_) => continue,
+        };
+        if !allowed_roots.iter().any(|root| canonical.starts_with(root)) {
+            continue;
+        }
+        let metadata = std::fs::symlink_metadata(&candidate).map_err(|e| {
+            format!(
+                "Failed to stat evolution input path '{}': {e}",
+                candidate.display()
+            )
+        })?;
+        if metadata.file_type().is_symlink()
+            && !allowed_roots.iter().any(|root| canonical.starts_with(root))
+        {
+            return Err(format!(
+                "Evolution input path '{}' resolves outside allowed roots",
+                candidate.display()
+            ));
+        }
+        if !canonical.is_file() {
+            return Err(format!(
+                "Evolution input path '{}' is not a file",
+                canonical.display()
+            ));
+        }
+        return Ok(canonical);
+    }
+
+    Err(format!(
+        "Evolution input path '{}' does not exist inside allowed roots",
+        trimmed
+    ))
+}
+
+fn read_foundry_input_text(path: &str) -> Result<(String, String), String> {
+    let resolved = resolve_foundry_input_path(path)?;
+    let content = std::fs::read_to_string(&resolved).map_err(|e| {
+        format!(
+            "Failed to read evolution input file '{}': {e}",
+            resolved.display()
+        )
+    })?;
+    Ok((resolved.display().to_string(), content))
 }
 
 fn build_documents(
     params: &SynthesizeAgentEvolutionParams,
 ) -> Result<Vec<memory_core::AgentProfileDocument>, String> {
-    params
+    let mut documents = params
         .documents
         .iter()
         .map(|doc| {
@@ -60,13 +140,26 @@ fn build_documents(
                 content: doc.content.clone(),
             })
         })
-        .collect()
+        .collect::<Result<Vec<_>, String>>()?;
+
+    for doc in &params.document_paths {
+        let kind = parse_document_kind(&doc.kind)?;
+        let (resolved_path, content) = read_foundry_input_text(&doc.path)?;
+        documents.push(memory_core::AgentProfileDocument {
+            kind,
+            path: Some(resolved_path),
+            content,
+        });
+    }
+
+    Ok(documents)
 }
 
-fn build_evidence(
+async fn build_evidence(
+    server: &MemoryServer,
     params: &SynthesizeAgentEvolutionParams,
 ) -> Result<Vec<memory_core::FoundryEvidence>, String> {
-    params
+    let mut evidence = params
         .evidence
         .iter()
         .map(|item| {
@@ -79,7 +172,88 @@ fn build_evidence(
                 weight: item.weight.max(0.0),
             })
         })
-        .collect()
+        .collect::<Result<Vec<_>, String>>()?;
+
+    for item in &params.evidence_paths {
+        let kind = parse_evidence_kind(&item.kind)?;
+        let (resolved_path, content) = read_foundry_input_text(&item.path)?;
+        let fallback_title = std::path::Path::new(&resolved_path)
+            .file_name()
+            .and_then(|name| name.to_str())
+            .map(ToOwned::to_owned);
+        evidence.push(memory_core::FoundryEvidence {
+            kind,
+            title: item.title.clone().or(fallback_title),
+            content,
+            source_ref: item.source_ref.clone().or_else(|| Some(resolved_path.clone())),
+            path: Some(resolved_path),
+            weight: item.weight.max(0.0),
+        });
+    }
+
+    for query in &params.memory_queries {
+        let rows = search_memory_rows(
+            server,
+            SearchMemoryParams {
+                query: query.query.clone(),
+                query_vec: None,
+                top_k: query.top_k.max(1),
+                path_prefix: query.path_prefix.clone(),
+                include_archived: false,
+                candidates_per_channel: query.top_k.max(1).max(20),
+                mmr_threshold: None,
+                graph_expand_hops: 1,
+                graph_relation_filter: None,
+                weights: None,
+                agent_role: None,
+                project: query.project.clone(),
+            },
+        )
+        .await?;
+        if rows.is_empty() {
+            continue;
+        }
+        let mut lines = vec![format!("Memory query: {}", query.query.trim())];
+        for (idx, row) in rows.iter().enumerate() {
+            let id = row.get("id").and_then(|value| value.as_str()).unwrap_or("");
+            let topic = row.get("topic").and_then(|value| value.as_str()).unwrap_or("");
+            let summary = row
+                .get("summary")
+                .and_then(|value| value.as_str())
+                .unwrap_or("");
+            let text = row.get("text").and_then(|value| value.as_str()).unwrap_or("");
+            let path = row.get("path").and_then(|value| value.as_str()).unwrap_or("");
+            let relevance = row
+                .get("relevance")
+                .and_then(|value| value.as_f64())
+                .unwrap_or(0.0);
+            lines.push(format!(
+                "{}. [{}] {} (id={}, score={:.3}, path={})",
+                idx + 1,
+                if topic.is_empty() { "memory" } else { topic },
+                if summary.is_empty() { text } else { summary },
+                id,
+                relevance,
+                path
+            ));
+            if !summary.is_empty() && summary != text {
+                lines.push(format!("   Detail: {}", text));
+            }
+        }
+        evidence.push(memory_core::FoundryEvidence {
+            kind: memory_core::FoundryEvidenceKind::Memory,
+            title: query
+                .title
+                .clone()
+                .or_else(|| Some(format!("memory query: {}", query.query.trim()))),
+            content: lines.join("\n"),
+            source_ref: Some(format!("memory_query:{}", query.query.trim())),
+            path: query.path_prefix.clone(),
+            weight: query.weight.max(0.0),
+        });
+    }
+
+    Ok(evidence)
 }
 
 fn build_synthesis_payload(
@@ -213,8 +387,10 @@ fn persist_agent_evolution_proposal(
             "agent_id": params.agent_id,
             "display_name": params.display_name,
             "goals": params.goals,
-            "document_count": params.documents.len(),
-            "evidence_count": params.evidence.len(),
+            "document_count": params.documents.len() + params.document_paths.len(),
+            "evidence_count": params.evidence.len()
+                + params.evidence_paths.len()
+                + params.memory_queries.len(),
             "proposal_count": synthesis.proposals.len(),
             "status": "proposed",
         }),
@@ -257,7 +433,7 @@ async fn run_agent_evolution_synthesis(
     String,
 > {
     let documents = build_documents(params)?;
-    let evidence = build_evidence(params)?;
+    let evidence = build_evidence(server, params).await?;
     let payload = build_synthesis_payload(params, &documents, &evidence);
     let user = serde_json::to_string_pretty(&payload)
         .map_err(|e| format!("Failed to serialize synthesis request: {e}"))?;
@@ -604,7 +780,7 @@ pub(super) async fn handle_synthesize_agent_evolution(
     server: &MemoryServer,
     params: SynthesizeAgentEvolutionParams,
 ) -> Result<String, String> {
-    if params.documents.is_empty() && params.evidence.is_empty() {
+    if !has_evolution_inputs(&params) {
         return Err(
             "synthesize_agent_evolution requires at least one document or evidence item"
                 .to_string(),
@@ -612,7 +788,7 @@ pub(super) async fn handle_synthesize_agent_evolution(
     }
 
     let documents = build_documents(&params)?;
-    let evidence = build_evidence(&params)?;
+    let evidence = build_evidence(server, &params).await?;
     let job = build_foundry_job(server, &params);
     let payload = build_synthesis_payload(&params, &documents, &evidence);
 
@@ -643,7 +819,7 @@ pub(super) async fn handle_queue_agent_evolution(
     server: &MemoryServer,
     params: SynthesizeAgentEvolutionParams,
 ) -> Result<String, String> {
-    if params.documents.is_empty() && params.evidence.is_empty() {
+    if !has_evolution_inputs(&params) {
         return Err(
             "queue_agent_evolution requires at least one document or evidence item".to_string(),
         );
@@ -971,8 +1147,14 @@ mod tests {
 
     #[test]
     fn resolve_projection_write_path_accepts_repo_relative_file() {
-        let resolved =
-            resolve_projection_write_path("docs/neural-foundry-v1.md").expect("repo path allowed");
+        let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(|path| path.parent())
+            .expect("repo root")
+            .to_path_buf();
+        let target = repo_root.join("docs/neural-foundry-v1.md");
+        let resolved = resolve_projection_write_path(target.to_string_lossy().as_ref())
+            .expect("repo path allowed");
         assert!(resolved.ends_with("docs/neural-foundry-v1.md"));
     }
 

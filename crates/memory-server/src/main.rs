@@ -36,7 +36,8 @@ mod vault_crypto;
 mod vault_ops;
 
 use crate::capability_ops::{
-    handle_recommend_capability, handle_recommend_skill, handle_recommend_toolchain,
+    handle_prepare_capability_bundle, handle_recommend_capability, handle_recommend_skill,
+    handle_recommend_toolchain,
 };
 use crate::dlq_ops::{handle_dlq_list, handle_dlq_retry};
 use crate::foundry_ops::{
@@ -46,7 +47,8 @@ use crate::foundry_ops::{
 };
 use crate::foundry_runtime_ops::{
     enqueue_foundry_capture_maintenance, handle_capture_session, handle_compact_context,
-    handle_recall_context, run_foundry_maintenance_worker, FoundryMaintenanceItem,
+    handle_compact_rollup, handle_compact_session_memory, handle_recall_context,
+    handle_section_build, run_foundry_maintenance_worker, FoundryMaintenanceItem,
     FoundryWorkerStats,
 };
 use crate::ghost_ops::{
@@ -54,7 +56,7 @@ use crate::ghost_ops::{
     handle_ghost_subscribe, handle_ghost_topics,
 };
 use crate::graph_state_ops::{
-    handle_add_edge, handle_get_edges, handle_get_state, handle_set_state,
+    handle_add_edge, handle_get_edges, handle_get_state, handle_memory_graph, handle_set_state,
 };
 use crate::hub_helpers::{
     build_skill_tool_from_cap, capability_callable, capability_visibility_for_cap,
@@ -326,13 +328,16 @@ const RATE_LIMIT_BURST_WINDOW: Duration = Duration::from_secs(60);
 
 /// Tools whose results can be cached (read-only, no side effects)
 const CACHEABLE_TOOLS: &[&str] = &[
+    "section_build",
     "recommend_capability",
     "recommend_skill",
     "recommend_toolchain",
+    "prepare_capability_bundle",
     "search_memory",
     "cyberbrain_search",
     "find_similar_memory",
     "get_memory",
+    "memory_graph",
     "list_memories",
     "memory_stats",
     "get_state",
@@ -359,6 +364,8 @@ const CACHE_INVALIDATING_TOOLS: &[&str] = &[
     "hub_export_skills",
     "skill_evolve",
     "capture_session",
+    "compact_rollup",
+    "compact_session_memory",
     "synthesize_agent_evolution",
     "queue_agent_evolution",
     "review_agent_evolution_proposal",
@@ -1069,6 +1076,16 @@ impl MemoryServer {
         handle_get_edges(self, params).await
     }
 
+    #[tool(
+        description = "Inspect a read-only neighborhood from the memory graph, seeded by memory id or a search query. Returns seed nodes, neighboring nodes, and connecting edges."
+    )]
+    async fn memory_graph(
+        &self,
+        Parameters(params): Parameters<MemoryGraphParams>,
+    ) -> Result<String, String> {
+        handle_memory_graph(self, params).await
+    }
+
     #[tool(description = "Set a key-value pair in server state (stored in hard_state table).")]
     async fn set_state(
         &self,
@@ -1230,6 +1247,16 @@ impl MemoryServer {
     }
 
     #[tool(
+        description = "Prepare a host-aware capability bundle for a task query. Returns the primary skill, supporting capabilities, relevant packs, suggested host-native tools, and a ready-to-inject bundle section."
+    )]
+    async fn prepare_capability_bundle(
+        &self,
+        Parameters(params): Parameters<PrepareCapabilityBundleParams>,
+    ) -> Result<String, String> {
+        handle_prepare_capability_bundle(self, params).await
+    }
+
+    #[tool(
         description = "Recall structured memory context for an active agent turn. Returns ranked results plus a ready-to-inject prepend_context block."
     )]
     async fn recall_context(
@@ -1257,6 +1284,36 @@ impl MemoryServer {
         Parameters(params): Parameters<CompactContextParams>,
     ) -> Result<String, String> {
         handle_compact_context(self, params).await
+    }
+
+    #[tool(
+        description = "Render a structured context section with explicit layer and cache-boundary markers. Useful for host runtimes assembling static/session/live prompt sections."
+    )]
+    async fn section_build(
+        &self,
+        Parameters(params): Parameters<SectionBuildParams>,
+    ) -> Result<String, String> {
+        handle_section_build(self, params).await
+    }
+
+    #[tool(
+        description = "Roll up multiple compacted session artifacts into a new compact summary block, preserving salient topics and durable signals for later reinjection."
+    )]
+    async fn compact_rollup(
+        &self,
+        Parameters(params): Parameters<CompactRollupParams>,
+    ) -> Result<String, String> {
+        handle_compact_rollup(self, params).await
+    }
+
+    #[tool(
+        description = "Persist a compacted session artifact and its durable signals into Tachi memory, then optionally queue Foundry maintenance jobs."
+    )]
+    async fn compact_session_memory(
+        &self,
+        Parameters(params): Parameters<CompactSessionMemoryParams>,
+    ) -> Result<String, String> {
+        handle_compact_session_memory(self, params).await
     }
 
     #[tool(

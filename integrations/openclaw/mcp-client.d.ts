@@ -50,6 +50,13 @@ type CompactContextParams = {
     max_output_tokens?: number;
     persist?: boolean;
 };
+type MemoryGraphParams = {
+    memory_id?: string;
+    query?: string;
+    path_prefix?: string;
+    top_k?: number;
+    depth?: number;
+};
 export declare class MemoryMcpClient {
     private readonly dbPath;
     private readonly logger?;
@@ -69,6 +76,7 @@ export declare class MemoryMcpClient {
     private callJson;
     saveMemory(entry: MemoryEntry): Promise<void>;
     getMemory(id: string): Promise<MemoryEntry | undefined>;
+    memoryGraph(params: MemoryGraphParams): Promise<unknown>;
     listMemories(limit: number): Promise<MemoryEntry[]>;
     searchMemory(query: string, queryVec?: number[], opts?: SearchOptions): Promise<SearchPayload>;
     recallContext(query: string, opts?: RecallContextOptions): Promise<{

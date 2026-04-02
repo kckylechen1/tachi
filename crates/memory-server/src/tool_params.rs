@@ -424,6 +424,10 @@ fn default_recommend_limit() -> usize {
     5
 }
 
+fn default_memory_graph_depth() -> usize {
+    1
+}
+
 fn default_compact_trigger() -> String {
     "token_pressure".to_string()
 }
@@ -434,6 +438,18 @@ fn default_compact_target_tokens() -> usize {
 
 fn default_compact_max_output_tokens() -> usize {
     700
+}
+
+fn default_section_layer() -> String {
+    "session".to_string()
+}
+
+fn default_section_kind() -> String {
+    "context".to_string()
+}
+
+fn default_section_cache_boundary() -> String {
+    "session".to_string()
 }
 
 #[allow(dead_code)]
@@ -557,6 +573,161 @@ pub(super) struct CompactContextParams {
 
 #[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub(super) struct SectionBuildParams {
+    /// Logical section layer: static | session | live | other
+    #[serde(default = "default_section_layer")]
+    pub layer: String,
+
+    /// Section kind: memory_recall | compact_rollup | capability_bundle | profile | other
+    #[serde(default = "default_section_kind")]
+    pub kind: String,
+
+    /// Optional human-readable section title
+    #[serde(default)]
+    pub title: Option<String>,
+
+    /// Optional primary body content
+    #[serde(default)]
+    pub content: Option<String>,
+
+    /// Optional bullet items to append below the body
+    #[serde(default)]
+    pub items: Vec<String>,
+
+    /// Optional cache boundary marker for host runtimes
+    #[serde(default = "default_section_cache_boundary")]
+    pub cache_boundary: String,
+
+    /// Optional source refs or ids associated with the section
+    #[serde(default)]
+    pub source_refs: Vec<String>,
+
+    /// Optional maximum token budget for the rendered block
+    #[serde(default)]
+    pub target_tokens: Option<usize>,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub(super) struct CompactArtifactItemParams {
+    /// Stable id for the compacted artifact, if already assigned
+    #[serde(default)]
+    pub item_id: Option<String>,
+
+    /// Optional window id or source ref
+    #[serde(default)]
+    pub window_id: Option<String>,
+
+    /// Compact text block content
+    pub compacted_text: String,
+
+    /// Salient topics already attached to the artifact
+    #[serde(default)]
+    pub salient_topics: Vec<String>,
+
+    /// Durable signals already extracted from the artifact
+    #[serde(default)]
+    pub durable_signals: Vec<String>,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub(super) struct CompactRollupParams {
+    /// Canonical agent id for provenance
+    pub agent_id: String,
+
+    /// Conversation identifier
+    pub conversation_id: String,
+
+    /// Rollup id / idempotency key
+    pub rollup_id: String,
+
+    /// Existing compact artifacts that should be rolled up
+    #[serde(default)]
+    pub items: Vec<CompactArtifactItemParams>,
+
+    /// Optional prior rollup summary to fold in
+    #[serde(default)]
+    pub current_summary: Option<String>,
+
+    /// Optional named project DB
+    #[serde(default)]
+    pub project: Option<String>,
+
+    /// Optional path prefix for future persistence / provenance
+    #[serde(default)]
+    pub path_prefix: Option<String>,
+
+    /// Target token budget for the rolled-up block
+    #[serde(default = "default_compact_target_tokens")]
+    pub target_tokens: usize,
+
+    /// Max output tokens for the model call
+    #[serde(default = "default_compact_max_output_tokens")]
+    pub max_output_tokens: usize,
+
+    /// If true, include a rendered section artifact in the response
+    #[serde(default = "default_true")]
+    pub build_section: bool,
+}
+
+#[allow(dead_code)]
+fn default_compact_session_scope() -> String {
+    "project".to_string()
+}
+
+#[allow(dead_code)]
+fn default_compact_session_importance() -> f64 {
+    0.6
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub(super) struct CompactSessionMemoryParams {
+    /// Canonical agent id for pathing / provenance
+    pub agent_id: String,
+
+    /// Conversation identifier
+    pub conversation_id: String,
+
+    /// Window id or rollup id for idempotency
+    pub window_id: String,
+
+    /// Compact text block to preserve as a durable session artifact
+    #[serde(default)]
+    pub compacted_text: String,
+
+    /// Salient topics derived from compaction
+    #[serde(default)]
+    pub salient_topics: Vec<String>,
+
+    /// Durable signals derived from compaction
+    #[serde(default)]
+    pub durable_signals: Vec<String>,
+
+    /// Optional base path for persisted artifacts
+    #[serde(default)]
+    pub path_prefix: Option<String>,
+
+    /// Optional named project DB
+    #[serde(default)]
+    pub project: Option<String>,
+
+    /// Scope for persisted memories
+    #[serde(default = "default_compact_session_scope")]
+    pub scope: String,
+
+    /// Default importance for persisted compact artifacts
+    #[serde(default = "default_compact_session_importance")]
+    pub importance: f64,
+
+    /// If true, queue Foundry maintenance jobs after persistence
+    #[serde(default = "default_true")]
+    pub queue_maintenance: bool,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub(super) struct RecommendCapabilityParams {
     /// Natural language task or intent query
     pub query: String,
@@ -622,6 +793,61 @@ pub(super) struct RecommendToolchainParams {
     /// Max pack recommendations to include
     #[serde(default = "default_recommend_limit")]
     pub pack_limit: usize,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub(super) struct PrepareCapabilityBundleParams {
+    /// Natural language task or intent query
+    pub query: String,
+
+    /// Optional host/runtime name (e.g. openclaw, codex, trae)
+    #[serde(default)]
+    pub host: Option<String>,
+
+    /// Max skill recommendations to consider
+    #[serde(default = "default_recommend_limit")]
+    pub skill_limit: usize,
+
+    /// Max supporting capability recommendations to consider
+    #[serde(default = "default_recommend_limit")]
+    pub capability_limit: usize,
+
+    /// Max projected pack recommendations to consider
+    #[serde(default = "default_recommend_limit")]
+    pub pack_limit: usize,
+
+    /// If true, include a rendered section artifact in the response
+    #[serde(default = "default_true")]
+    pub include_section: bool,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub(super) struct MemoryGraphParams {
+    /// Optional seed memory id
+    #[serde(default)]
+    pub memory_id: Option<String>,
+
+    /// Optional natural language lookup query when memory_id is not known
+    #[serde(default)]
+    pub query: Option<String>,
+
+    /// Optional path prefix filter for query-based lookup
+    #[serde(default)]
+    pub path_prefix: Option<String>,
+
+    /// Optional named project DB
+    #[serde(default)]
+    pub project: Option<String>,
+
+    /// Number of seed memories to resolve from a query
+    #[serde(default = "default_recommend_limit")]
+    pub top_k: usize,
+
+    /// Graph hop depth to traverse from each seed
+    #[serde(default = "default_memory_graph_depth")]
+    pub depth: usize,
 }
 
 fn default_virtual_binding_priority() -> i32 {
@@ -1291,6 +1517,16 @@ pub(super) struct AgentEvolutionDocumentParams {
 
 #[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub(super) struct AgentEvolutionDocumentPathParams {
+    /// Document kind: identity | agents | latest_truths | routing_policy | tool_policy | memory_policy | other
+    pub kind: String,
+
+    /// Filesystem path to read
+    pub path: String,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub(super) struct AgentEvolutionEvidenceParams {
     /// Evidence kind: memory | reflection | tooluse | eval | ghost | session_outcome | skill_telemetry | profile_snapshot | proposal | other
     pub kind: String,
@@ -1317,6 +1553,60 @@ pub(super) struct AgentEvolutionEvidenceParams {
 
 #[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub(super) struct AgentEvolutionEvidencePathParams {
+    /// Evidence kind: memory | reflection | tooluse | eval | ghost | session_outcome | skill_telemetry | profile_snapshot | proposal | other
+    pub kind: String,
+
+    /// Filesystem path to read
+    pub path: String,
+
+    /// Optional short evidence title
+    #[serde(default)]
+    pub title: Option<String>,
+
+    /// Optional evidence identifier for traceability
+    #[serde(default)]
+    pub source_ref: Option<String>,
+
+    /// Relative evidence weight (default: 1.0)
+    #[serde(default = "default_foundry_evidence_weight")]
+    pub weight: f64,
+}
+
+#[allow(dead_code)]
+fn default_evolution_memory_query_limit() -> usize {
+    5
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub(super) struct AgentEvolutionMemoryQueryParams {
+    /// Search query used to pull supporting evidence from memory
+    pub query: String,
+
+    /// Optional short evidence title
+    #[serde(default)]
+    pub title: Option<String>,
+
+    /// Optional path prefix filter
+    #[serde(default)]
+    pub path_prefix: Option<String>,
+
+    /// Optional named project DB
+    #[serde(default)]
+    pub project: Option<String>,
+
+    /// Relative evidence weight (default: 1.0)
+    #[serde(default = "default_foundry_evidence_weight")]
+    pub weight: f64,
+
+    /// Max memories to bundle into one evidence record
+    #[serde(default = "default_evolution_memory_query_limit")]
+    pub top_k: usize,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub(super) struct SynthesizeAgentEvolutionParams {
     /// Canonical target agent id
     pub agent_id: String,
@@ -1329,9 +1619,21 @@ pub(super) struct SynthesizeAgentEvolutionParams {
     #[serde(default)]
     pub documents: Vec<AgentEvolutionDocumentParams>,
 
+    /// Document source paths that Tachi should load directly
+    #[serde(default)]
+    pub document_paths: Vec<AgentEvolutionDocumentPathParams>,
+
     /// Supporting evidence items
     #[serde(default)]
     pub evidence: Vec<AgentEvolutionEvidenceParams>,
+
+    /// Evidence source paths that Tachi should load directly
+    #[serde(default)]
+    pub evidence_paths: Vec<AgentEvolutionEvidencePathParams>,
+
+    /// Memory queries that should be materialized into evidence bundles
+    #[serde(default)]
+    pub memory_queries: Vec<AgentEvolutionMemoryQueryParams>,
 
     /// Optional operator goals or focus areas
     #[serde(default)]

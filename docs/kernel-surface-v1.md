@@ -32,10 +32,10 @@ Examples:
 - `memory_search`
 - `memory_save`
 - `memory_get`
-- read-only graph lookups
-- future `section.build`
-- future `compact.rollup`
-- future `compact.session_memory`
+- `memory_graph`
+- `section.build`
+- `compact.rollup`
+- `compact.session_memory`
 
 This layer owns the canonical memory graph and its maintenance lifecycle.
 
@@ -55,11 +55,12 @@ Candidate APIs:
 - `recommend_capability`
 - `recommend_skill`
 - `recommend_toolchain`
-- future `prepare_capability_bundle`
+- `prepare_capability_bundle`
 
 Status:
 
 - first-pass recommendation APIs are now implemented
+- `prepare_capability_bundle` now assembles a host-aware bundle with packs, skills, host tools, and a ready-to-inject section
 - current implementation is deterministic and Hub/Pack-aware
 - future iterations can add richer outcome learning and LLM-assisted planning on top
 

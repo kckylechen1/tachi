@@ -23,16 +23,21 @@ const IDE_TOOL_PATTERNS: &[&str] = &[
     "recommend_capability",
     "recommend_skill",
     "recommend_toolchain",
+    "prepare_capability_bundle",
     "search_memory",
     "save_memory",
     "get_memory",
+    "memory_graph",
     "list_memories",
     "memory_stats",
     "get_edges",
 ];
 
 const RUNTIME_EXTRA_TOOL_PATTERNS: &[&str] = &[
+    "section_build",
     "compact_context",
+    "compact_rollup",
+    "compact_session_memory",
     "recall_context",
     "capture_session",
     "archive_memory",

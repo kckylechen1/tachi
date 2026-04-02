@@ -112,13 +112,16 @@ Completed:
 - manual `synthesize_agent_evolution` tool
 - first-pass `Kernel Surface V1` docs
 - first-pass capability recommendation APIs: `recommend_capability`, `recommend_skill`, `recommend_toolchain`
+- `prepare_capability_bundle` for host-aware skill / tool / pack assembly
+- `memory_graph` as the read-only agent-facing graph lookup
 - `recall_context` online API in Tachi
 - `capture_session` online API in Tachi
 - `compact_context` online API in Tachi
+- `section.build`, `compact.rollup`, and `compact.session_memory`
 - Tachi-side rerank for recall results
 - Tachi-side extraction + embedding for captured session memories
 - first Foundry maintenance worker for `memory_rerank`, `memory_distill`, and `forget_sweep`
-- OpenClaw integration updated to prefer the new Tachi APIs
+- OpenClaw integration updated to prefer the new Tachi APIs and expose only `memory_search / memory_save / memory_get / memory_graph`
 
 This means OpenClaw now prefers:
 
@@ -241,6 +244,7 @@ Already done:
 - `recall_context` now enforces agent-scoped path policy server-side
 - default agent recall now pulls from both live agent memories and Foundry distill memories
 - OpenClaw repo source no longer ships local extractor / reranker runtime code paths
+- OpenClaw `agent_end` now forwards durable session capture internally instead of exposing a raw capture tool
 
 Still missing:
 
@@ -273,7 +277,7 @@ Already done:
 Still missing:
 
 - connect OpenClaw cron and other adapters to the queued evolution path
-- add richer evidence ingestion for eval / tooluse / reflection bundles
+- add richer evidence ingestion for eval / tooluse / reflection bundles beyond file-path and memory-query inputs
 - feed approved proposals into projection instead of stopping at review state
 - deepen the public capability layer beyond deterministic first-pass ranking
 

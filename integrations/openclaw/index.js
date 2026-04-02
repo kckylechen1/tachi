@@ -11,6 +11,32 @@ function textResult(text, details) {
         ...(details ? { details } : {}),
     };
 }
+function makeMemoryId() {
+    return `m_${Date.now()}_${Math.random().toString(16).slice(2, 10)}`;
+}
+function messageToText(message) {
+    if (!message) {
+        return "";
+    }
+    if (typeof message.content === "string") {
+        return message.content;
+    }
+    if (Array.isArray(message.content)) {
+        return message.content
+            .map((block) => {
+            if (typeof block === "string") {
+                return block;
+            }
+            if (block && typeof block.text === "string") {
+                return block.text;
+            }
+            return "";
+        })
+            .filter(Boolean)
+            .join("\n");
+    }
+    return "";
+}
 // ============================================================================
 // Plugin Definition
 // ============================================================================
@@ -130,19 +156,6 @@ export const memoryHybridBridgePlugin = {
             },
         });
         api.registerTool({
-            name: "memory_hybrid_search",
-            label: "Memory Hybrid Search",
-            description: "Search long-term structured memory using vector, lexical, and symbolic hybrid scoring.",
-            parameters: Type.Object({
-                query: Type.String({ description: "Natural language search query" }),
-                top_k: Type.Optional(Type.Number({ description: "Max results (default: 6)" })),
-            }),
-            async execute(_toolCallId, params) {
-                const { query, top_k } = params;
-                return formatSearchResults(await performSearch(query, top_k));
-            },
-        });
-        api.registerTool({
             name: "memory_get",
             label: "Memory Get",
             description: "Retrieve a specific memory entry by id; use after memory_search to get full details.",
@@ -186,101 +199,65 @@ export const memoryHybridBridgePlugin = {
                 });
             },
         });
-        // ── Tachi Passthrough Tools ──────────────────────────────────
         api.registerTool({
-            name: "tachi_ghost_publish",
-            label: "Ghost Whisper",
-            description: "Publish a message to a Ghost Whispers topic for inter-agent communication.",
-            parameters: Type.Object({
-                topic: Type.String({ description: "Topic name (e.g. 'build-status', 'alerts')" }),
-                payload: Type.String({ description: "Message content" }),
-            }),
-            async execute(_toolCallId, params, _signal, context) {
-                const { topic, payload } = params;
-                const agentId = context?.agentId || "main";
-                const result = await runWithClient("ghost_publish", async (client) => await client.callTool("ghost_publish", { topic, payload, publisher: agentId }));
-                return result.ok
-                    ? textResult(JSON.stringify(result.value))
-                    : textResult("Tachi MCP client unavailable.");
-            },
-        });
-        api.registerTool({
-            name: "tachi_kanban_post",
-            label: "Kanban Post",
-            description: "Post a kanban card to another agent or broadcast.",
-            parameters: Type.Object({
-                to_agent: Type.String({ description: "Destination agent ID, or '*' for broadcast" }),
-                title: Type.String({ description: "Card title" }),
-                body: Type.String({ description: "Card body content" }),
-                priority: Type.Optional(Type.String({ description: "Priority: low | medium | high | critical (default: medium)" })),
-            }),
-            async execute(_toolCallId, params, _signal, context) {
-                const { to_agent, title, body, priority } = params;
-                const agentId = context?.agentId || "main";
-                const result = await runWithClient("post_card", async (client) => await client.callTool("post_card", {
-                    from_agent: agentId,
-                    to_agent,
-                    title,
-                    body,
-                    priority: priority || "medium",
-                }));
-                return result.ok
-                    ? textResult(JSON.stringify(result.value))
-                    : textResult("Tachi MCP client unavailable.");
-            },
-        });
-        api.registerTool({
-            name: "tachi_save_memory",
-            label: "Save Memory (Tachi)",
-            description: "Save a memory entry directly to Tachi with full metadata.",
+            name: "memory_save",
+            label: "Memory Save",
+            description: "Save a durable memory into Tachi for future recall.",
             parameters: Type.Object({
                 text: Type.String({ description: "Memory text content" }),
-                path: Type.Optional(Type.String({ description: "Hierarchical path (e.g. /project/notes)" })),
+                summary: Type.Optional(Type.String({ description: "Optional short summary" })),
+                topic: Type.Optional(Type.String({ description: "Memory topic" })),
+                path: Type.Optional(Type.String({ description: "Hierarchical path (defaults to agent root)" })),
                 importance: Type.Optional(Type.Number({ description: "0.0-1.0 importance score" })),
                 keywords: Type.Optional(Type.Array(Type.String(), { description: "Keyword tags" })),
                 category: Type.Optional(Type.String({ description: "Category: fact | decision | preference | entity | other" })),
             }),
             async execute(_toolCallId, params, _signal, context) {
-                const { text, path: memoryPath, importance, keywords, category } = params;
+                const { text, summary, topic, path: memoryPath, importance, keywords, category } = params;
                 const agentId = context?.agentId || "main";
-                const result = await runWithClient("save_memory", async (client) => await client.callTool("save_memory", {
-                    text,
-                    path: memoryPath || `/openclaw/agent-${agentId}`,
-                    importance: importance ?? 0.7,
-                    keywords: keywords || [],
-                    category: category || "fact",
-                }));
+                const result = await runWithClient("save_memory", async (client) => {
+                    await client.saveMemory({
+                        id: makeMemoryId(),
+                        text,
+                        summary: summary ?? text.slice(0, 96),
+                        path: memoryPath || `/openclaw/agent-${agentId}`,
+                        importance: importance ?? 0.7,
+                        category: (category || "fact"),
+                        topic: topic || "manual_memory",
+                        keywords: keywords || [],
+                        persons: [],
+                        entities: [],
+                        location: "",
+                        timestamp: new Date().toISOString(),
+                        scope: "project",
+                        access_count: 0,
+                        last_access: null,
+                        metadata: { source_refs: [] },
+                    });
+                    return { ok: true };
+                });
                 return result.ok
                     ? textResult(JSON.stringify(result.value))
                     : textResult("Tachi MCP client unavailable.");
             },
         });
         api.registerTool({
-            name: "tachi_capture_session",
-            label: "Capture Session (Tachi)",
-            description: "Forward a conversation turn to Tachi for background extraction.",
+            name: "memory_graph",
+            label: "Memory Graph",
+            description: "Inspect a read-only neighborhood in Tachi's memory graph by memory id or query.",
             parameters: Type.Object({
-                conversation_id: Type.String({ description: "Stable conversation identifier" }),
-                turn_id: Type.String({ description: "Unique turn identifier" }),
-                messages: Type.Array(Type.Object({
-                    role: Type.String({ description: "Message role" }),
-                    content: Type.String({ description: "Message text content" }),
-                }), { description: "Conversation messages for this turn" }),
-                path_prefix: Type.Optional(Type.String({ description: "Optional memory path prefix" })),
-                scope: Type.Optional(Type.String({ description: "Optional memory scope" })),
-                force: Type.Optional(Type.Boolean({ description: "Force processing even if dedupe would skip" })),
+                memory_id: Type.Optional(Type.String({ description: "Seed memory id" })),
+                query: Type.Optional(Type.String({ description: "Natural language graph lookup query" })),
+                top_k: Type.Optional(Type.Number({ description: "Query seed count (default: 5)" })),
+                depth: Type.Optional(Type.Number({ description: "Traversal depth (default: 1)" })),
             }),
-            async execute(_toolCallId, params, _signal, context) {
-                const { conversation_id, turn_id, messages, path_prefix, scope, force } = params;
-                const agentId = context?.agentId || "main";
-                const result = await runWithClient("capture_session", async (client) => await client.captureSession({
-                    conversation_id,
-                    turn_id,
-                    agent_id: agentId,
-                    messages,
-                    path_prefix,
-                    scope,
-                    force,
+            async execute(_toolCallId, params) {
+                const { memory_id, query, top_k, depth } = params;
+                const result = await runWithClient("memory_graph", async (client) => await client.memoryGraph({
+                    memory_id,
+                    query,
+                    top_k,
+                    depth,
                 }));
                 return result.ok
                     ? textResult(JSON.stringify(result.value))
@@ -296,6 +273,36 @@ export const memoryHybridBridgePlugin = {
             const recall = await performRecall(query, agentId);
             if (recall?.prependContext.trim()) {
                 return { prependContext: recall.prependContext };
+            }
+        });
+        api.on("agent_end", async (event, context) => {
+            if (!event?.success || !Array.isArray(event?.messages) || event.messages.length === 0) {
+                return;
+            }
+            const recentMessages = event.messages
+                .slice(-8)
+                .map((message) => ({
+                role: typeof message?.role === "string" ? message.role : "unknown",
+                content: messageToText(message),
+            }))
+                .filter((message) => message.content.trim().length > 0);
+            const combinedChars = recentMessages.reduce((total, message) => total + message.content.length, 0);
+            if (recentMessages.length === 0 || combinedChars < config.captureMinChars) {
+                return;
+            }
+            const agentId = context?.agentId || "main";
+            const conversationId = context?.sessionKey || event?.conversationId || event?.sessionId || `openclaw:${agentId}`;
+            const turnId = event?.turnId || event?.runId || `agent_end:${Date.now()}`;
+            const result = await runWithClient("capture_session", async (client) => await client.captureSession({
+                conversation_id: conversationId,
+                turn_id: turnId,
+                agent_id: agentId,
+                messages: recentMessages,
+                path_prefix: `/openclaw/agent-${agentId}`,
+                scope: "project",
+            }));
+            if (!result.ok) {
+                api.logger.warn("tachi: capture_session skipped in degraded mode");
             }
         });
         api.registerService({

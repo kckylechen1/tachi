@@ -1,21 +1,19 @@
 # tachi (OpenClaw Plugin)
 
-OpenClaw 统一记忆插件 — 通过 Tachi MCP server 提供混合检索（向量 + FTS + 符号 + 衰减），并合并上下文提纯、任务跟踪、运行审计与 Tachi 子系统直通能力。
+OpenClaw 统一记忆插件 — 作为 Tachi kernel 的轻量 runtime facade，负责 agent-facing 的记忆工具面、生命周期 hooks，以及上下文注入。
 
 ## 架构
 
 ```
 OpenClaw Gateway (Node.js)
   └─ tachi plugin (this package)
-       ├─ MCP client ──→ tachi / memory-server (Rust binary, stdio transport)
-       │     └─ SQLite + sqlite-vec (memory.db)
-       └─ NAPI fallback (optional @chaoxlabs/tachi-node native binding)
+       └─ MCP client ──→ tachi / memory-server (Rust binary, stdio transport)
+             └─ SQLite + sqlite-vec (memory.db)
 ```
 
-**MCP 优先**：默认通过 MCP stdio 协议调用 Tachi 二进制。当 MCP 不可用时自动降级到 NAPI（30s 重试窗口）。
-环境变量 `OPENCLAW_MEMORY_BACKEND=napi` 可强制使用 NAPI 路径。
+**MCP-only**：插件默认通过 MCP stdio 协议调用 Tachi 二进制，记忆提炼、embedding、rerank、distill、graph maintenance 都在 Tachi 侧完成。
 
-**当前运行时拓扑**：插件通过 `getResolvedPaths(agentId)` 将记忆按 agent 拆到 `data/agents/<agent>/memory.db`。根目录的 `data/memory.db` 只作为历史/迁移遗留库保留，不再是新写入的默认目标。
+**当前运行时拓扑**：OpenClaw 插件不再维护本地 shadow store、SQLite FTS 或 capture spool；它只负责 hook timing、tool exposure 和调用 Tachi runtime APIs。
 
 ## 安装
 
@@ -42,8 +40,7 @@ curl -fsSL https://raw.githubusercontent.com/kckylechen1/tachi/main/scripts/inst
 
 | 文件 | 职责 |
 |------|------|
-| `index.ts` | 插件入口：tools、hooks、agent-scoped stores、审计日志 |
-| `store.ts` | `MemoryStore` — MCP→NAPI 双后端 + `withBackend()` fallback |
+| `index.ts` | 插件入口：仅暴露 `memory_search / memory_save / memory_get / memory_graph`，并在 hooks 中调用 Tachi runtime APIs |
 | `mcp-client.ts` | MCP stdio client — 多候选启动、连接恢复、JSON 解析 |
 | `config.ts` | 类型定义 + 默认配置（从环境变量读取） |
 | `constants.ts` | 环境加载：`.env` + 运行时环境变量 |
@@ -56,7 +53,6 @@ curl -fsSL https://raw.githubusercontent.com/kckylechen1/tachi/main/scripts/inst
 | 变量 | 必填 | 说明 |
 |------|------|------|
 | `TACHI_BIN` / `OPENCLAW_MEMORY_SERVER_BIN` | 否 | 显式指定 `tachi` / `memory-server` 二进制路径，优先于 PATH |
-| `OPENCLAW_MEMORY_BACKEND` | 否 | `mcp`（默认）或 `napi` |
 | `MEMORY_BRIDGE_CAPTURE_MIN_CHARS` | 否 | 自动捕获最小字符数阈值 |
 | `MEMORY_BRIDGE_CAPTURE_TRIGGERS` | 否 | 自动捕获关键词列表 |
 
@@ -69,21 +65,18 @@ curl -fsSL https://raw.githubusercontent.com/kckylechen1/tachi/main/scripts/inst
 | Tool 名称 | 说明 |
 |-----------|------|
 | `memory_search` | 语义混合检索（向量 + FTS + rerank） |
-| `memory_hybrid_search` | 同上（兼容别名） |
+| `memory_save` | 显式写入 durable memory |
 | `memory_get` | 按 ID 获取单条记忆 |
-| `compact_context` | 提纯当前会话，并将 compact 摘要注入 system event |
-| `todo_write` / `todo_read` / `spawn_tasks` | 会话 todo 与子代理 spawn 跟踪 |
-| `tachi_*` | 直通 skill / hub / vault / ghost / kanban / graph / state / identity / handoff |
+| `memory_graph` | 只读查看记忆图谱邻域 |
 
 ## 注册的 Hooks
 
 | Hook | 说明 |
 |------|------|
-| `before_agent_start` | FTS-only 零延迟检索，注入 `<relevant-structured-memories>` 上下文 |
+| `before_agent_start` | 调用 `recall_context`，注入 `<relevant-structured-memories>` 上下文 |
 | `agent_end` | 自动捕获：会话窗口提交到 Tachi，后续维护由 Foundry worker 异步处理 |
-| `llm_input` / `llm_output` / `before_compaction` / `after_compaction` | usage + compaction 跟踪 |
-| `after_tool_call` | tooluse 样本、spawn 跟踪、sessions_spawn 审计 |
-| `session_end` / `tool_result_persist` / `subagent_spawned` / `subagent_ended` | snapshot、compact 注入、子代理生命周期审计 |
+
+`compact_context`、`section.build`、`compact.rollup`、`compact.session_memory` 已经在 Tachi 侧可用；待 OpenClaw SDK 暴露 `before_compaction` 后再接入运行时 hook。
 
 ## 回滚
 

@@ -19,12 +19,11 @@ The target split is:
 ## Principles
 
 1. Agent-facing tools stay tiny.
-   - Default agent surface should be `memory_search`, `memory_save`, and `memory_get`
-   - Memory graph access should stay read-only when we add a higher-level graph tool
+   - Default agent surface should be `memory_search`, `memory_save`, `memory_get`, and read-only `memory_graph`
 2. Runtime hooks stay internal.
    - `recall_context`, `capture_session`, and later `compact_context` are host/runtime APIs, not default agent tools
 3. Capability selection should become a first-class public layer.
-   - `recommend_capability`, `recommend_skill`, and `recommend_toolchain` belong in the kernel surface
+   - `recommend_capability`, `recommend_skill`, `recommend_toolchain`, and `prepare_capability_bundle` belong in the kernel surface
    - but they should be added as a deliberate layer, not mixed into low-level memory or admin tools
 4. Workflow tools are not kernel primitives.
    - `ghost_*`, `post_card`, `check_inbox`, `update_card`, proposal review/project tools stay hidden unless a host or profile explicitly asks for them
@@ -143,28 +142,23 @@ This keeps the model-facing surface small while preserving a rich kernel for:
 
 - OpenClaw hooks
 - IDE integrations
-- future capability recommendation
-- future compaction APIs
+- capability recommendation and bundle preparation
+- section / compaction artifacts
 - operator and workflow tooling
 
 It also preserves compatibility for direct MCP clients that do not have a native extension layer: they can still select a smaller host profile without losing the full kernel from `admin`.
 
 ## Next Steps
 
-1. Add section/compaction artifacts
-   - `section.build`
-   - `compact.rollup`
-   - `compact.session_memory`
-2. Wire OpenClaw into `compact_context`
+1. Wire OpenClaw into `compact_context`
    - as soon as the SDK exposes a pre-compaction lifecycle hook
-3. Harden the capability layer
+2. Harden the capability layer
    - add richer outcome signals
    - connect more pack / projection metadata
-   - add `prepare_capability_bundle`
-4. Wire cron to queued evolution
+3. Wire cron to queued evolution
    - OpenClaw cron triggers Tachi evolution jobs
-   - Tachi produces proposals and projection targets
-5. Revisit per-session filtering
+   - Tachi can already load document paths, evidence paths, and memory queries directly
+4. Revisit per-session filtering
    - Move runtime tool filters off shared server state before extending `agent_register`
 
 ## Verification

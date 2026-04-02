@@ -56,6 +56,14 @@ type CompactContextParams = {
   persist?: boolean;
 };
 
+type MemoryGraphParams = {
+  memory_id?: string;
+  query?: string;
+  path_prefix?: string;
+  top_k?: number;
+  depth?: number;
+};
+
 type LaunchConfig = {
   command: string;
   args: string[];
@@ -75,6 +83,7 @@ const REQUIRED_TOOLS = [
   "save_memory",
   "search_memory",
   "get_memory",
+  "memory_graph",
   "delete_memory",
   "memory_stats",
   "list_memories",
@@ -397,6 +406,10 @@ export class MemoryMcpClient {
       return undefined;
     }
     return coerceMemoryEntry(payload);
+  }
+
+  async memoryGraph(params: MemoryGraphParams): Promise<unknown> {
+    return await this.callJson("memory_graph", params);
   }
 
   async listMemories(limit: number): Promise<MemoryEntry[]> {

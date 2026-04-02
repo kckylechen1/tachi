@@ -40,6 +40,24 @@ struct PackRecommendation {
     reasons: Vec<String>,
 }
 
+#[derive(Debug, Clone, Serialize)]
+struct CapabilityBundleSection {
+    title: String,
+    estimated_tokens: usize,
+    block: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct CapabilityBundle {
+    primary_skill: Option<CapabilityRecommendation>,
+    supporting_capabilities: Vec<CapabilityRecommendation>,
+    packs: Vec<PackRecommendation>,
+    host_tools: Vec<String>,
+    activation_steps: Vec<String>,
+    rationale: Vec<String>,
+    section: Option<CapabilityBundleSection>,
+}
+
 fn round3(value: f64) -> f64 {
     (value * 1000.0).round() / 1000.0
 }
@@ -460,6 +478,78 @@ fn infer_host_tools(query: &str) -> Vec<String> {
     tools
 }
 
+fn estimate_tokens(text: &str) -> usize {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        0
+    } else {
+        trimmed.chars().count().div_ceil(4)
+    }
+}
+
+fn build_bundle_section(
+    query: &str,
+    primary_skill: Option<&CapabilityRecommendation>,
+    capabilities: &[CapabilityRecommendation],
+    packs: &[PackRecommendation],
+    host_tools: &[String],
+    activation_steps: &[String],
+) -> CapabilityBundleSection {
+    let mut lines = vec![
+        "<!-- tachi:section kind=capability_bundle layer=live cache_boundary=turn -->".to_string(),
+        "## Capability Bundle".to_string(),
+        String::new(),
+        format!("Task: {}", query.trim()),
+    ];
+
+    if let Some(skill) = primary_skill {
+        lines.push(format!(
+            "Primary skill: {}{}",
+            skill.id,
+            skill.suggested_tool_name
+                .as_ref()
+                .map(|name| format!(" ({name})"))
+                .unwrap_or_default()
+        ));
+    }
+    if !capabilities.is_empty() {
+        lines.push(format!(
+            "Supporting capabilities: {}",
+            capabilities
+                .iter()
+                .map(|cap| cap.id.clone())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+    }
+    if !packs.is_empty() {
+        lines.push(format!(
+            "Relevant packs: {}",
+            packs.iter()
+                .map(|pack| pack.id.clone())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+    }
+    if !host_tools.is_empty() {
+        lines.push(format!("Suggested host tools: {}", host_tools.join(", ")));
+    }
+    if !activation_steps.is_empty() {
+        lines.push(String::new());
+        for step in activation_steps {
+            lines.push(format!("- {step}"));
+        }
+    }
+    lines.push("<!-- /tachi:section -->".to_string());
+
+    let block = lines.join("\n");
+    CapabilityBundleSection {
+        title: "Capability Bundle".to_string(),
+        estimated_tokens: estimate_tokens(&block),
+        block,
+    }
+}
+
 pub(super) async fn handle_recommend_capability(
     server: &MemoryServer,
     params: RecommendCapabilityParams,
@@ -558,6 +648,122 @@ pub(super) async fn handle_recommend_toolchain(
         "packs": packs,
         "host_tools": host_tools,
         "rationale": rationale,
+    }))
+    .map_err(|e| format!("serialize: {e}"))
+}
+
+pub(super) async fn handle_prepare_capability_bundle(
+    server: &MemoryServer,
+    params: PrepareCapabilityBundleParams,
+) -> Result<String, String> {
+    let host = normalize_host_label(params.host.as_deref());
+    let skills = recommend_capabilities_inner(
+        server,
+        &params.query,
+        host.as_deref(),
+        Some("skill"),
+        params.skill_limit.max(1),
+        false,
+        false,
+    )?;
+    let primary_skill = skills.first().cloned();
+    let supporting_capabilities = recommend_capabilities_inner(
+        server,
+        &params.query,
+        host.as_deref(),
+        None,
+        params.capability_limit.max(1) + 1,
+        false,
+        false,
+    )?
+    .into_iter()
+    .filter(|rec| rec.cap_type != "skill")
+    .take(params.capability_limit.max(1))
+    .collect::<Vec<_>>();
+    let packs = recommend_packs_inner(server, &params.query, host.as_deref(), params.pack_limit)?;
+    let host_tools = infer_host_tools(&params.query);
+
+    let mut activation_steps = Vec::new();
+    if let Some(skill) = primary_skill.as_ref() {
+        if let Some(tool_name) = skill.suggested_tool_name.as_ref() {
+            activation_steps.push(format!("Load or call {tool_name} as the primary skill path."));
+        } else {
+            activation_steps.push(format!("Start with skill {}.", skill.id));
+        }
+    }
+    if let Some(pack) = packs.first() {
+        if pack.projected_to_host {
+            activation_steps.push(format!(
+                "Use projected pack {} at {}.",
+                pack.id,
+                pack.projected_path
+                    .clone()
+                    .unwrap_or_else(|| "(projected path unknown)".to_string())
+            ));
+        } else {
+            activation_steps.push(format!(
+                "Project or activate pack {} before running the task.",
+                pack.id
+            ));
+        }
+    }
+    if !host_tools.is_empty() {
+        activation_steps.push(format!(
+            "Grant or prepare host tools: {}.",
+            host_tools.join(", ")
+        ));
+    }
+    for capability in supporting_capabilities.iter().take(2) {
+        activation_steps.push(format!(
+            "Keep {} available as a supporting capability.",
+            capability.id
+        ));
+    }
+
+    let mut rationale = Vec::new();
+    if let Some(skill) = primary_skill.as_ref() {
+        rationale.push(format!("Primary skill match: {}", skill.id));
+    }
+    if let Some(pack) = packs.first() {
+        rationale.push(format!("Best pack candidate: {}", pack.id));
+    }
+    if !host_tools.is_empty() {
+        rationale.push(format!("Host tool fit: {}", host_tools.join(", ")));
+    }
+    rationale.extend(
+        supporting_capabilities
+            .iter()
+            .take(2)
+            .map(|cap| format!("Supporting capability: {}", cap.id)),
+    );
+
+    let section = if params.include_section {
+        Some(build_bundle_section(
+            &params.query,
+            primary_skill.as_ref(),
+            &supporting_capabilities,
+            &packs,
+            &host_tools,
+            &activation_steps,
+        ))
+    } else {
+        None
+    };
+
+    let bundle = CapabilityBundle {
+        primary_skill,
+        supporting_capabilities,
+        packs,
+        host_tools,
+        activation_steps,
+        rationale,
+        section,
+    };
+
+    serde_json::to_string(&json!({
+        "query": params.query,
+        "host": host,
+        "bundle": bundle,
     }))
     .map_err(|e| format!("serialize: {e}"))
 }

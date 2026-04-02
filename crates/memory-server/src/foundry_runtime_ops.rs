@@ -1,5 +1,5 @@
 use super::*;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 const CAPTURE_DEDUP_THRESHOLD: f64 = 0.95;
@@ -59,6 +59,19 @@ struct CompactContextDraft {
     durable_signals: Vec<String>,
 }
 
+#[derive(Debug, Clone, Serialize)]
+struct SectionArtifact {
+    section_id: String,
+    layer: String,
+    kind: String,
+    title: Option<String>,
+    cache_boundary: String,
+    estimated_tokens: usize,
+    item_count: usize,
+    source_refs: Vec<String>,
+    block: String,
+}
+
 fn default_capture_category() -> String {
     "fact".to_string()
 }
@@ -111,6 +124,156 @@ fn dedup_strings(values: Vec<String>) -> Vec<String> {
     out
 }
 
+fn normalize_section_layer(raw: &str) -> String {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "static" => "static".to_string(),
+        "session" => "session".to_string(),
+        "live" => "live".to_string(),
+        _ => "other".to_string(),
+    }
+}
+
+fn normalize_section_kind(raw: &str) -> String {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return "context".to_string();
+    }
+    sanitize_safe_path_name(trimmed)
+}
+
+fn normalize_cache_boundary(raw: &str) -> String {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "none" => "none".to_string(),
+        "turn" => "turn".to_string(),
+        "session" => "session".to_string(),
+        "conversation" => "conversation".to_string(),
+        "agent" => "agent".to_string(),
+        "static" => "static".to_string(),
+        _ => "session".to_string(),
+    }
+}
+
+fn default_section_title(kind: &str) -> &'static str {
+    match kind {
+        "memory_recall" => "Relevant Memories",
+        "compact_rollup" => "Session Rollup",
+        "session_memory" => "Durable Session Memory",
+        "capability_bundle" => "Capability Bundle",
+        _ => "Context Section",
+    }
+}
+
+fn truncate_to_token_budget(text: &str, target_tokens: Option<usize>) -> String {
+    let Some(target_tokens) = target_tokens.filter(|budget| *budget > 0) else {
+        return text.trim().to_string();
+    };
+    let max_chars = target_tokens.saturating_mul(4);
+    let trimmed = text.trim();
+    if trimmed.chars().count() <= max_chars {
+        return trimmed.to_string();
+    }
+    let mut out = trimmed.chars().take(max_chars.saturating_sub(1)).collect::<String>();
+    out.push('…');
+    out
+}
+
+fn section_seed(
+    layer: &str,
+    kind: &str,
+    title: Option<&str>,
+    content: &str,
+    items: &[String],
+    cache_boundary: &str,
+    source_refs: &[String],
+) -> String {
+    format!(
+        "{}|{}|{}|{}|{}|{}|{}",
+        layer,
+        kind,
+        title.unwrap_or(""),
+        content,
+        items.join("|"),
+        cache_boundary,
+        source_refs.join("|")
+    )
+}
+
+fn build_section_artifact(
+    layer: &str,
+    kind: &str,
+    title: Option<&str>,
+    content: &str,
+    items: &[String],
+    cache_boundary: &str,
+    source_refs: &[String],
+    target_tokens: Option<usize>,
+) -> SectionArtifact {
+    let layer = normalize_section_layer(layer);
+    let kind = normalize_section_kind(kind);
+    let cache_boundary = normalize_cache_boundary(cache_boundary);
+    let clean_items = dedup_strings(items.to_vec());
+    let title = title
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned);
+    let body = truncate_to_token_budget(content, target_tokens);
+    let section_id = format!(
+        "section:{}",
+        uuid::Uuid::new_v5(
+            &uuid::Uuid::NAMESPACE_OID,
+            section_seed(
+                &layer,
+                &kind,
+                title.as_deref(),
+                &body,
+                &clean_items,
+                &cache_boundary,
+                source_refs
+            )
+            .as_bytes()
+        )
+    );
+
+    let mut block_lines = vec![format!(
+        "<!-- tachi:section id={} layer={} kind={} cache_boundary={} -->",
+        section_id, layer, kind, cache_boundary
+    )];
+    block_lines.push(format!(
+        "## {}",
+        title
+            .clone()
+            .unwrap_or_else(|| default_section_title(&kind).to_string())
+    ));
+    if !body.is_empty() {
+        block_lines.push(String::new());
+        block_lines.push(body);
+    }
+    if !clean_items.is_empty() {
+        block_lines.push(String::new());
+        for item in &clean_items {
+            block_lines.push(format!("- {item}"));
+        }
+    }
+    if !source_refs.is_empty() {
+        block_lines.push(String::new());
+        block_lines.push(format!("Source refs: {}", source_refs.join(", ")));
+    }
+    block_lines.push("<!-- /tachi:section -->".to_string());
+    let block = block_lines.join("\n");
+
+    SectionArtifact {
+        section_id,
+        layer,
+        kind,
+        title,
+        cache_boundary,
+        estimated_tokens: estimate_token_count(&block),
+        item_count: clean_items.len(),
+        source_refs: dedup_strings(source_refs.to_vec()),
+        block,
+    }
+}
+
 fn build_entry_path(base_path: &str, topic: &str) -> String {
     let base = base_path.trim_end_matches('/');
     let topic_segment = sanitize_safe_path_name(topic.trim());
@@ -142,6 +305,27 @@ fn build_openclaw_agent_root(agent_id: &str) -> String {
 
 fn build_foundry_agent_root(agent_id: &str) -> String {
     format!("/foundry/agents/{}", sanitize_safe_path_name(agent_id))
+}
+
+fn build_foundry_session_memory_root(agent_id: &str) -> String {
+    format!("{}/session-memory", build_foundry_agent_root(agent_id))
+}
+
+fn build_stable_foundry_memory_id(
+    namespace: &str,
+    agent_id: &str,
+    conversation_id: &str,
+    window_id: &str,
+    suffix: &str,
+) -> String {
+    let seed = format!(
+        "{}|{}|{}|{}|{}",
+        namespace, agent_id, conversation_id, window_id, suffix
+    );
+    format!(
+        "foundry:{}",
+        uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_OID, seed.as_bytes())
+    )
 }
 
 fn merge_text(existing: &str, incoming: &str) -> String {
@@ -1238,6 +1422,27 @@ fn parse_compact_context_response(raw: &str) -> Result<CompactContextDraft, Stri
     Ok(parsed)
 }
 
+async fn run_compaction_model(
+    server: &MemoryServer,
+    prompt: &str,
+    payload: &serde_json::Value,
+    max_output_tokens: usize,
+) -> Result<CompactContextDraft, String> {
+    let request = serde_json::to_string_pretty(payload)
+        .map_err(|e| format!("Failed to serialize compaction payload: {e}"))?;
+    let raw = server
+        .llm
+        .call_llm(
+            prompt,
+            &request,
+            None,
+            0.1,
+            max_output_tokens.max(128).min(u32::MAX as usize) as u32,
+        )
+        .await?;
+    parse_compact_context_response(&raw)
+}
+
 fn parse_session_capture_response(raw: &str) -> Result<Vec<SessionCaptureDraft>, String> {
     let json_str = llm::LlmClient::strip_code_fence(raw);
     let parsed: Vec<SessionCaptureDraft> = serde_json::from_str(json_str).map_err(|e| {
@@ -1293,6 +1498,366 @@ async fn rerank_rows(
     }
 }
 
+pub(super) async fn handle_section_build(
+    _server: &MemoryServer,
+    params: SectionBuildParams,
+) -> Result<String, String> {
+    let content = params.content.unwrap_or_default();
+    let items = dedup_strings(params.items);
+    if content.trim().is_empty() && items.is_empty() {
+        return serde_json::to_string(&json!({
+            "status": "skipped",
+            "reason": "empty_section",
+        }))
+        .map_err(|e| format!("Failed to serialize section_build response: {e}"));
+    }
+
+    let section = build_section_artifact(
+        &params.layer,
+        &params.kind,
+        params.title.as_deref(),
+        &content,
+        &items,
+        &params.cache_boundary,
+        &params.source_refs,
+        params.target_tokens,
+    );
+
+    serde_json::to_string(&json!({
+        "status": "completed",
+        "section": section,
+    }))
+    .map_err(|e| format!("Failed to serialize section_build response: {e}"))
+}
+
+pub(super) async fn handle_compact_rollup(
+    server: &MemoryServer,
+    params: CompactRollupParams,
+) -> Result<String, String> {
+    let items = params
+        .items
+        .iter()
+        .filter(|item| !item.compacted_text.trim().is_empty())
+        .collect::<Vec<_>>();
+    let current_summary = params.current_summary.as_deref().unwrap_or("").trim();
+
+    if items.is_empty() && current_summary.is_empty() {
+        return serde_json::to_string(&json!({
+            "status": "skipped",
+            "reason": "empty_rollup",
+            "rollup_id": params.rollup_id,
+            "compacted_text": "",
+            "estimated_tokens": 0,
+            "salient_topics": [],
+            "durable_signals": [],
+        }))
+        .map_err(|e| format!("Failed to serialize compact_rollup response: {e}"));
+    }
+
+    let payload = json!({
+        "agent_id": params.agent_id,
+        "conversation_id": params.conversation_id,
+        "rollup_id": params.rollup_id,
+        "target_tokens": params.target_tokens.max(32),
+        "current_summary": params.current_summary,
+        "items": items
+            .iter()
+            .map(|item| json!({
+                "item_id": item.item_id,
+                "window_id": item.window_id,
+                "compacted_text": item.compacted_text,
+                "salient_topics": item.salient_topics,
+                "durable_signals": item.durable_signals,
+            }))
+            .collect::<Vec<_>>(),
+    });
+    let draft = run_compaction_model(
+        server,
+        crate::prompts::COMPACT_ROLLUP_PROMPT,
+        &payload,
+        params.max_output_tokens,
+    )
+    .await?;
+    let compacted_text = draft.compacted_text.trim().to_string();
+    let estimated_tokens = estimate_token_count(&compacted_text);
+    let source_refs = items
+        .iter()
+        .filter_map(|item| item.window_id.clone().or_else(|| item.item_id.clone()))
+        .collect::<Vec<_>>();
+    let section = if params.build_section && !compacted_text.is_empty() {
+        Some(build_section_artifact(
+            "session",
+            "compact_rollup",
+            Some("Session Rollup"),
+            &compacted_text,
+            &draft.durable_signals,
+            "session",
+            &source_refs,
+            Some(params.target_tokens),
+        ))
+    } else {
+        None
+    };
+
+    serde_json::to_string(&json!({
+        "status": if compacted_text.is_empty() { "skipped" } else { "completed" },
+        "agent_id": params.agent_id,
+        "conversation_id": params.conversation_id,
+        "rollup_id": params.rollup_id,
+        "compacted_text": compacted_text,
+        "estimated_tokens": estimated_tokens,
+        "target_tokens": params.target_tokens.max(32),
+        "salient_topics": dedup_strings(draft.salient_topics),
+        "durable_signals": dedup_strings(draft.durable_signals),
+        "source_item_count": items.len(),
+        "section": section,
+    }))
+    .map_err(|e| format!("Failed to serialize compact_rollup response: {e}"))
+}
+
+pub(super) async fn handle_compact_session_memory(
+    server: &MemoryServer,
+    params: CompactSessionMemoryParams,
+) -> Result<String, String> {
+    let compacted_text = params.compacted_text.trim().to_string();
+    let durable_signals = dedup_strings(params.durable_signals);
+    let salient_topics = dedup_strings(params.salient_topics);
+    if compacted_text.is_empty() && durable_signals.is_empty() {
+        return serde_json::to_string(&json!({
+            "status": "skipped",
+            "reason": "empty_compact_artifact",
+            "captured": 0,
+        }))
+        .map_err(|e| format!("Failed to serialize compact_session_memory response: {e}"));
+    }
+
+    let requested_scope = normalize_scope(&params.scope, "project");
+    let named_project = params.project.clone();
+    let (target_db, warning) = if named_project.is_some() {
+        (DbScope::Project, None)
+    } else {
+        server.resolve_write_scope(&requested_scope)
+    };
+    let base_path = params
+        .path_prefix
+        .clone()
+        .unwrap_or_else(|| build_foundry_session_memory_root(&params.agent_id));
+    let source_ref_id = format!("{}:{}", params.conversation_id, params.window_id);
+
+    let mut entries = Vec::<MemoryEntry>::new();
+
+    if !compacted_text.is_empty() {
+        let summary = compacted_text.chars().take(100).collect::<String>();
+        let topic = salient_topics
+            .first()
+            .cloned()
+            .filter(|topic| !topic.trim().is_empty())
+            .unwrap_or_else(|| "session_rollup".to_string());
+        let metadata = crate::provenance::inject_provenance(
+            server,
+            json!({
+                "source_refs": [{
+                    "ref_type": "compact_window",
+                    "ref_id": source_ref_id.clone(),
+                }],
+                "conversation_id": params.conversation_id,
+                "window_id": params.window_id,
+                "agent_id": params.agent_id,
+                "salient_topics": salient_topics.clone(),
+                "durable_signals": durable_signals.clone(),
+                "artifact_kind": "compact_rollup",
+            }),
+            "compact_session_memory",
+            "session_memory_rollup",
+            Some(requested_scope.as_str()),
+            target_db,
+            json!({
+                "conversation_id": params.conversation_id,
+                "window_id": params.window_id,
+                "agent_id": params.agent_id,
+                "path_prefix": base_path,
+            }),
+        );
+        entries.push(MemoryEntry {
+            id: build_stable_foundry_memory_id(
+                "session_rollup",
+                &params.agent_id,
+                &params.conversation_id,
+                &params.window_id,
+                "rollup",
+            ),
+            path: build_entry_path(&format!("{base_path}/rollups"), &topic),
+            summary,
+            text: compacted_text.clone(),
+            importance: params.importance.clamp(0.0, 1.0),
+            timestamp: Utc::now().to_rfc3339(),
+            category: "experience".to_string(),
+            topic,
+            keywords: salient_topics.clone(),
+            persons: Vec::new(),
+            entities: Vec::new(),
+            location: String::new(),
+            source: "compact_session_memory".to_string(),
+            scope: requested_scope.clone(),
+            archived: false,
+            access_count: 0,
+            last_access: None,
+            revision: 1,
+            metadata,
+            vector: None,
+        });
+    }
+
+    for (idx, signal) in durable_signals.iter().enumerate() {
+        let signal_text = signal.trim();
+        if signal_text.is_empty() {
+            continue;
+        }
+        let topic = {
+            let alias = sanitize_safe_path_name(signal_text);
+            if alias.is_empty() {
+                format!("signal_{}", idx + 1)
+            } else {
+                alias.chars().take(48).collect()
+            }
+        };
+        let metadata = crate::provenance::inject_provenance(
+            server,
+            json!({
+                "source_refs": [{
+                    "ref_type": "compact_window",
+                    "ref_id": source_ref_id.clone(),
+                }],
+                "conversation_id": params.conversation_id,
+                "window_id": params.window_id,
+                "agent_id": params.agent_id,
+                "salient_topics": salient_topics.clone(),
+                "artifact_kind": "durable_signal",
+                "signal_index": idx,
+            }),
+            "compact_session_memory",
+            "session_memory_signal",
+            Some(requested_scope.as_str()),
+            target_db,
+            json!({
+                "conversation_id": params.conversation_id,
+                "window_id": params.window_id,
+                "agent_id": params.agent_id,
+                "path_prefix": base_path,
+            }),
+        );
+        entries.push(MemoryEntry {
+            id: build_stable_foundry_memory_id(
+                "session_signal",
+                &params.agent_id,
+                &params.conversation_id,
+                &params.window_id,
+                &idx.to_string(),
+            ),
+            path: build_entry_path(&format!("{base_path}/signals"), &topic),
+            summary: signal_text.chars().take(100).collect::<String>(),
+            text: signal_text.to_string(),
+            importance: params.importance.clamp(0.0, 1.0),
+            timestamp: Utc::now().to_rfc3339(),
+            category: "fact".to_string(),
+            topic,
+            keywords: salient_topics.clone(),
+            persons: Vec::new(),
+            entities: Vec::new(),
+            location: String::new(),
+            source: "compact_session_memory".to_string(),
+            scope: requested_scope.clone(),
+            archived: false,
+            access_count: 0,
+            last_access: None,
+            revision: 1,
+            metadata,
+            vector: None,
+        });
+    }
+
+    let texts = entries
+        .iter()
+        .map(|entry| entry.text.clone())
+        .collect::<Vec<_>>();
+    let embeddings = match server.llm.embed_voyage_batch(&texts, "document").await {
+        Ok(vectors) => Some(vectors),
+        Err(err) => {
+            eprintln!("[compact_session_memory] embedding failed, deferring enrichment: {err}");
+            None
+        }
+    };
+    if let Some(vectors) = embeddings.as_ref() {
+        for (idx, entry) in entries.iter_mut().enumerate() {
+            entry.vector = vectors.get(idx).cloned();
+        }
+    }
+
+    let mut saved_ids = Vec::new();
+    for entry in &entries {
+        persist_capture_entry(server, target_db, named_project.as_deref(), entry)?;
+        if embeddings.is_none() {
+            queue_capture_enrichment(
+                server,
+                target_db,
+                named_project.clone(),
+                entry,
+                false,
+                Some(&params.agent_id),
+                Some(&base_path),
+            );
+        }
+        saved_ids.push(entry.id.clone());
+    }
+
+    let saved_ids = dedup_strings(saved_ids);
+    let maintenance_jobs = if params.queue_maintenance {
+        enqueue_capture_maintenance_jobs(
+            server,
+            target_db,
+            named_project.clone(),
+            &params.agent_id,
+            &base_path,
+            &saved_ids,
+            0,
+            0,
+        )?
+    } else {
+        Vec::new()
+    };
+    let section = if !compacted_text.is_empty() {
+        Some(build_section_artifact(
+            "session",
+            "session_memory",
+            Some("Durable Session Memory"),
+            &compacted_text,
+            &durable_signals,
+            "session",
+            &[source_ref_id],
+            None,
+        ))
+    } else {
+        None
+    };
+
+    let mut response = serde_json::Map::new();
+    response.insert("status".into(), json!("completed"));
+    response.insert("captured".into(), json!(saved_ids.len()));
+    response.insert("ids".into(), json!(saved_ids));
+    response.insert("db".into(), json!(target_db.as_str()));
+    response.insert("path_prefix".into(), json!(base_path));
+    response.insert("salient_topics".into(), json!(salient_topics));
+    response.insert("durable_signals".into(), json!(durable_signals));
+    response.insert("maintenance_jobs".into(), json!(maintenance_jobs));
+    response.insert("section".into(), json!(section));
+    if let Some(warning) = warning {
+        response.insert("warning".into(), json!(warning));
+    }
+
+    serde_json::to_string(&Value::Object(response))
+        .map_err(|e| format!("Failed to serialize compact_session_memory response: {e}"))
+}
+
 pub(super) async fn handle_compact_context(
     server: &MemoryServer,
     params: CompactContextParams,
@@ -1325,19 +1890,13 @@ pub(super) async fn handle_compact_context(
         "current_summary": params.current_summary,
         "messages": params.messages,
     });
-    let request = serde_json::to_string_pretty(&payload)
-        .map_err(|e| format!("Failed to serialize compaction payload: {e}"))?;
-    let raw = server
-        .llm
-        .call_llm(
-            crate::prompts::COMPACT_CONTEXT_PROMPT,
-            &request,
-            None,
-            0.1,
-            params.max_output_tokens.max(128).min(u32::MAX as usize) as u32,
-        )
-        .await?;
-    let draft = parse_compact_context_response(&raw)?;
+    let draft = run_compaction_model(
+        server,
+        crate::prompts::COMPACT_CONTEXT_PROMPT,
+        &payload,
+        params.max_output_tokens,
+    )
+    .await?;
     let compacted_text = draft.compacted_text.trim().to_string();
     let estimated_tokens = estimate_token_count(&compacted_text);
 

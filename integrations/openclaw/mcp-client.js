@@ -10,6 +10,7 @@ const REQUIRED_TOOLS = [
     "save_memory",
     "search_memory",
     "get_memory",
+    "memory_graph",
     "delete_memory",
     "memory_stats",
     "list_memories",
@@ -299,6 +300,9 @@ export class MemoryMcpClient {
             return undefined;
         }
         return coerceMemoryEntry(payload);
+    }
+    async memoryGraph(params) {
+        return await this.callJson("memory_graph", params);
     }
     async listMemories(limit) {
         const payload = await this.callJson("list_memories", {

@@ -120,6 +120,26 @@ Rules:
 5) If the window contains no durable value, return compacted_text as an empty string and keep arrays empty.
 6) Never output anything except valid JSON."#;
 
+/// Compaction rollup prompt — folds multiple compact artifacts into one rolling summary block.
+pub const COMPACT_ROLLUP_PROMPT: &str = r#"You are the Neural Foundry rollup engine.
+
+Your task is to merge several prior compact artifacts into one new compact summary block that can replace them during prompt assembly.
+
+Output JSON only, no markdown:
+{
+  "compacted_text": "rolled-up replacement context block",
+  "salient_topics": ["topic 1", "topic 2"],
+  "durable_signals": ["stable signal 1", "stable signal 2"]
+}
+
+Rules:
+1) Preserve stable facts, decisions, preferences, blockers, and active threads that still matter.
+2) Merge overlapping artifacts; remove redundancy and stale conversational filler.
+3) Prefer continuity: if current_summary exists, refine it instead of rewriting from scratch.
+4) Keep compacted_text within the requested budget.
+5) If the artifacts contain no durable value, return compacted_text as an empty string and keep arrays empty.
+6) Never output anything except valid JSON."#;
+
 /// Agent evolution synthesis prompt — converts evidence into profile-change proposals.
 pub const AGENT_EVOLUTION_SYNTHESIS_PROMPT: &str = r#"You are the Neural Foundry synthesis engine for agent evolution.
 
