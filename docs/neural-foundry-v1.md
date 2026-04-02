@@ -224,6 +224,19 @@ Status:
 
 - foundations in progress
 
+Already done:
+
+- `synthesize_agent_evolution` now persists proposal artifacts into Foundry proposal storage
+- `queue_agent_evolution` can run synthesis in the background and persist job state
+- `list_agent_evolution_proposals` exposes stored proposals for operator review
+- `review_agent_evolution_proposal` adds approval / rejection / applied review state
+
+Still missing:
+
+- connect OpenClaw cron and other adapters to the queued evolution path
+- add richer evidence ingestion for eval / tooluse / reflection bundles
+- feed approved proposals into projection instead of stopping at review state
+
 ### Phase 4
 
 Add projection engine:

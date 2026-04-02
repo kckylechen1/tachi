@@ -1213,6 +1213,39 @@ pub(super) struct SynthesizeAgentEvolutionParams {
     pub dry_run: bool,
 }
 
+fn default_foundry_list_limit() -> usize {
+    10
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub(super) struct ListAgentEvolutionProposalsParams {
+    /// Canonical target agent id
+    pub agent_id: String,
+
+    /// Optional status filter: proposed | approved | rejected | applied
+    #[serde(default)]
+    pub status: Option<String>,
+
+    /// Number of proposals to return
+    #[serde(default = "default_foundry_list_limit")]
+    pub limit: usize,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub(super) struct ReviewAgentEvolutionProposalParams {
+    /// Derived proposal id returned by synthesize/queue/list operations
+    pub proposal_id: String,
+
+    /// Review status: approved | rejected | applied
+    pub status: String,
+
+    /// Optional reviewer note
+    #[serde(default)]
+    pub note: Option<String>,
+}
+
 // ─── Pack System Params ─────────────────────────────────────────────────────
 
 #[allow(dead_code)]

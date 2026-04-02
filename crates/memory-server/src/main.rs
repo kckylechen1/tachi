@@ -34,7 +34,10 @@ mod vault_crypto;
 mod vault_ops;
 
 use crate::dlq_ops::{handle_dlq_list, handle_dlq_retry};
-use crate::foundry_ops::handle_synthesize_agent_evolution;
+use crate::foundry_ops::{
+    handle_list_agent_evolution_proposals, handle_queue_agent_evolution,
+    handle_review_agent_evolution_proposal, handle_synthesize_agent_evolution,
+};
 use crate::foundry_runtime_ops::{
     enqueue_foundry_capture_maintenance, handle_capture_session, handle_recall_context,
     run_foundry_maintenance_worker, FoundryMaintenanceItem, FoundryWorkerStats,
@@ -321,6 +324,7 @@ const CACHEABLE_TOOLS: &[&str] = &[
     "hub_discover",
     "hub_get",
     "hub_stats",
+    "list_agent_evolution_proposals",
     "vc_list",
     "vc_resolve",
     "get_pipeline_status",
@@ -341,6 +345,8 @@ const CACHE_INVALIDATING_TOOLS: &[&str] = &[
     "skill_evolve",
     "capture_session",
     "synthesize_agent_evolution",
+    "queue_agent_evolution",
+    "review_agent_evolution_proposal",
     "vc_register",
     "vc_bind",
     "hub_feedback",
@@ -1202,6 +1208,36 @@ impl MemoryServer {
         Parameters(params): Parameters<SynthesizeAgentEvolutionParams>,
     ) -> Result<String, String> {
         handle_synthesize_agent_evolution(self, params).await
+    }
+
+    #[tool(
+        description = "Queue an agent evolution synthesis job. Persists job state and stores generated proposals for later review."
+    )]
+    async fn queue_agent_evolution(
+        &self,
+        Parameters(params): Parameters<SynthesizeAgentEvolutionParams>,
+    ) -> Result<String, String> {
+        handle_queue_agent_evolution(self, params).await
+    }
+
+    #[tool(
+        description = "List persisted agent evolution proposals for a target agent. Optionally filter by review status."
+    )]
+    async fn list_agent_evolution_proposals(
+        &self,
+        Parameters(params): Parameters<ListAgentEvolutionProposalsParams>,
+    ) -> Result<String, String> {
+        handle_list_agent_evolution_proposals(self, params).await
+    }
+
+    #[tool(
+        description = "Review a persisted agent evolution proposal by marking it approved, rejected, or applied."
+    )]
+    async fn review_agent_evolution_proposal(
+        &self,
+        Parameters(params): Parameters<ReviewAgentEvolutionProposalParams>,
+    ) -> Result<String, String> {
+        handle_review_agent_evolution_proposal(self, params).await
     }
 
     #[tool(description = "View audit log of proxy tool calls through the Hub.")]
