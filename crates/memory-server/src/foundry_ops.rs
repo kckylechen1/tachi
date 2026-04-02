@@ -424,16 +424,17 @@ fn document_target_aliases(doc: &AgentEvolutionDocumentParams) -> Vec<String> {
         }
     }
     let kind_alias = match parse_document_kind(&doc.kind) {
-        Ok(memory_core::AgentProfileDocumentKind::Identity) => Some("identity.md"),
-        Ok(memory_core::AgentProfileDocumentKind::Agents) => Some("agents.md"),
-        Ok(memory_core::AgentProfileDocumentKind::LatestTruths) => Some("latest_truths.md"),
-        Ok(memory_core::AgentProfileDocumentKind::RoutingPolicy) => Some("routing_policy.md"),
-        Ok(memory_core::AgentProfileDocumentKind::ToolPolicy) => Some("tool_policy.md"),
-        Ok(memory_core::AgentProfileDocumentKind::MemoryPolicy) => Some("memory_policy.md"),
+        Ok(memory_core::AgentProfileDocumentKind::Identity) => Some("identity"),
+        Ok(memory_core::AgentProfileDocumentKind::Agents) => Some("agents"),
+        Ok(memory_core::AgentProfileDocumentKind::LatestTruths) => Some("latest_truths"),
+        Ok(memory_core::AgentProfileDocumentKind::RoutingPolicy) => Some("routing_policy"),
+        Ok(memory_core::AgentProfileDocumentKind::ToolPolicy) => Some("tool_policy"),
+        Ok(memory_core::AgentProfileDocumentKind::MemoryPolicy) => Some("memory_policy"),
         _ => None,
     };
     if let Some(alias) = kind_alias {
         aliases.push(alias.to_string());
+        aliases.push(format!("{alias}.md"));
     }
     aliases.sort();
     aliases.dedup();
@@ -536,6 +537,25 @@ fn resolve_projection_write_path(path: &str) -> Result<std::path::PathBuf, Strin
         };
         let resolved = canonical_parent.join(file_name);
         if allowed_roots.iter().any(|root| resolved.starts_with(root)) {
+            if let Ok(metadata) = std::fs::symlink_metadata(&resolved) {
+                if metadata.file_type().is_symlink() {
+                    let canonical_target = std::fs::canonicalize(&resolved).map_err(|err| {
+                        format!(
+                            "Failed to resolve symlinked projected document '{}': {err}",
+                            resolved.display()
+                        )
+                    })?;
+                    if !allowed_roots
+                        .iter()
+                        .any(|root| canonical_target.starts_with(root))
+                    {
+                        return Err(format!(
+                            "Projected document path '{}' resolves outside allowed roots",
+                            resolved.display()
+                        ));
+                    }
+                }
+            }
             return Ok(resolved);
         }
     }
@@ -962,5 +982,52 @@ mod tests {
         let err = resolve_projection_write_path(outside.to_string_lossy().as_ref())
             .expect_err("outside path should be rejected");
         assert!(err.contains("outside allowed roots"));
+    }
+
+    #[test]
+    fn proposal_targets_document_matches_policy_kind_without_md_suffix() {
+        let doc = AgentEvolutionDocumentParams {
+            kind: "routing_policy".to_string(),
+            path: None,
+            content: String::new(),
+        };
+        let proposal = memory_core::AgentEvolutionProposal {
+            title: "Tighten routing".to_string(),
+            target: "routing_policy".to_string(),
+            target_section: Some("Rules".to_string()),
+            current_value: None,
+            suggested_value: "new rule".to_string(),
+            rationale: "safer".to_string(),
+            risk: "medium".to_string(),
+            evidence_refs: vec![],
+        };
+
+        assert!(proposal_targets_document(&proposal, &doc));
+    }
+
+    #[test]
+    fn resolve_projection_write_path_rejects_symlink_target_outside_allowed_roots() {
+        let root = std::env::temp_dir().join(format!("foundry-symlink-{}", uuid::Uuid::new_v4()));
+        let allowed = root.join("allowed");
+        let outside = root.join("outside");
+        std::fs::create_dir_all(&allowed).expect("create allowed root");
+        std::fs::create_dir_all(&outside).expect("create outside root");
+
+        let original_cwd = std::env::current_dir().expect("cwd");
+        std::env::set_current_dir(&allowed).expect("set cwd");
+
+        let link_path = allowed.join("IDENTITY.md");
+        let outside_target = outside.join("IDENTITY.md");
+        std::fs::write(&outside_target, "outside").expect("seed outside target");
+        std::os::unix::fs::symlink(&outside_target, &link_path).expect("create symlink");
+
+        let err = resolve_projection_write_path(link_path.to_string_lossy().as_ref())
+            .expect_err("symlink to outside root should be rejected");
+        assert!(err.contains("resolves outside allowed roots"));
+
+        std::env::set_current_dir(original_cwd).expect("restore cwd");
+        let _ = std::fs::remove_file(&link_path);
+        let _ = std::fs::remove_file(&outside_target);
+        let _ = std::fs::remove_dir_all(&root);
     }
 }
