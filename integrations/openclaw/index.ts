@@ -99,6 +99,20 @@ export const memoryHybridBridgePlugin = {
     async function performSearch(query: string, agentId?: string, searchTopK?: number) {
       const store = await ensureStore(agentId);
       const topK = searchTopK ?? config.topK;
+      const client = store.getMcpClient();
+
+      if (client) {
+        try {
+          const recall = await client.recallContext(query, {
+            top_k: topK,
+            candidate_multiplier: 3,
+          });
+          return recall.results;
+        } catch (err) {
+          api.logger.warn(`tachi: recall_context failed, fallback to local hybrid search: ${String(err)}`);
+        }
+      }
+
       const queryVector = await getEmbedding({ config, text: query, logger: api.logger });
 
       // Pull more candidates for reranking (3× topK), then rerank down to topK
@@ -362,6 +376,24 @@ export const memoryHybridBridgePlugin = {
       const agentId = ctx?.agentId || "main";
 
       try {
+        const store = await ensureStore(agentId);
+        const client = store.getMcpClient();
+        if (client) {
+          try {
+            const recall = await client.recallContext(query, {
+              top_k: config.topK,
+              candidate_multiplier: 1,
+              exclude_topics: ["imsg_conversation"],
+            });
+            if (recall.prependContext.trim()) {
+              return { prependContext: recall.prependContext };
+            }
+            return;
+          } catch (err) {
+            api.logger.warn(`tachi [${agentId}]: server-side recall failed, fallback to local FTS: ${String(err)}`);
+          }
+        }
+
         const hits = await performFtsSearch(query, agentId);
         // Filter out iMessage conversation chunks — private chats should not leak into agent context
         const filtered = hits.filter(h => h.entry.topic !== "imsg_conversation");
@@ -440,11 +472,53 @@ export const memoryHybridBridgePlugin = {
         const windowText = recentMsgs
           .map((m: any, i: number) => `[${i}] ${m.role}: ${msgToText(m)}`)
           .join("\n\n");
+        const sessionKey = ctx?.sessionKey || `s_${Date.now()}`;
+        const conversationId = ctx?.conversationId || ctx?.sessionId || `openclaw:${agentId}`;
+        const sessionMessages = recentMsgs.map((m: any) => ({
+          role: typeof m?.role === "string" ? m.role : "unknown",
+          content: msgToText(m),
+        }));
+
+        const runtimeStore = await ensureStore(agentId);
+        const client = runtimeStore.getMcpClient();
+        if (client) {
+          try {
+            const capture = await client.captureSession({
+              conversation_id: conversationId,
+              turn_id: sessionKey,
+              agent_id: agentId,
+              messages: sessionMessages,
+              path_prefix: `/openclaw/agent-${agentId}`,
+            }) as any;
+
+            const captured = typeof capture?.captured === "number" ? capture.captured : 0;
+            if (captured > 0) {
+              extractFailCount = 0;
+              try {
+                await appendAuditLog(audit, {
+                  action: "capture_session",
+                  captured,
+                  entry_ids: Array.isArray(capture?.ids) ? capture.ids : [],
+                  agent: agentId,
+                });
+              } catch (auditErr) {
+                api.logger.warn(`tachi [${agentId}]: audit-log write failed: ${String(auditErr)}`);
+              }
+              api.logger.info(`tachi [${agentId}]: captured ${captured} memories via Tachi`);
+            }
+
+            if (capture?.status === "completed" || capture?.status === "skipped") {
+              return;
+            }
+          } catch (err) {
+            api.logger.warn(`tachi [${agentId}]: capture_session failed, fallback to local capture: ${String(err)}`);
+          }
+        }
 
         const extracted = await extractMemoryEntry({
           config,
           inputWindowText: windowText,
-          sourceRefId: ctx?.sessionKey || `s_${Date.now()}`,
+          sourceRefId: sessionKey,
           agentId,
           logger: api.logger,
         });

@@ -5,6 +5,7 @@
 
 pub mod db;
 pub mod error;
+pub mod foundry;
 pub mod hub;
 pub mod noise;
 pub mod pack;
@@ -14,6 +15,11 @@ pub mod types;
 pub mod vault;
 
 pub use error::MemoryError;
+pub use foundry::{
+    AgentEvolutionProposal, AgentEvolutionSynthesis, AgentProfileDocument,
+    AgentProfileDocumentKind, FoundryEvidence, FoundryEvidenceKind, FoundryJobKind, FoundryJobSpec,
+    FoundryJobStatus, FoundryModelLane,
+};
 pub use hub::{HubCapability, VirtualCapabilityBinding};
 pub use noise::{is_noise_text, should_skip_query};
 pub use pack::{

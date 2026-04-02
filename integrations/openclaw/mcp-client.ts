@@ -34,6 +34,14 @@ type SearchOptions = {
   weights?: { semantic: number; fts: number; symbolic: number; decay: number };
 };
 
+type RecallContextOptions = {
+  top_k?: number;
+  candidate_multiplier?: number;
+  path_prefix?: string;
+  exclude_topics?: string[];
+  min_score?: number;
+};
+
 type LaunchConfig = {
   command: string;
   args: string[];
@@ -48,6 +56,8 @@ type RawToolResult = CallToolResult & {
 };
 
 const REQUIRED_TOOLS = [
+  "recall_context",
+  "capture_session",
   "save_memory",
   "search_memory",
   "get_memory",
@@ -429,6 +439,57 @@ export class MemoryMcpClient {
     }
 
     return { docs, scores, scoreBreakdowns };
+  }
+
+  async recallContext(
+    query: string,
+    opts?: RecallContextOptions,
+  ): Promise<{
+    prependContext: string;
+    results: Array<{ entry: MemoryEntry; final_score: number }>;
+  }> {
+    const payload = await this.callJson<unknown>("recall_context", {
+      query,
+      top_k: opts?.top_k,
+      candidate_multiplier: opts?.candidate_multiplier,
+      path_prefix: opts?.path_prefix,
+      exclude_topics: opts?.exclude_topics,
+      min_score: opts?.min_score,
+    });
+
+    let prependContext = "";
+    const results: Array<{ entry: MemoryEntry; final_score: number }> = [];
+
+    if (isRecord(payload) && typeof payload.prepend_context === "string") {
+      prependContext = payload.prepend_context;
+    }
+
+    const rows = isRecord(payload) && Array.isArray(payload.results) ? payload.results : [];
+    for (const row of rows) {
+      const entry = coerceMemoryEntry(row);
+      if (!entry) {
+        continue;
+      }
+      const finalScore = asFiniteNumber(
+        (isRecord(row) ? row.relevance : undefined) ??
+          (isRecord(row) && isRecord(row.score) ? row.score.final : undefined),
+      );
+      results.push({ entry, final_score: finalScore });
+    }
+
+    return { prependContext, results };
+  }
+
+  async captureSession(params: {
+    conversation_id: string;
+    turn_id: string;
+    agent_id: string;
+    messages: Array<{ role: string; content: string }>;
+    path_prefix?: string;
+    scope?: string;
+    force?: boolean;
+  }): Promise<unknown> {
+    return await this.callJson<unknown>("capture_session", params);
   }
 
   async findSimilarMemory(

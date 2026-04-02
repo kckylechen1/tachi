@@ -137,6 +137,62 @@ impl LlmClient {
         Ok(all_embeddings)
     }
 
+    /// Call Voyage rerank API and return (original_index, relevance_score) pairs.
+    pub async fn rerank_voyage(
+        &self,
+        query: &str,
+        documents: &[String],
+        top_k: usize,
+    ) -> Result<Vec<(usize, f64)>, String> {
+        if documents.is_empty() {
+            return Ok(vec![]);
+        }
+
+        let body = serde_json::json!({
+            "model": "rerank-2.5",
+            "query": query,
+            "documents": documents,
+            "top_k": top_k.max(1).min(documents.len()),
+        });
+
+        let response = self
+            .http
+            .post("https://api.voyageai.com/v1/rerank")
+            .header(CONTENT_TYPE, "application/json")
+            .header(AUTHORIZATION, format!("Bearer {}", self.voyage_api_key))
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| format!("Voyage rerank API request failed: {}", e))?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let text = response.text().await.unwrap_or_default();
+            return Err(format!("Voyage rerank API error: {} - {}", status, text));
+        }
+
+        let json: Value = response
+            .json()
+            .await
+            .map_err(|e| format!("Failed to parse Voyage rerank response: {}", e))?;
+        let data = json["data"]
+            .as_array()
+            .ok_or("Invalid Voyage rerank response: missing data array")?;
+
+        let mut out = Vec::with_capacity(data.len());
+        for item in data {
+            let index = item["index"]
+                .as_u64()
+                .ok_or("Invalid Voyage rerank response: missing index")?
+                as usize;
+            let relevance = item["relevance_score"]
+                .as_f64()
+                .ok_or("Invalid Voyage rerank response: missing relevance_score")?;
+            out.push((index, relevance));
+        }
+        Ok(out)
+    }
+
     /// Call SiliconFlow chat API via raw reqwest.
     /// Includes `enable_thinking: false` for Qwen3 models to prevent
     /// empty `content` when the model puts output in `reasoning_content`.

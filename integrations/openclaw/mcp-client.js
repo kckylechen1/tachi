@@ -5,6 +5,8 @@ import { fileURLToPath } from "node:url";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 const REQUIRED_TOOLS = [
+    "recall_context",
+    "capture_session",
     "save_memory",
     "search_memory",
     "get_memory",
@@ -345,6 +347,35 @@ export class MemoryMcpClient {
             scoreBreakdowns[entry.id] = breakdown;
         }
         return { docs, scores, scoreBreakdowns };
+    }
+    async recallContext(query, opts) {
+        const payload = await this.callJson("recall_context", {
+            query,
+            top_k: opts?.top_k,
+            candidate_multiplier: opts?.candidate_multiplier,
+            path_prefix: opts?.path_prefix,
+            exclude_topics: opts?.exclude_topics,
+            min_score: opts?.min_score,
+        });
+        let prependContext = "";
+        const results = [];
+        if (isRecord(payload) && typeof payload.prepend_context === "string") {
+            prependContext = payload.prepend_context;
+        }
+        const rows = isRecord(payload) && Array.isArray(payload.results) ? payload.results : [];
+        for (const row of rows) {
+            const entry = coerceMemoryEntry(row);
+            if (!entry) {
+                continue;
+            }
+            const finalScore = asFiniteNumber((isRecord(row) ? row.relevance : undefined) ??
+                (isRecord(row) && isRecord(row.score) ? row.score.final : undefined));
+            results.push({ entry, final_score: finalScore });
+        }
+        return { prependContext, results };
+    }
+    async captureSession(params) {
+        return await this.callJson("capture_session", params);
     }
     async findSimilarMemory(queryVec, topK) {
         if (!this.availableTools.has("find_similar_memory")) {

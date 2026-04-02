@@ -385,7 +385,7 @@ fn default_extraction_source() -> String {
 }
 
 /// A single message in a conversation turn
-#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Deserialize, serde::Serialize, JsonSchema)]
 pub(super) struct Message {
     /// Role of the message sender (e.g., "user", "assistant", "system")
     #[allow(dead_code)]
@@ -410,6 +410,85 @@ pub(super) struct IngestEventParams {
 #[allow(dead_code)]
 fn default_hub_version() -> u32 {
     1
+}
+
+fn default_recall_candidate_multiplier() -> usize {
+    3
+}
+
+fn default_capture_min_chars() -> usize {
+    24
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub(super) struct RecallContextParams {
+    /// User or agent query that should be used to recall prior context
+    pub query: String,
+
+    /// Number of final results to keep after filtering / reranking
+    #[serde(default = "default_top_k")]
+    pub top_k: usize,
+
+    /// Candidate expansion multiplier before reranking (default: 3)
+    #[serde(default = "default_recall_candidate_multiplier")]
+    pub candidate_multiplier: usize,
+
+    /// Optional path prefix filter
+    #[serde(default)]
+    pub path_prefix: Option<String>,
+
+    /// Topic names to exclude from the final context block
+    #[serde(default)]
+    pub exclude_topics: Vec<String>,
+
+    /// Optional minimum score threshold after ranking
+    #[serde(default)]
+    pub min_score: Option<f64>,
+
+    /// Optional agent role for sandbox filtering
+    #[serde(default)]
+    pub agent_role: Option<String>,
+
+    /// Optional named project DB
+    #[serde(default)]
+    pub project: Option<String>,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub(super) struct CaptureSessionParams {
+    /// Conversation identifier
+    pub conversation_id: String,
+
+    /// Turn identifier
+    pub turn_id: String,
+
+    /// Canonical agent id for pathing / provenance
+    pub agent_id: String,
+
+    /// Messages in the session window
+    pub messages: Vec<Message>,
+
+    /// Optional base path for written memories
+    #[serde(default)]
+    pub path_prefix: Option<String>,
+
+    /// Scope: "user" | "project" | "general"
+    #[serde(default = "default_scope")]
+    pub scope: String,
+
+    /// Optional named project DB
+    #[serde(default)]
+    pub project: Option<String>,
+
+    /// Minimum combined character count before capture runs
+    #[serde(default = "default_capture_min_chars")]
+    pub min_chars: usize,
+
+    /// Force capture even when the window is short
+    #[serde(default)]
+    pub force: bool,
 }
 
 fn default_virtual_binding_priority() -> i32 {
@@ -1054,6 +1133,78 @@ pub(super) struct SkillEvolveParams {
     pub auto_activate: bool,
 
     /// If true, perform a dry-run — return the proposed improved prompt without persisting (default: false)
+    #[serde(default)]
+    pub dry_run: bool,
+}
+
+#[allow(dead_code)]
+fn default_foundry_evidence_weight() -> f64 {
+    1.0
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub(super) struct AgentEvolutionDocumentParams {
+    /// Document kind: identity | agents | latest_truths | routing_policy | tool_policy | memory_policy | other
+    pub kind: String,
+
+    /// Optional source path for provenance / later projection
+    #[serde(default)]
+    pub path: Option<String>,
+
+    /// Current document content
+    pub content: String,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub(super) struct AgentEvolutionEvidenceParams {
+    /// Evidence kind: memory | reflection | tooluse | eval | ghost | session_outcome | skill_telemetry | profile_snapshot | proposal | other
+    pub kind: String,
+
+    /// Optional short evidence title
+    #[serde(default)]
+    pub title: Option<String>,
+
+    /// Raw evidence text or summary
+    pub content: String,
+
+    /// Optional evidence identifier for traceability
+    #[serde(default)]
+    pub source_ref: Option<String>,
+
+    /// Optional filesystem or logical path
+    #[serde(default)]
+    pub path: Option<String>,
+
+    /// Relative evidence weight (default: 1.0)
+    #[serde(default = "default_foundry_evidence_weight")]
+    pub weight: f64,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub(super) struct SynthesizeAgentEvolutionParams {
+    /// Canonical target agent id
+    pub agent_id: String,
+
+    /// Optional display name for synthesis context
+    #[serde(default)]
+    pub display_name: Option<String>,
+
+    /// Current profile documents that should inform the proposal
+    #[serde(default)]
+    pub documents: Vec<AgentEvolutionDocumentParams>,
+
+    /// Supporting evidence items
+    #[serde(default)]
+    pub evidence: Vec<AgentEvolutionEvidenceParams>,
+
+    /// Optional operator goals or focus areas
+    #[serde(default)]
+    pub goals: Vec<String>,
+
+    /// If true, do not call the LLM. Return the normalized job and request payload only.
     #[serde(default)]
     pub dry_run: bool,
 }

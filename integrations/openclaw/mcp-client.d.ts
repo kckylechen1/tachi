@@ -27,6 +27,13 @@ type SearchOptions = {
         decay: number;
     };
 };
+type RecallContextOptions = {
+    top_k?: number;
+    candidate_multiplier?: number;
+    path_prefix?: string;
+    exclude_topics?: string[];
+    min_score?: number;
+};
 export declare class MemoryMcpClient {
     private readonly dbPath;
     private readonly logger?;
@@ -48,6 +55,25 @@ export declare class MemoryMcpClient {
     getMemory(id: string): Promise<MemoryEntry | undefined>;
     listMemories(limit: number): Promise<MemoryEntry[]>;
     searchMemory(query: string, queryVec?: number[], opts?: SearchOptions): Promise<SearchPayload>;
+    recallContext(query: string, opts?: RecallContextOptions): Promise<{
+        prependContext: string;
+        results: Array<{
+            entry: MemoryEntry;
+            final_score: number;
+        }>;
+    }>;
+    captureSession(params: {
+        conversation_id: string;
+        turn_id: string;
+        agent_id: string;
+        messages: Array<{
+            role: string;
+            content: string;
+        }>;
+        path_prefix?: string;
+        scope?: string;
+        force?: boolean;
+    }): Promise<unknown>;
     findSimilarMemory(queryVec: number[], topK: number): Promise<Array<{
         entry: MemoryEntry;
         similarity: number;

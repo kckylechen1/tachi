@@ -6,6 +6,8 @@
 mod bootstrap;
 mod clawdoctor;
 mod dlq_ops;
+mod foundry_ops;
+mod foundry_runtime_ops;
 mod ghost_ops;
 mod graph_state_ops;
 mod hub_helpers;
@@ -18,9 +20,9 @@ mod memory_ops;
 mod memory_search_ops;
 mod pack_ops;
 mod pipeline_ops;
-mod provenance;
 mod project_db_ops;
 mod prompts;
+mod provenance;
 mod sandbox_ops;
 mod server_handler;
 mod server_methods;
@@ -32,6 +34,8 @@ mod vault_crypto;
 mod vault_ops;
 
 use crate::dlq_ops::{handle_dlq_list, handle_dlq_retry};
+use crate::foundry_ops::handle_synthesize_agent_evolution;
+use crate::foundry_runtime_ops::{handle_capture_session, handle_recall_context};
 use crate::ghost_ops::{
     handle_ghost_ack, handle_ghost_promote, handle_ghost_publish, handle_ghost_reflect,
     handle_ghost_subscribe, handle_ghost_topics,
@@ -87,8 +91,8 @@ use crate::skill_chain_ops::handle_chain_skills;
 use crate::tool_params::*;
 use crate::utils::{
     find_git_root, is_active_global_rule, is_trusted_command, lock_or_recover, parse_env_bool,
-    parse_env_u64, read_or_recover, sanitize_safe_path_name, stable_hash,
-    value_to_template_text, write_or_recover,
+    parse_env_u64, read_or_recover, sanitize_safe_path_name, stable_hash, value_to_template_text,
+    write_or_recover,
 };
 use crate::vault_ops::{
     handle_vault_get, handle_vault_init, handle_vault_list, handle_vault_lock, handle_vault_remove,
@@ -330,6 +334,8 @@ const CACHE_INVALIDATING_TOOLS: &[&str] = &[
     "hub_set_active_version",
     "hub_export_skills",
     "skill_evolve",
+    "capture_session",
+    "synthesize_agent_evolution",
     "vc_register",
     "vc_bind",
     "hub_feedback",
@@ -1129,6 +1135,36 @@ impl MemoryServer {
         Parameters(params): Parameters<SkillEvolveParams>,
     ) -> Result<String, String> {
         handle_skill_evolve(self, params).await
+    }
+
+    #[tool(
+        description = "Recall structured memory context for an active agent turn. Returns ranked results plus a ready-to-inject prepend_context block."
+    )]
+    async fn recall_context(
+        &self,
+        Parameters(params): Parameters<RecallContextParams>,
+    ) -> Result<String, String> {
+        handle_recall_context(self, params).await
+    }
+
+    #[tool(
+        description = "Capture durable memories from a recent session window. Extracts structured memories, embeds them inside Tachi, and writes them to the configured store."
+    )]
+    async fn capture_session(
+        &self,
+        Parameters(params): Parameters<CaptureSessionParams>,
+    ) -> Result<String, String> {
+        handle_capture_session(self, params).await
+    }
+
+    #[tool(
+        description = "Synthesize agent evolution proposals from canonical profile documents and evidence. Returns structured JSON proposals; use dry_run=true to inspect the normalized request without calling the model."
+    )]
+    async fn synthesize_agent_evolution(
+        &self,
+        Parameters(params): Parameters<SynthesizeAgentEvolutionParams>,
+    ) -> Result<String, String> {
+        handle_synthesize_agent_evolution(self, params).await
     }
 
     #[tool(description = "View audit log of proxy tool calls through the Hub.")]

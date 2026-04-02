@@ -171,11 +171,7 @@ export class MemoryStore {
     this.napiStore = napiStore;
     const backendRaw = (process.env.OPENCLAW_MEMORY_BACKEND || "mcp").trim().toLowerCase();
     this.preferredBackend = backendRaw === "napi" ? "napi" : "mcp";
-    this.mcpClient = this.preferredBackend === "mcp" ? new MemoryMcpClient(dbPath, logger) : null;
-    if (!this.napiStore && !this.mcpClient) {
-      // Force MCP when NAPI is absent, regardless of env setting
-      this.mcpClient = new MemoryMcpClient(dbPath, logger);
-    }
+    this.mcpClient = new MemoryMcpClient(dbPath, logger);
   }
 
   private isMcpAvailable(): boolean {
