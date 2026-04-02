@@ -4,6 +4,7 @@
 // Stateless design: each tool opens its own DB connection per-request.
 
 mod bootstrap;
+mod capability_ops;
 mod clawdoctor;
 mod dlq_ops;
 mod foundry_ops;
@@ -34,6 +35,9 @@ mod utils;
 mod vault_crypto;
 mod vault_ops;
 
+use crate::capability_ops::{
+    handle_recommend_capability, handle_recommend_skill, handle_recommend_toolchain,
+};
 use crate::dlq_ops::{handle_dlq_list, handle_dlq_retry};
 use crate::foundry_ops::{
     handle_list_agent_evolution_proposals, handle_project_agent_profile,
@@ -322,6 +326,9 @@ const RATE_LIMIT_BURST_WINDOW: Duration = Duration::from_secs(60);
 
 /// Tools whose results can be cached (read-only, no side effects)
 const CACHEABLE_TOOLS: &[&str] = &[
+    "recommend_capability",
+    "recommend_skill",
+    "recommend_toolchain",
     "search_memory",
     "cyberbrain_search",
     "find_similar_memory",
@@ -1190,6 +1197,36 @@ impl MemoryServer {
         Parameters(params): Parameters<SkillEvolveParams>,
     ) -> Result<String, String> {
         handle_skill_evolve(self, params).await
+    }
+
+    #[tool(
+        description = "Recommend the best Tachi capability for a task query. Uses Hub metadata, visibility, host constraints, and telemetry to rank candidate capabilities."
+    )]
+    async fn recommend_capability(
+        &self,
+        Parameters(params): Parameters<RecommendCapabilityParams>,
+    ) -> Result<String, String> {
+        handle_recommend_capability(self, params).await
+    }
+
+    #[tool(
+        description = "Recommend the most relevant skills for a task query. Returns ranked skill candidates plus callable tool aliases when available."
+    )]
+    async fn recommend_skill(
+        &self,
+        Parameters(params): Parameters<RecommendSkillParams>,
+    ) -> Result<String, String> {
+        handle_recommend_skill(self, params).await
+    }
+
+    #[tool(
+        description = "Recommend a host-aware toolchain for a task query, including skills, supporting capabilities, projected packs, and suggested host-native execution tools."
+    )]
+    async fn recommend_toolchain(
+        &self,
+        Parameters(params): Parameters<RecommendToolchainParams>,
+    ) -> Result<String, String> {
+        handle_recommend_toolchain(self, params).await
     }
 
     #[tool(

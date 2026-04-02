@@ -1,4 +1,5 @@
 use super::*;
+use memory_core::{AgentProjection, Pack};
 
 fn ensure_test_env() {
     static INIT: std::sync::Once = std::sync::Once::new();
@@ -124,6 +125,51 @@ fn make_mcp_capability(id: &str, version: u32) -> HubCapability {
         last_used: None,
         created_at: String::new(),
         updated_at: String::new(),
+    }
+}
+
+fn make_skill_capability(
+    id: &str,
+    name: &str,
+    description: &str,
+    visibility: &str,
+) -> HubCapability {
+    HubCapability {
+        id: id.to_string(),
+        cap_type: "skill".to_string(),
+        name: name.to_string(),
+        version: 1,
+        description: description.to_string(),
+        definition: json!({
+            "prompt": format!("Run skill {name}"),
+            "content": format!("# {name}\n\n{description}"),
+            "policy": {
+                "visibility": visibility,
+            },
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "input": {"type": "string"}
+                }
+            }
+        })
+        .to_string(),
+        enabled: true,
+        review_status: "approved".to_string(),
+        health_status: "healthy".to_string(),
+        last_error: None,
+        last_success_at: None,
+        last_failure_at: None,
+        fail_streak: 0,
+        active_version: None,
+        exposure_mode: "direct".to_string(),
+        uses: 0,
+        successes: 0,
+        failures: 0,
+        avg_rating: 0.0,
+        last_used: None,
+        created_at: Utc::now().to_rfc3339(),
+        updated_at: Utc::now().to_rfc3339(),
     }
 }
 
@@ -2383,6 +2429,187 @@ async fn hub_export_skills_generic_writes_files() {
     );
 
     let _ = std::fs::remove_dir_all(&export_dir);
+}
+
+#[tokio::test]
+async fn recommend_skill_prefers_matching_skill() {
+    let server = make_server();
+    let excel = make_skill_capability(
+        "skill:excel-automation",
+        "excel-automation",
+        "Build spreadsheet workflows and Excel reports from CSV data.",
+        "listed",
+    );
+    let web = make_skill_capability(
+        "skill:web-research",
+        "web-research",
+        "Browse websites and summarize online sources.",
+        "listed",
+    );
+
+    server
+        .with_global_store(|store| {
+            store.hub_register(&excel).map_err(|e| e.to_string())?;
+            store.hub_register(&web).map_err(|e| e.to_string())?;
+            Ok(())
+        })
+        .expect("register skills");
+
+    let result = server
+        .recommend_skill(Parameters(RecommendSkillParams {
+            query: "make an excel spreadsheet report from csv exports".to_string(),
+            host: Some("codex".to_string()),
+            limit: 3,
+            include_uncallable: false,
+        }))
+        .await
+        .expect("recommend_skill should succeed");
+    let json: Value = serde_json::from_str(&result).expect("json");
+    let skills = json["skills"].as_array().expect("skills array");
+    assert!(
+        !skills.is_empty(),
+        "expected at least one skill recommendation"
+    );
+    assert_eq!(skills[0]["id"], "skill:excel-automation");
+    assert_eq!(
+        skills[0]["suggested_tool_name"],
+        json!("tachi_skill_excel_automation")
+    );
+}
+
+#[tokio::test]
+async fn recommend_capability_skips_hidden_capabilities_by_default() {
+    let server = make_server();
+    let hidden = make_skill_capability(
+        "skill:hidden-playbook",
+        "hidden-playbook",
+        "Handle sensitive internal incident playbooks.",
+        "hidden",
+    );
+    let visible = make_skill_capability(
+        "skill:incident-playbook",
+        "incident-playbook",
+        "Handle incident response playbooks.",
+        "listed",
+    );
+
+    server
+        .with_global_store(|store| {
+            store.hub_register(&hidden).map_err(|e| e.to_string())?;
+            store.hub_register(&visible).map_err(|e| e.to_string())?;
+            Ok(())
+        })
+        .expect("register capabilities");
+
+    let result = server
+        .recommend_capability(Parameters(RecommendCapabilityParams {
+            query: "incident playbook".to_string(),
+            host: None,
+            cap_type: Some("skill".to_string()),
+            limit: 5,
+            include_hidden: false,
+            include_uncallable: false,
+        }))
+        .await
+        .expect("recommend_capability should succeed");
+    let json: Value = serde_json::from_str(&result).expect("json");
+    let ids = json["recommendations"]
+        .as_array()
+        .expect("recommendations array")
+        .iter()
+        .filter_map(|row| row["id"].as_str())
+        .collect::<Vec<_>>();
+    assert!(ids.contains(&"skill:incident-playbook"));
+    assert!(!ids.contains(&"skill:hidden-playbook"));
+
+    let result = server
+        .recommend_capability(Parameters(RecommendCapabilityParams {
+            query: "incident playbook".to_string(),
+            host: None,
+            cap_type: Some("skill".to_string()),
+            limit: 5,
+            include_hidden: true,
+            include_uncallable: false,
+        }))
+        .await
+        .expect("recommend_capability include_hidden should succeed");
+    let json: Value = serde_json::from_str(&result).expect("json");
+    let ids = json["recommendations"]
+        .as_array()
+        .expect("recommendations array")
+        .iter()
+        .filter_map(|row| row["id"].as_str())
+        .collect::<Vec<_>>();
+    assert!(ids.contains(&"skill:hidden-playbook"));
+}
+
+#[tokio::test]
+async fn recommend_toolchain_infers_host_tools_and_projected_packs() {
+    let server = make_server();
+    let excel = make_skill_capability(
+        "skill:excel-automation",
+        "excel-automation",
+        "Build spreadsheet workflows and Excel reports from CSV data.",
+        "listed",
+    );
+
+    server
+        .with_global_store(|store| {
+            store.hub_register(&excel).map_err(|e| e.to_string())?;
+            store
+                .pack_register(&Pack {
+                    id: "obra/superexcel".to_string(),
+                    name: "SuperExcel".to_string(),
+                    source: "github:obra/superexcel".to_string(),
+                    version: "1.0.0".to_string(),
+                    description: "Excel and spreadsheet automation pack".to_string(),
+                    skill_count: 3,
+                    enabled: true,
+                    local_path: "/tmp/superexcel".to_string(),
+                    metadata: json!({
+                        "tags": ["excel", "spreadsheet", "csv"]
+                    })
+                    .to_string(),
+                    installed_at: Utc::now().to_rfc3339(),
+                    updated_at: Utc::now().to_rfc3339(),
+                })
+                .map_err(|e| e.to_string())?;
+            store
+                .projection_upsert(&AgentProjection {
+                    agent: "codex".to_string(),
+                    pack_id: "obra/superexcel".to_string(),
+                    enabled: true,
+                    projected_path: "/tmp/codex/superexcel".to_string(),
+                    skill_count: 3,
+                    synced_at: Utc::now().to_rfc3339(),
+                })
+                .map_err(|e| e.to_string())?;
+            Ok(())
+        })
+        .expect("seed capability registry");
+
+    let result = server
+        .recommend_toolchain(Parameters(RecommendToolchainParams {
+            query: "build an excel spreadsheet from csv exports".to_string(),
+            host: Some("codex".to_string()),
+            skill_limit: 3,
+            capability_limit: 3,
+            pack_limit: 3,
+        }))
+        .await
+        .expect("recommend_toolchain should succeed");
+    let json: Value = serde_json::from_str(&result).expect("json");
+    let host_tools = json["host_tools"]
+        .as_array()
+        .expect("host_tools array")
+        .iter()
+        .filter_map(|row| row.as_str())
+        .collect::<Vec<_>>();
+    assert!(host_tools.contains(&"python"));
+    assert!(host_tools.contains(&"filesystem"));
+    assert_eq!(json["packs"][0]["id"], "obra/superexcel");
+    assert_eq!(json["packs"][0]["projected_to_host"], true);
+    assert_eq!(json["skills"][0]["id"], "skill:excel-automation");
 }
 
 #[tokio::test]

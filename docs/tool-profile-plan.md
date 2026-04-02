@@ -1,5 +1,8 @@
 # Tool Profile & Host Surface Plan
 
+This document is the exposure-policy companion to [Kernel Surface V1](./kernel-surface-v1.md).  
+`Kernel Surface V1` defines the conceptual layers; this document defines how much of that surface each host sees by default.
+
 ## Goal
 
 Keep `Tachi` as the full kernel, but stop showing the full kernel to every host and every agent.
@@ -7,7 +10,7 @@ Keep `Tachi` as the full kernel, but stop showing the full kernel to every host 
 The target split is:
 
 - `Tachi`
-  - owns memory storage, graph maintenance, recall, capture, compaction, evolution, and admin/workflow primitives
+  - owns kernel, capability, runtime, workflow, and admin primitives
 - `OpenClaw`
   - owns hooks, runtime timing, section assembly, and agent-facing tool exposure
 - `IDE / direct MCP clients`
@@ -20,14 +23,17 @@ The target split is:
    - Memory graph access should stay read-only when we add a higher-level graph tool
 2. Runtime hooks stay internal.
    - `recall_context`, `capture_session`, and later `compact_context` are host/runtime APIs, not default agent tools
-3. Workflow tools are not kernel primitives.
+3. Capability selection should become a first-class public layer.
+   - `recommend_capability`, `recommend_skill`, and `recommend_toolchain` belong in the kernel surface
+   - but they should be added as a deliberate layer, not mixed into low-level memory or admin tools
+4. Workflow tools are not kernel primitives.
    - `ghost_*`, `post_card`, `check_inbox`, `update_card`, proposal review/project tools stay hidden unless a host or profile explicitly asks for them
-4. Filtering must only reduce exposure.
+5. Filtering must only reduce exposure.
    - Effective surface is the intersection of:
      - built-in host profile
      - `TACHI_EXPOSED_TOOLS`, if present
    - We should not let one layer widen another
-5. `agent_register.tool_filter` is deferred.
+6. `agent_register.tool_filter` is deferred.
    - The current in-process `agent_profile` state is shared too broadly for daemon-safe per-session tool filtering
    - Host-level profile selection is safe now; per-session runtime filters come later
 
@@ -38,6 +44,9 @@ The target split is:
 `Tachi` now understands four built-in profiles:
 
 - `ide`
+  - `recommend_capability`
+  - `recommend_skill`
+  - `recommend_toolchain`
   - `search_memory`
   - `save_memory`
   - `get_memory`
@@ -110,12 +119,31 @@ OpenClaw also forces `TACHI_PROFILE=runtime` when it launches the embedded MCP c
 
 Today this is a typed MCP/runtime primitive, not an OpenClaw hook integration yet. The current OpenClaw SDK only exposes `before_agent_start` and `agent_end`, so the actual `before_compaction` wiring is deferred until the host exposes that lifecycle event.
 
+### Capability recommendation primitive
+
+`Tachi` now exposes a first-pass capability layer:
+
+- `recommend_capability`
+- `recommend_skill`
+- `recommend_toolchain`
+
+Current behavior:
+
+- deterministic ranking over Hub capabilities
+- visibility/callability aware
+- host-aware scoring
+- Pack / projection-aware toolchain suggestions
+- simple host-tool inference for common task shapes
+
+OpenClaw does not expose these directly to the model yet. They are part of the kernel surface for direct MCP hosts and future adapter orchestration.
+
 ## Why This Split
 
 This keeps the model-facing surface small while preserving a rich kernel for:
 
 - OpenClaw hooks
 - IDE integrations
+- future capability recommendation
 - future compaction APIs
 - operator and workflow tooling
 
@@ -129,10 +157,14 @@ It also preserves compatibility for direct MCP clients that do not have a native
    - `compact.session_memory`
 2. Wire OpenClaw into `compact_context`
    - as soon as the SDK exposes a pre-compaction lifecycle hook
-3. Wire cron to queued evolution
+3. Harden the capability layer
+   - add richer outcome signals
+   - connect more pack / projection metadata
+   - add `prepare_capability_bundle`
+4. Wire cron to queued evolution
    - OpenClaw cron triggers Tachi evolution jobs
    - Tachi produces proposals and projection targets
-4. Revisit per-session filtering
+5. Revisit per-session filtering
    - Move runtime tool filters off shared server state before extending `agent_register`
 
 ## Verification

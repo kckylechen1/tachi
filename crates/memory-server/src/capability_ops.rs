@@ -1,0 +1,563 @@
+use super::*;
+use crate::hub_helpers::sanitize_skill_tool_name;
+use memory_core::{AgentProjection, HubCapability, Pack};
+use serde::Serialize;
+use serde_json::json;
+
+#[derive(Debug, Clone)]
+struct CapabilityRecord {
+    cap: HubCapability,
+    db: &'static str,
+    visibility: CapabilityVisibility,
+    callable: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct CapabilityRecommendation {
+    id: String,
+    cap_type: String,
+    name: String,
+    description: String,
+    db: String,
+    visibility: String,
+    callable: bool,
+    score: f64,
+    reasons: Vec<String>,
+    uses: u64,
+    avg_rating: f64,
+    suggested_tool_name: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct PackRecommendation {
+    id: String,
+    name: String,
+    description: String,
+    version: String,
+    projected_to_host: bool,
+    projected_path: Option<String>,
+    score: f64,
+    reasons: Vec<String>,
+}
+
+fn round3(value: f64) -> f64 {
+    (value * 1000.0).round() / 1000.0
+}
+
+fn dedup_strings(values: Vec<String>) -> Vec<String> {
+    let mut seen = HashSet::new();
+    let mut out = Vec::new();
+    for value in values {
+        let trimmed = value.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let key = trimmed.to_ascii_lowercase();
+        if seen.insert(key) {
+            out.push(trimmed.to_string());
+        }
+    }
+    out
+}
+
+fn normalize_host_label(raw: Option<&str>) -> Option<String> {
+    let raw = raw?.trim();
+    if raw.is_empty() {
+        return None;
+    }
+    let binding = raw.to_ascii_lowercase();
+    let normalized = match binding.as_str() {
+        "claude-code" | "claude" => "claude",
+        "cursor" => "cursor",
+        "codex" => "codex",
+        "openclaw" => "openclaw",
+        "opencode" => "opencode",
+        "gemini" => "gemini",
+        "trae" => "trae",
+        "antigravity" => "antigravity",
+        "kiro" => "kiro",
+        other => other,
+    };
+    Some(normalized.to_string())
+}
+
+fn tokenize_query(query: &str) -> Vec<String> {
+    let mut tokens = Vec::new();
+    let mut current = String::new();
+    for ch in query.chars() {
+        if ch.is_ascii_alphanumeric() || ch == '_' || ch == '-' {
+            current.push(ch.to_ascii_lowercase());
+        } else if !current.is_empty() {
+            if current.len() >= 2 {
+                tokens.push(std::mem::take(&mut current));
+            } else {
+                current.clear();
+            }
+        }
+    }
+    if !current.is_empty() && current.len() >= 2 {
+        tokens.push(current);
+    }
+    tokens.sort();
+    tokens.dedup();
+    tokens
+}
+
+fn telemetry_bonus(cap: &HubCapability, reasons: &mut Vec<String>) -> f64 {
+    let mut bonus = 0.0;
+    if cap.uses > 0 {
+        bonus += ((cap.uses as f64 + 1.0).ln()).min(2.0) * 0.2;
+        reasons.push("existing usage telemetry".to_string());
+    }
+    if cap.uses > 0 && cap.successes > 0 {
+        let success_rate = cap.successes as f64 / cap.uses as f64;
+        if success_rate >= 0.75 {
+            bonus += (success_rate - 0.5).min(0.4);
+            reasons.push(format!("success rate {:.0}%", success_rate * 100.0));
+        }
+    }
+    if cap.avg_rating > 0.0 {
+        bonus += (cap.avg_rating / 5.0) * 0.4;
+        reasons.push(format!("rating {:.1}/5", cap.avg_rating));
+    }
+    bonus
+}
+
+fn capability_score(
+    cap: &HubCapability,
+    visibility: CapabilityVisibility,
+    callable: bool,
+    query: &str,
+    host: Option<&str>,
+) -> Option<(f64, Vec<String>)> {
+    let query = query.trim().to_ascii_lowercase();
+    if query.is_empty() {
+        return None;
+    }
+    let tokens = tokenize_query(&query);
+    let id = cap.id.to_ascii_lowercase();
+    let name = cap.name.to_ascii_lowercase();
+    let desc = cap.description.to_ascii_lowercase();
+    let definition = cap.definition.to_ascii_lowercase();
+
+    let mut score = 0.0;
+    let mut reasons = Vec::new();
+
+    if id == query || name == query {
+        score += 10.0;
+        reasons.push("exact id/name match".to_string());
+    } else {
+        if name.contains(&query) {
+            score += 7.0;
+            reasons.push("name matches query".to_string());
+        }
+        if id.contains(&query) {
+            score += 6.0;
+            reasons.push("id matches query".to_string());
+        }
+        if desc.contains(&query) {
+            score += 5.0;
+            reasons.push("description matches query".to_string());
+        }
+    }
+
+    for token in &tokens {
+        if name.contains(token) {
+            score += 2.2;
+        }
+        if id.contains(token) {
+            score += 2.0;
+        }
+        if desc.contains(token) {
+            score += 1.4;
+        }
+        if definition.contains(token) {
+            score += 0.8;
+        }
+    }
+
+    if let Some(host) = host {
+        if id.contains(host)
+            || name.contains(host)
+            || desc.contains(host)
+            || definition.contains(host)
+        {
+            score += 1.2;
+            reasons.push(format!("mentions host '{}'", host));
+        }
+        if cap.cap_type.eq_ignore_ascii_case("skill") {
+            score += 0.2;
+        }
+    }
+
+    score += match visibility {
+        CapabilityVisibility::Listed => 0.3,
+        CapabilityVisibility::Discoverable => 0.15,
+        CapabilityVisibility::Hidden => -0.25,
+    };
+    if callable {
+        score += 0.35;
+    }
+
+    score += telemetry_bonus(cap, &mut reasons);
+
+    if score <= 0.0 {
+        None
+    } else {
+        Some((round3(score), dedup_strings(reasons)))
+    }
+}
+
+fn collect_capabilities(
+    server: &MemoryServer,
+    cap_type: Option<&str>,
+    include_hidden: bool,
+    include_uncallable: bool,
+) -> Result<Vec<CapabilityRecord>, String> {
+    let global_caps = server.with_global_store_read(|store| {
+        store
+            .hub_list(cap_type, true)
+            .map_err(|e| format!("hub list global: {e}"))
+    })?;
+    let project_caps = if server.has_project_db() {
+        server.with_project_store_read(|store| {
+            store
+                .hub_list(cap_type, true)
+                .map_err(|e| format!("hub list project: {e}"))
+        })?
+    } else {
+        Vec::new()
+    };
+
+    let mut out = Vec::new();
+    let mut seen = HashSet::<String>::new();
+
+    for (db, caps) in [("project", project_caps), ("global", global_caps)] {
+        for cap in caps {
+            if !seen.insert(cap.id.clone()) {
+                continue;
+            }
+            let visibility = capability_visibility_for_cap(&cap);
+            let callable = capability_callable(&cap);
+            if !include_hidden && visibility == CapabilityVisibility::Hidden {
+                continue;
+            }
+            if !include_uncallable && !callable {
+                continue;
+            }
+            out.push(CapabilityRecord {
+                cap,
+                db,
+                visibility,
+                callable,
+            });
+        }
+    }
+
+    Ok(out)
+}
+
+fn recommend_capabilities_inner(
+    server: &MemoryServer,
+    query: &str,
+    host: Option<&str>,
+    cap_type: Option<&str>,
+    limit: usize,
+    include_hidden: bool,
+    include_uncallable: bool,
+) -> Result<Vec<CapabilityRecommendation>, String> {
+    let host = normalize_host_label(host);
+    let mut ranked = collect_capabilities(server, cap_type, include_hidden, include_uncallable)?
+        .into_iter()
+        .filter_map(|record| {
+            let (score, reasons) = capability_score(
+                &record.cap,
+                record.visibility,
+                record.callable,
+                query,
+                host.as_deref(),
+            )?;
+            Some(CapabilityRecommendation {
+                id: record.cap.id.clone(),
+                cap_type: record.cap.cap_type.clone(),
+                name: record.cap.name.clone(),
+                description: record.cap.description.clone(),
+                db: record.db.to_string(),
+                visibility: record.visibility.as_str().to_string(),
+                callable: record.callable,
+                score,
+                reasons,
+                uses: record.cap.uses,
+                avg_rating: round3(record.cap.avg_rating),
+                suggested_tool_name: if record.cap.cap_type.eq_ignore_ascii_case("skill") {
+                    sanitize_skill_tool_name(&record.cap.id)
+                } else {
+                    None
+                },
+            })
+        })
+        .collect::<Vec<_>>();
+
+    ranked.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.id.cmp(&b.id))
+    });
+    ranked.truncate(limit.max(1));
+    Ok(ranked)
+}
+
+fn collect_enabled_packs(server: &MemoryServer) -> Result<Vec<Pack>, String> {
+    server.with_global_store_read(|store| {
+        store.pack_list(true).map_err(|e| format!("pack_list: {e}"))
+    })
+}
+
+fn collect_projections_for_host(
+    server: &MemoryServer,
+    host: Option<&str>,
+) -> Result<Vec<AgentProjection>, String> {
+    server.with_global_store_read(|store| {
+        store
+            .projection_list(host, None)
+            .map_err(|e| format!("projection_list: {e}"))
+    })
+}
+
+fn pack_score(
+    pack: &Pack,
+    query: &str,
+    projected: Option<&AgentProjection>,
+    host: Option<&str>,
+) -> Option<(f64, Vec<String>)> {
+    let query = query.trim().to_ascii_lowercase();
+    if query.is_empty() {
+        return None;
+    }
+    let tokens = tokenize_query(&query);
+    let haystack = format!(
+        "{} {} {} {}",
+        pack.id.to_ascii_lowercase(),
+        pack.name.to_ascii_lowercase(),
+        pack.description.to_ascii_lowercase(),
+        pack.metadata.to_ascii_lowercase()
+    );
+
+    let mut score = 0.0;
+    let mut reasons = Vec::new();
+
+    if haystack.contains(&query) {
+        score += 6.0;
+        reasons.push("pack metadata matches query".to_string());
+    }
+    for token in &tokens {
+        if haystack.contains(token) {
+            score += 1.5;
+        }
+    }
+    if let Some(projection) = projected {
+        score += 2.0;
+        reasons.push(format!("already projected to {}", projection.agent));
+    } else if let Some(host) = host {
+        if pack.metadata.to_ascii_lowercase().contains(host) {
+            score += 0.8;
+            reasons.push(format!("metadata mentions host '{}'", host));
+        }
+    }
+
+    if score <= 0.0 {
+        None
+    } else {
+        Some((round3(score), dedup_strings(reasons)))
+    }
+}
+
+fn recommend_packs_inner(
+    server: &MemoryServer,
+    query: &str,
+    host: Option<&str>,
+    limit: usize,
+) -> Result<Vec<PackRecommendation>, String> {
+    let host = normalize_host_label(host);
+    let packs = collect_enabled_packs(server)?;
+    let projections = collect_projections_for_host(server, host.as_deref())?;
+    let by_pack = projections
+        .into_iter()
+        .map(|projection| (projection.pack_id.clone(), projection))
+        .collect::<HashMap<_, _>>();
+
+    let mut ranked = packs
+        .into_iter()
+        .filter_map(|pack| {
+            let projection = by_pack.get(&pack.id);
+            let (score, reasons) = pack_score(&pack, query, projection, host.as_deref())?;
+            Some(PackRecommendation {
+                id: pack.id.clone(),
+                name: pack.name.clone(),
+                description: pack.description.clone(),
+                version: pack.version.clone(),
+                projected_to_host: projection.is_some(),
+                projected_path: projection.map(|p| p.projected_path.clone()),
+                score,
+                reasons,
+            })
+        })
+        .collect::<Vec<_>>();
+
+    ranked.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.id.cmp(&b.id))
+    });
+    ranked.truncate(limit.max(1));
+    Ok(ranked)
+}
+
+fn infer_host_tools(query: &str) -> Vec<String> {
+    let query = query.to_ascii_lowercase();
+    let mut tools = Vec::new();
+
+    let push = |tools: &mut Vec<String>, name: &str| {
+        if !tools.iter().any(|existing| existing == name) {
+            tools.push(name.to_string());
+        }
+    };
+
+    if ["excel", "spreadsheet", "csv", "sheet", "table"]
+        .iter()
+        .any(|needle| query.contains(needle))
+    {
+        push(&mut tools, "python");
+        push(&mut tools, "filesystem");
+    }
+    if ["browser", "scrape", "crawl", "website", "web"]
+        .iter()
+        .any(|needle| query.contains(needle))
+    {
+        push(&mut tools, "browser");
+        push(&mut tools, "filesystem");
+    }
+    if ["code", "test", "refactor", "build", "debug"]
+        .iter()
+        .any(|needle| query.contains(needle))
+    {
+        push(&mut tools, "filesystem");
+        push(&mut tools, "shell");
+    }
+    if ["image", "screenshot", "vision", "pdf"]
+        .iter()
+        .any(|needle| query.contains(needle))
+    {
+        push(&mut tools, "browser");
+        push(&mut tools, "filesystem");
+    }
+    if tools.is_empty() {
+        push(&mut tools, "filesystem");
+    }
+
+    tools
+}
+
+pub(super) async fn handle_recommend_capability(
+    server: &MemoryServer,
+    params: RecommendCapabilityParams,
+) -> Result<String, String> {
+    let results = recommend_capabilities_inner(
+        server,
+        &params.query,
+        params.host.as_deref(),
+        params.cap_type.as_deref(),
+        params.limit.max(1),
+        params.include_hidden,
+        params.include_uncallable,
+    )?;
+
+    serde_json::to_string(&json!({
+        "query": params.query,
+        "host": normalize_host_label(params.host.as_deref()),
+        "recommendations": results,
+        "count": results.len(),
+    }))
+    .map_err(|e| format!("serialize: {e}"))
+}
+
+pub(super) async fn handle_recommend_skill(
+    server: &MemoryServer,
+    params: RecommendSkillParams,
+) -> Result<String, String> {
+    let results = recommend_capabilities_inner(
+        server,
+        &params.query,
+        params.host.as_deref(),
+        Some("skill"),
+        params.limit.max(1),
+        false,
+        params.include_uncallable,
+    )?;
+
+    serde_json::to_string(&json!({
+        "query": params.query,
+        "host": normalize_host_label(params.host.as_deref()),
+        "skills": results,
+        "count": results.len(),
+    }))
+    .map_err(|e| format!("serialize: {e}"))
+}
+
+pub(super) async fn handle_recommend_toolchain(
+    server: &MemoryServer,
+    params: RecommendToolchainParams,
+) -> Result<String, String> {
+    let host = normalize_host_label(params.host.as_deref());
+    let skills = recommend_capabilities_inner(
+        server,
+        &params.query,
+        host.as_deref(),
+        Some("skill"),
+        params.skill_limit.max(1),
+        false,
+        false,
+    )?;
+    let capabilities = recommend_capabilities_inner(
+        server,
+        &params.query,
+        host.as_deref(),
+        None,
+        params.capability_limit.max(1),
+        false,
+        false,
+    )?
+    .into_iter()
+    .filter(|rec| rec.cap_type != "skill")
+    .take(params.capability_limit.max(1))
+    .collect::<Vec<_>>();
+    let packs = recommend_packs_inner(server, &params.query, host.as_deref(), params.pack_limit)?;
+    let host_tools = infer_host_tools(&params.query);
+
+    let mut rationale = Vec::new();
+    if let Some(top) = skills.first() {
+        rationale.push(format!("Top skill match: {}", top.id));
+    }
+    if let Some(top) = capabilities.first() {
+        rationale.push(format!("Supporting capability: {}", top.id));
+    }
+    if let Some(top) = packs.first() {
+        rationale.push(format!("Relevant pack: {}", top.id));
+    }
+    if !host_tools.is_empty() {
+        rationale.push(format!("Suggested host tools: {}", host_tools.join(", ")));
+    }
+
+    serde_json::to_string(&json!({
+        "query": params.query,
+        "host": host,
+        "skills": skills,
+        "capabilities": capabilities,
+        "packs": packs,
+        "host_tools": host_tools,
+        "rationale": rationale,
+    }))
+    .map_err(|e| format!("serialize: {e}"))
+}

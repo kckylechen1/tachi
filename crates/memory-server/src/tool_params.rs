@@ -420,6 +420,10 @@ fn default_capture_min_chars() -> usize {
     24
 }
 
+fn default_recommend_limit() -> usize {
+    5
+}
+
 fn default_compact_trigger() -> String {
     "token_pressure".to_string()
 }
@@ -549,6 +553,75 @@ pub(super) struct CompactContextParams {
     /// Whether Tachi should later persist durable facts from this window
     #[serde(default)]
     pub persist: bool,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub(super) struct RecommendCapabilityParams {
+    /// Natural language task or intent query
+    pub query: String,
+
+    /// Optional host/runtime name (e.g. openclaw, codex, trae)
+    #[serde(default)]
+    pub host: Option<String>,
+
+    /// Optional capability type filter: skill | plugin | mcp
+    #[serde(default)]
+    pub cap_type: Option<String>,
+
+    /// Max recommendations to return
+    #[serde(default = "default_recommend_limit")]
+    pub limit: usize,
+
+    /// Include hidden capabilities in ranking
+    #[serde(default)]
+    pub include_hidden: bool,
+
+    /// Include currently uncallable capabilities in ranking
+    #[serde(default)]
+    pub include_uncallable: bool,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub(super) struct RecommendSkillParams {
+    /// Natural language task or intent query
+    pub query: String,
+
+    /// Optional host/runtime name (e.g. openclaw, codex, trae)
+    #[serde(default)]
+    pub host: Option<String>,
+
+    /// Max skill recommendations to return
+    #[serde(default = "default_recommend_limit")]
+    pub limit: usize,
+
+    /// Include currently uncallable skills in ranking
+    #[serde(default)]
+    pub include_uncallable: bool,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub(super) struct RecommendToolchainParams {
+    /// Natural language task or intent query
+    pub query: String,
+
+    /// Optional host/runtime name (e.g. openclaw, codex, trae)
+    #[serde(default)]
+    pub host: Option<String>,
+
+    /// Max skill recommendations to include
+    #[serde(default = "default_recommend_limit")]
+    pub skill_limit: usize,
+
+    /// Max supporting capability recommendations to include
+    #[serde(default = "default_recommend_limit")]
+    pub capability_limit: usize,
+
+    /// Max pack recommendations to include
+    #[serde(default = "default_recommend_limit")]
+    pub pack_limit: usize,
 }
 
 fn default_virtual_binding_priority() -> i32 {

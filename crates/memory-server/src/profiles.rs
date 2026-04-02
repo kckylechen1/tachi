@@ -20,6 +20,9 @@ impl ToolProfile {
 }
 
 const IDE_TOOL_PATTERNS: &[&str] = &[
+    "recommend_capability",
+    "recommend_skill",
+    "recommend_toolchain",
     "search_memory",
     "save_memory",
     "get_memory",

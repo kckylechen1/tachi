@@ -15,6 +15,8 @@ The core rule is simple:
 - MCP / CLI / Agent SDK expose interfaces
 - host adapters stay thin
 
+The public architecture now also assumes a formal kernel surface. See [Kernel Surface V1](./kernel-surface-v1.md).
+
 OpenClaw is the first migration target, not the final architecture.
 
 ## Boundaries
@@ -29,6 +31,7 @@ Owns the canonical source of truth for:
 - agent profiles
 - evolution proposals
 - projection state
+- capability knowledge
 
 Owns the heavy model work:
 
@@ -50,6 +53,22 @@ Tachi may be called from:
 - future HTTP / daemon surfaces
 
 These are transport layers, not the business layer.
+
+### Kernel Surface
+
+Neural Foundry now assumes five outward-facing layers:
+
+1. `kernel`
+2. `capability`
+3. `runtime`
+4. `workflow`
+5. `admin`
+
+The key boundary is:
+
+`Tachi does not need to own all execution tools; it needs to understand, recommend, and orchestrate them.`
+
+This is the piece that turns Tachi from a memory server into a capability-aware runtime.
 
 ### Adapters
 
@@ -91,8 +110,11 @@ Completed:
 
 - canonical Foundry schema in `memory-core`
 - manual `synthesize_agent_evolution` tool
+- first-pass `Kernel Surface V1` docs
+- first-pass capability recommendation APIs: `recommend_capability`, `recommend_skill`, `recommend_toolchain`
 - `recall_context` online API in Tachi
 - `capture_session` online API in Tachi
+- `compact_context` online API in Tachi
 - Tachi-side rerank for recall results
 - Tachi-side extraction + embedding for captured session memories
 - first Foundry maintenance worker for `memory_rerank`, `memory_distill`, and `forget_sweep`
@@ -132,6 +154,7 @@ Evidence is broader than memory. It includes:
 - session outcomes
 - skill telemetry
 - profile snapshots
+- capability outcomes
 
 ### Agent profile
 
@@ -145,6 +168,18 @@ The canonical profile should capture:
 - memory policy
 - model policy
 - evolution proposals
+
+### Capability model
+
+Tachi should eventually maintain a canonical capability catalog for:
+
+- tools
+- skills
+- packs / superpacks
+- host extensions
+- preferred toolchains
+
+This catalog is not the same thing as the host’s execution tools. It is the layer Tachi uses to recommend and orchestrate the best path for a task.
 
 ### Projection
 
@@ -188,8 +223,11 @@ Status:
 
 Already done:
 
+- built-in host tool profiles now separate `ide`, `runtime`, `workflow`, and `admin`
+- direct MCP hosts can see the first-pass capability layer through `recommend_capability`, `recommend_skill`, and `recommend_toolchain`
 - online recall moved behind `recall_context`
 - session capture moved behind `capture_session`
+- compaction now has a typed `compact_context` runtime API, ready for host hook wiring
 - OpenClaw now prefers Tachi-side online APIs
 - OpenClaw `agent_end` delegates to `capture_session` instead of doing local model calls
 - failed capture windows are spooled locally and replayed on the next healthy Tachi connection
@@ -209,6 +247,7 @@ Still missing:
 - remove or further minimize local recall fallback in OpenClaw
 - move more capture maintenance decisions and heuristics into the offline worker pipeline
 - harden distill / forget policies beyond the current first-pass worker implementation
+- wire `compact_context` into actual host pre-compaction hooks once available
 
 ### Phase 3
 
@@ -236,6 +275,7 @@ Still missing:
 - connect OpenClaw cron and other adapters to the queued evolution path
 - add richer evidence ingestion for eval / tooluse / reflection bundles
 - feed approved proposals into projection instead of stopping at review state
+- deepen the public capability layer beyond deterministic first-pass ranking
 
 ### Phase 4
 
