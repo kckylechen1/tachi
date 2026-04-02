@@ -45,28 +45,24 @@ curl -fsSL https://raw.githubusercontent.com/kckylechen1/tachi/main/scripts/inst
 | `index.ts` | 插件入口：tools、hooks、agent-scoped stores、审计日志 |
 | `store.ts` | `MemoryStore` — MCP→NAPI 双后端 + `withBackend()` fallback |
 | `mcp-client.ts` | MCP stdio client — 多候选启动、连接恢复、JSON 解析 |
-| `extractor.ts` | LLM 结构化提取 + 输入清洗 + category-aware merge |
 | `config.ts` | 类型定义 + 默认配置（从环境变量读取） |
 | `constants.ts` | 环境加载：`.env` + 运行时环境变量 |
-| `reranker.ts` | Voyage rerank-2.5 重排序 |
 
 ## 环境变量
 
-将 `.env.example` 拷贝为 `.env`（项目根目录或插件目录均可），填入 API 密钥。
+将 `.env.example` 拷贝为 `.env`（项目根目录或插件目录均可），填入运行所需变量。
 插件运行时会自动从 `.env` 加载环境变量。
 
 | 变量 | 必填 | 说明 |
 |------|------|------|
-| `VOYAGE_API_KEY` | 是 | Voyage AI embedding + reranking |
-| `SILICONFLOW_API_KEY` | 是 | SiliconFlow LLM 提取 |
 | `TACHI_BIN` / `OPENCLAW_MEMORY_SERVER_BIN` | 否 | 显式指定 `tachi` / `memory-server` 二进制路径，优先于 PATH |
 | `OPENCLAW_MEMORY_BACKEND` | 否 | `mcp`（默认）或 `napi` |
-| `MEMORY_BRIDGE_EMBEDDING_MODEL` | 否 | 嵌入模型（默认 `voyage-4`） |
-| `MEMORY_BRIDGE_EMBEDDING_DIMENSION` | 否 | 嵌入维度（默认 1024） |
-| `MEMORY_BRIDGE_DEDUP_THRESHOLD` | 否 | 去重阈值（默认 0.95） |
-| `MEMORY_BRIDGE_MERGE_THRESHOLD` | 否 | 合并阈值（默认 0.85） |
+| `MEMORY_BRIDGE_CAPTURE_MIN_CHARS` | 否 | 自动捕获最小字符数阈值 |
+| `MEMORY_BRIDGE_CAPTURE_TRIGGERS` | 否 | 自动捕获关键词列表 |
 
 完整列表见 [`.env.example`](./.env.example)。
+
+记忆提炼、embedding、rerank 和 distill 所需的模型密钥现在应配置在 Tachi 侧，而不是 OpenClaw 插件侧。
 
 ## 注册的 Tools
 
@@ -84,7 +80,7 @@ curl -fsSL https://raw.githubusercontent.com/kckylechen1/tachi/main/scripts/inst
 | Hook | 说明 |
 |------|------|
 | `before_agent_start` | FTS-only 零延迟检索，注入 `<relevant-structured-memories>` 上下文 |
-| `agent_end` | 自动捕获：LLM 提取 → 嵌入 → 去重/合并 → 写入 |
+| `agent_end` | 自动捕获：会话窗口提交到 Tachi，后续维护由 Foundry worker 异步处理 |
 | `llm_input` / `llm_output` / `before_compaction` / `after_compaction` | usage + compaction 跟踪 |
 | `after_tool_call` | tooluse 样本、spawn 跟踪、sessions_spawn 审计 |
 | `session_end` / `tool_result_persist` / `subagent_spawned` / `subagent_ended` | snapshot、compact 注入、子代理生命周期审计 |

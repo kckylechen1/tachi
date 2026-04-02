@@ -202,6 +202,7 @@ Already done:
 - Foundry maintenance now tracks worker counters through `get_pipeline_status`
 - `recall_context` now enforces agent-scoped path policy server-side
 - default agent recall now pulls from both live agent memories and Foundry distill memories
+- OpenClaw repo source no longer ships local extractor / reranker runtime code paths
 
 Still missing:
 
