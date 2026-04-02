@@ -114,7 +114,7 @@ OpenClaw still keeps local fallback paths for:
 
 Tachi still keeps some inline maintenance in the online path for safety:
 
-- inline capture dedup / merge before worker handoff
+- capture extraction and first-write persistence before worker handoff
 
 That remaining compatibility layer is temporary and exists only to keep the plugin usable while the Tachi-side worker pipeline stabilizes.
 
@@ -193,11 +193,12 @@ Already done:
 - OpenClaw now prefers Tachi-side online APIs
 - OpenClaw `agent_end` delegates to `capture_session` instead of doing local model calls
 - failed capture windows are spooled locally and replayed on the next healthy Tachi connection
-- inline dedup / merge now runs inside Tachi `capture_session`
+- capture writes now hand off dedup / merge to Foundry maintenance workers
 - `recall_context` can auto-scope by `agent_id`, and OpenClaw now passes it through
 - OpenClaw `before_agent_start` uses `recall_context` first, with local FTS fallback only for resilience
 - user-initiated OpenClaw memory search now also degrades only to local FTS fallback instead of local embedding + rerank
 - `capture_session` now queues Foundry maintenance jobs for `memory_rerank`, `memory_distill`, and `forget_sweep`
+- capture entries that wait for background enrichment now re-enter Foundry maintenance after vectors land
 - Foundry maintenance now tracks worker counters through `get_pipeline_status`
 - `recall_context` now enforces agent-scoped path policy server-side
 - default agent recall now pulls from both live agent memories and Foundry distill memories
@@ -205,7 +206,7 @@ Already done:
 Still missing:
 
 - remove or further minimize local recall fallback in OpenClaw
-- move more inline dedup / merge and maintenance decisions into the offline worker pipeline
+- move more capture maintenance decisions and heuristics into the offline worker pipeline
 - harden distill / forget policies beyond the current first-pass worker implementation
 
 ### Phase 3

@@ -36,8 +36,8 @@ mod vault_ops;
 use crate::dlq_ops::{handle_dlq_list, handle_dlq_retry};
 use crate::foundry_ops::handle_synthesize_agent_evolution;
 use crate::foundry_runtime_ops::{
-    handle_capture_session, handle_recall_context, run_foundry_maintenance_worker,
-    FoundryMaintenanceItem, FoundryWorkerStats,
+    enqueue_foundry_capture_maintenance, handle_capture_session, handle_recall_context,
+    run_foundry_maintenance_worker, FoundryMaintenanceItem, FoundryWorkerStats,
 };
 use crate::ghost_ops::{
     handle_ghost_ack, handle_ghost_promote, handle_ghost_publish, handle_ghost_reflect,
@@ -141,6 +141,8 @@ struct EnrichmentItem {
     needs_summary: bool,
     target_db: DbScope,
     named_project: Option<String>,
+    foundry_agent_id: Option<String>,
+    foundry_path_prefix: Option<String>,
     revision: i64,
 }
 
@@ -770,7 +772,28 @@ impl MemoryServer {
                 };
 
                 match res {
-                    Ok(true) => {}
+                    Ok(true) => {
+                        if new_vec.is_some() {
+                            if let (Some(agent_id), Some(path_prefix)) = (
+                                item.foundry_agent_id.as_deref(),
+                                item.foundry_path_prefix.as_deref(),
+                            ) {
+                                if let Err(err) = enqueue_foundry_capture_maintenance(
+                                    self,
+                                    item.target_db,
+                                    item.named_project.clone(),
+                                    agent_id,
+                                    path_prefix,
+                                    &[item.id.clone()],
+                                ) {
+                                    eprintln!(
+                                        "[enrichment-batcher] failed to enqueue foundry maintenance for {}: {err}",
+                                        item.id
+                                    );
+                                }
+                            }
+                        }
+                    }
                     Ok(false) => eprintln!(
                         "[enrichment-batcher] discarded {} (revision changed)",
                         item.id

@@ -294,9 +294,14 @@ fn merge_capture_entries(
     }
 }
 
-fn capture_search_options(query_vec: Vec<f32>, path_prefix: Option<String>, vec_available: bool) -> SearchOptions {
+fn capture_search_options(
+    query_vec: Vec<f32>,
+    path_prefix: Option<String>,
+    vec_available: bool,
+    top_k: usize,
+) -> SearchOptions {
     SearchOptions {
-        top_k: 1,
+        top_k: top_k.max(1),
         path_prefix,
         query_vec: Some(query_vec),
         include_archived: false,
@@ -315,15 +320,16 @@ fn capture_search_options(query_vec: Vec<f32>, path_prefix: Option<String>, vec_
     }
 }
 
-fn find_similar_capture_entry(
+fn search_similar_capture_entries(
     server: &MemoryServer,
     target_db: DbScope,
     named_project: Option<&str>,
     path_prefix: &str,
     query_vec: &[f32],
-) -> Result<Option<memory_core::SearchResult>, String> {
+    top_k: usize,
+) -> Result<Vec<memory_core::SearchResult>, String> {
     if query_vec.is_empty() {
-        return Ok(None);
+        return Ok(Vec::new());
     }
 
     let search_action = |store: &mut MemoryStore| {
@@ -334,10 +340,11 @@ fn find_similar_capture_entry(
                     query_vec.to_vec(),
                     Some(path_prefix.to_string()),
                     store.vec_available,
+                    top_k,
                 )),
             )
             .map_err(|e| format!("Failed to search similar capture entry: {e}"))?;
-        Ok(results.into_iter().next())
+        Ok(results)
     };
 
     if let Some(project_name) = named_project {
@@ -374,6 +381,8 @@ fn queue_capture_enrichment(
     named_project: Option<String>,
     entry: &MemoryEntry,
     needs_summary: bool,
+    agent_id: Option<&str>,
+    path_prefix: Option<&str>,
 ) {
     let _ = server.enrich_tx.send(EnrichmentItem {
         id: entry.id.clone(),
@@ -382,6 +391,8 @@ fn queue_capture_enrichment(
         needs_summary,
         target_db,
         named_project,
+        foundry_agent_id: agent_id.map(ToString::to_string),
+        foundry_path_prefix: path_prefix.map(ToString::to_string),
         revision: entry.revision,
     });
 }
@@ -512,6 +523,26 @@ fn enqueue_capture_maintenance_jobs(
     }
 
     Ok(specs)
+}
+
+pub(super) fn enqueue_foundry_capture_maintenance(
+    server: &MemoryServer,
+    target_db: DbScope,
+    named_project: Option<String>,
+    agent_id: &str,
+    path_prefix: &str,
+    memory_ids: &[String],
+) -> Result<Vec<memory_core::FoundryJobSpec>, String> {
+    enqueue_capture_maintenance_jobs(
+        server,
+        target_db,
+        named_project,
+        agent_id,
+        path_prefix,
+        memory_ids,
+        0,
+        0,
+    )
 }
 
 fn with_foundry_store<T>(
@@ -660,22 +691,24 @@ async fn process_memory_rerank_job(
             continue;
         };
 
-        let neighbors = with_foundry_store_read(server, item, |store| {
-            store
-                .search(
-                    "",
-                    Some(capture_search_options(
-                        vector.clone(),
-                        Some(item.path_prefix.clone()),
-                        store.vec_available,
-                    )),
-                )
-                .map_err(|e| format!("Failed to rerank neighbors for {}: {e}", entry.id))
-        })?;
+        let neighbors = search_similar_capture_entries(
+            server,
+            item.target_db,
+            item.named_project.as_deref(),
+            &item.path_prefix,
+            &vector,
+            FOUNDRY_RELATED_LIMIT + 2,
+        )?;
 
+        let mut best_neighbor: Option<memory_core::SearchResult> = None;
         let related = neighbors
             .into_iter()
             .filter(|row| row.entry.id != entry.id)
+            .inspect(|row| {
+                if best_neighbor.is_none() {
+                    best_neighbor = Some(row.clone());
+                }
+            })
             .take(FOUNDRY_RELATED_LIMIT)
             .map(|row| {
                 json!({
@@ -686,6 +719,44 @@ async fn process_memory_rerank_job(
                 })
             })
             .collect::<Vec<_>>();
+
+        if let Some(similar) = best_neighbor {
+            let similarity = similar.score.vector;
+            if similarity >= CAPTURE_DEDUP_THRESHOLD {
+                let changed = with_foundry_store(server, item, |store| {
+                    store
+                        .archive_memory(&entry.id)
+                        .map_err(|e| format!("Failed to archive duplicate memory {}: {e}", entry.id))
+                })?;
+                if changed {
+                    updated += 1;
+                }
+                continue;
+            }
+
+            if similarity >= CAPTURE_MERGE_THRESHOLD {
+                let merged = merge_capture_entries(&similar.entry, &entry, similarity);
+                persist_capture_entry(server, item.target_db, item.named_project.as_deref(), &merged)?;
+                let changed = with_foundry_store(server, item, |store| {
+                    store
+                        .archive_memory(&entry.id)
+                        .map_err(|e| format!("Failed to archive merged memory {}: {e}", entry.id))
+                })?;
+                if changed {
+                    updated += 1;
+                }
+                queue_capture_enrichment(
+                    server,
+                    item.target_db,
+                    item.named_project.clone(),
+                    &merged,
+                    true,
+                    item.job.target_agent_id.as_deref(),
+                    Some(&item.path_prefix),
+                );
+                continue;
+            }
+        }
 
         if related.is_empty() {
             continue;
@@ -829,6 +900,8 @@ async fn process_memory_distill_job(
         item.named_project.clone(),
         &distill_entry,
         false,
+        None,
+        None,
     );
 
     Ok(Some(memory_id))
@@ -1403,52 +1476,24 @@ pub(super) async fn handle_capture_session(
         .collect::<Vec<_>>();
 
     let mut saved_ids = Vec::new();
-    let mut merged_ids = Vec::new();
-    let mut duplicate_ids = Vec::new();
 
     for entry in &entries {
-        let mut persisted_entry = entry.clone();
-        let mut queue_enrichment = embeddings.is_none();
-        let mut was_merged = false;
-
-        if let Some(ref vector) = entry.vector {
-            if let Some(similar) = find_similar_capture_entry(
-                server,
-                target_db,
-                named_project.as_deref(),
-                &base_path,
-                vector,
-            )? {
-                let similarity = similar.score.vector;
-                if similarity >= CAPTURE_DEDUP_THRESHOLD {
-                    duplicate_ids.push(similar.entry.id);
-                    continue;
-                }
-                if similarity >= CAPTURE_MERGE_THRESHOLD {
-                    persisted_entry = merge_capture_entries(&similar.entry, entry, similarity);
-                    queue_enrichment = true;
-                    was_merged = true;
-                    merged_ids.push(persisted_entry.id.clone());
-                }
-            }
-        }
-
-        persist_capture_entry(server, target_db, named_project.as_deref(), &persisted_entry)?;
-        if queue_enrichment {
+        persist_capture_entry(server, target_db, named_project.as_deref(), entry)?;
+        if embeddings.is_none() {
             queue_capture_enrichment(
                 server,
                 target_db,
                 named_project.clone(),
-                &persisted_entry,
-                was_merged,
+                entry,
+                false,
+                Some(&params.agent_id),
+                Some(&base_path),
             );
         }
-        saved_ids.push(persisted_entry.id.clone());
+        saved_ids.push(entry.id.clone());
     }
 
     let saved_ids = dedup_strings(saved_ids);
-    let merged_ids = dedup_strings(merged_ids);
-    let duplicate_ids = dedup_strings(duplicate_ids);
     let maintenance_jobs = enqueue_capture_maintenance_jobs(
         server,
         target_db,
@@ -1456,17 +1501,17 @@ pub(super) async fn handle_capture_session(
         &params.agent_id,
         &base_path,
         &saved_ids,
-        merged_ids.len(),
-        duplicate_ids.len(),
+        0,
+        0,
     )?;
 
     let mut response = serde_json::Map::new();
     response.insert("status".into(), json!("completed"));
     response.insert("captured".into(), json!(saved_ids.len()));
     response.insert("ids".into(), json!(saved_ids));
-    response.insert("merged_ids".into(), json!(merged_ids));
-    response.insert("duplicate_ids".into(), json!(duplicate_ids));
-    response.insert("duplicates_skipped".into(), json!(duplicate_ids.len()));
+    response.insert("merged_ids".into(), json!(Vec::<String>::new()));
+    response.insert("duplicate_ids".into(), json!(Vec::<String>::new()));
+    response.insert("duplicates_skipped".into(), json!(0));
     response.insert("maintenance_jobs".into(), json!(maintenance_jobs));
     response.insert("db".into(), json!(target_db.as_str()));
     response.insert("path_prefix".into(), json!(base_path));
