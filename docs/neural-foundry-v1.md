@@ -246,7 +246,19 @@ Add projection engine:
 
 Status:
 
-- not started
+- foundations in progress
+
+Already done:
+
+- `project_agent_profile` can load persisted proposals, filter them by approval state, and project them into host documents in memory
+- projection is section-aware for markdown-backed targets, so approved proposals can replace or append specific sections instead of rewriting whole files
+- `write=true` can write projected content back to disk and mark the applied proposals as `applied`
+
+Still missing:
+
+- connect approved proposals to adapter-specific projection flows instead of manual tool invocation
+- expand projection beyond markdown document sections into richer policy/config targets
+- add stronger safeguards for concurrent manual edits before enabling broader automatic write-back
 
 ## First Deliverable
 
@@ -272,7 +284,7 @@ The next implementation slice should stay focused on finishing the OpenClaw-firs
 
 - add `agent_evolution` worker jobs that consume profile docs, reflections, evals, and tooluse evidence
 - add proposal storage and approval gates
-- add section-aware projection back into `AGENTS.md`, `IDENTITY.md`, and policy files
+- wire approved proposals into adapter-specific projection flows for `AGENTS.md`, `IDENTITY.md`, and policy files
 
 ### Exit criteria for the current migration stage
 

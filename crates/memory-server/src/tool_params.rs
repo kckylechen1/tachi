@@ -1246,6 +1246,29 @@ pub(super) struct ReviewAgentEvolutionProposalParams {
     pub note: Option<String>,
 }
 
+#[allow(dead_code)]
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub(super) struct ProjectAgentProfileParams {
+    /// Canonical target agent id
+    pub agent_id: String,
+
+    /// Current host documents that should receive approved proposals
+    #[serde(default)]
+    pub documents: Vec<AgentEvolutionDocumentParams>,
+
+    /// Optional subset of persisted proposal ids to project
+    #[serde(default)]
+    pub proposal_ids: Vec<String>,
+
+    /// If true, only project approved proposals (default: true)
+    #[serde(default = "default_true")]
+    pub approved_only: bool,
+
+    /// If true, write projected content back to document paths on disk
+    #[serde(default)]
+    pub write: bool,
+}
+
 // ─── Pack System Params ─────────────────────────────────────────────────────
 
 #[allow(dead_code)]

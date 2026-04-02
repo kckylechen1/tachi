@@ -36,7 +36,8 @@ mod vault_ops;
 use crate::dlq_ops::{handle_dlq_list, handle_dlq_retry};
 use crate::foundry_ops::{
     handle_list_agent_evolution_proposals, handle_queue_agent_evolution,
-    handle_review_agent_evolution_proposal, handle_synthesize_agent_evolution,
+    handle_project_agent_profile, handle_review_agent_evolution_proposal,
+    handle_synthesize_agent_evolution,
 };
 use crate::foundry_runtime_ops::{
     enqueue_foundry_capture_maintenance, handle_capture_session, handle_recall_context,
@@ -347,6 +348,7 @@ const CACHE_INVALIDATING_TOOLS: &[&str] = &[
     "synthesize_agent_evolution",
     "queue_agent_evolution",
     "review_agent_evolution_proposal",
+    "project_agent_profile",
     "vc_register",
     "vc_bind",
     "hub_feedback",
@@ -1238,6 +1240,16 @@ impl MemoryServer {
         Parameters(params): Parameters<ReviewAgentEvolutionProposalParams>,
     ) -> Result<String, String> {
         handle_review_agent_evolution_proposal(self, params).await
+    }
+
+    #[tool(
+        description = "Project approved agent evolution proposals into host documents. Returns projected content and can optionally write back to disk paths."
+    )]
+    async fn project_agent_profile(
+        &self,
+        Parameters(params): Parameters<ProjectAgentProfileParams>,
+    ) -> Result<String, String> {
+        handle_project_agent_profile(self, params).await
     }
 
     #[tool(description = "View audit log of proxy tool calls through the Hub.")]

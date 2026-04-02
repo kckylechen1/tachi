@@ -306,6 +306,156 @@ fn proposal_record_from_row(
     })
 }
 
+fn load_agent_proposal_rows(
+    server: &MemoryServer,
+    agent_id: &str,
+    limit: usize,
+) -> Result<Vec<serde_json::Value>, String> {
+    let root = proposal_root(agent_id);
+    let (target_db, _warning) = resolve_foundry_write_scope(server);
+    server.with_store_for_scope_read(target_db, |store| {
+        store
+            .list_derived_by_source(AGENT_EVOLUTION_PROPOSAL_SOURCE, &root, limit)
+            .map_err(|e| format!("Failed to list agent evolution proposals: {e}"))
+    })
+}
+
+fn markdown_heading_title(line: &str) -> Option<String> {
+    let trimmed = line.trim();
+    if !trimmed.starts_with('#') {
+        return None;
+    }
+    let title = trimmed.trim_start_matches('#').trim();
+    if title.is_empty() {
+        None
+    } else {
+        Some(title.to_string())
+    }
+}
+
+fn apply_markdown_section_update(
+    content: &str,
+    section: Option<&str>,
+    suggested_value: &str,
+) -> String {
+    let replacement = suggested_value.trim();
+    if replacement.is_empty() {
+        return content.to_string();
+    }
+
+    let Some(section) = section.map(str::trim).filter(|section| !section.is_empty()) else {
+        if content.trim().is_empty() {
+            return format!("{replacement}\n");
+        }
+        return format!("{}\n\n{}\n", content.trim_end(), replacement);
+    };
+
+    let lines = content.lines().collect::<Vec<_>>();
+    let mut heading_index = None;
+    for (idx, line) in lines.iter().enumerate() {
+        if markdown_heading_title(line)
+            .map(|title| title == section)
+            .unwrap_or(false)
+        {
+            heading_index = Some(idx);
+            break;
+        }
+    }
+
+    if let Some(start_idx) = heading_index {
+        let mut end_idx = lines.len();
+        for idx in (start_idx + 1)..lines.len() {
+            if markdown_heading_title(lines[idx]).is_some() {
+                end_idx = idx;
+                break;
+            }
+        }
+
+        let mut rebuilt = Vec::new();
+        rebuilt.extend_from_slice(&lines[..=start_idx]);
+        rebuilt.push("");
+        rebuilt.extend(replacement.lines());
+        if end_idx < lines.len() {
+            rebuilt.push("");
+            rebuilt.extend_from_slice(&lines[end_idx..]);
+        }
+        return rebuilt.join("\n").trim_end().to_string() + "\n";
+    }
+
+    let mut suffix = String::new();
+    if !content.trim().is_empty() {
+        suffix.push_str(content.trim_end());
+        suffix.push_str("\n\n");
+    }
+    suffix.push_str(&format!("## {section}\n\n{replacement}\n"));
+    suffix
+}
+
+fn document_target_aliases(doc: &AgentEvolutionDocumentParams) -> Vec<String> {
+    let mut aliases = Vec::new();
+    if let Some(path) = &doc.path {
+        if let Some(name) = std::path::Path::new(path)
+            .file_name()
+            .and_then(|s| s.to_str())
+        {
+            aliases.push(name.to_ascii_lowercase());
+        }
+    }
+    let kind_alias = match parse_document_kind(&doc.kind) {
+        Ok(memory_core::AgentProfileDocumentKind::Identity) => Some("identity.md"),
+        Ok(memory_core::AgentProfileDocumentKind::Agents) => Some("agents.md"),
+        Ok(memory_core::AgentProfileDocumentKind::LatestTruths) => Some("latest_truths.md"),
+        Ok(memory_core::AgentProfileDocumentKind::RoutingPolicy) => Some("routing_policy.md"),
+        Ok(memory_core::AgentProfileDocumentKind::ToolPolicy) => Some("tool_policy.md"),
+        Ok(memory_core::AgentProfileDocumentKind::MemoryPolicy) => Some("memory_policy.md"),
+        _ => None,
+    };
+    if let Some(alias) = kind_alias {
+        aliases.push(alias.to_string());
+    }
+    aliases.sort();
+    aliases.dedup();
+    aliases
+}
+
+fn proposal_targets_document(
+    proposal: &memory_core::AgentEvolutionProposal,
+    doc: &AgentEvolutionDocumentParams,
+) -> bool {
+    let target = proposal.target.trim().to_ascii_lowercase();
+    if target.is_empty() {
+        return false;
+    }
+    document_target_aliases(doc)
+        .into_iter()
+        .any(|alias| alias == target)
+}
+
+fn write_document_if_requested(path: &str, content: &str) -> Result<(), String> {
+    std::fs::write(path, content)
+        .map_err(|e| format!("Failed to write projected document {path}: {e}"))
+}
+
+fn mark_proposal_applied(server: &MemoryServer, proposal_id: &str) -> Result<(), String> {
+    let reviewer = read_or_recover(&server.agent_profile, "agent_profile")
+        .as_ref()
+        .map(|profile| profile.agent_id.clone());
+    let mut review = load_review_state(server, proposal_id)?.unwrap_or_else(|| json!({}));
+    if let Some(obj) = review.as_object_mut() {
+        obj.insert("status".into(), json!("applied"));
+        obj.insert("applied_at".into(), json!(Utc::now().to_rfc3339()));
+        obj.insert("applied_by".into(), json!(reviewer));
+    }
+    let value_json = serde_json::to_string(&review)
+        .map_err(|e| format!("Failed to serialize applied proposal state: {e}"))?;
+    server.with_global_store(|store| {
+        store
+            .set_state(FOUNDRY_PROPOSAL_REVIEW_NAMESPACE, proposal_id, &value_json)
+            .map_err(|e| format!("Failed to persist applied proposal state: {e}"))?;
+        Ok(())
+    })
+}
+
 pub(super) async fn handle_synthesize_agent_evolution(
     server: &MemoryServer,
     params: SynthesizeAgentEvolutionParams,
@@ -482,6 +632,128 @@ pub(super) async fn handle_review_agent_evolution_proposal(
     .map_err(|e| format!("Failed to serialize proposal review response: {e}"))
 }
 
+pub(super) async fn handle_project_agent_profile(
+    server: &MemoryServer,
+    params: ProjectAgentProfileParams,
+) -> Result<String, String> {
+    if params.documents.is_empty() {
+        return Err("project_agent_profile requires at least one document".to_string());
+    }
+
+    let proposal_id_filter = params
+        .proposal_ids
+        .iter()
+        .map(|id| id.trim().to_string())
+        .filter(|id| !id.is_empty())
+        .collect::<std::collections::HashSet<_>>();
+    let rows = load_agent_proposal_rows(server, &params.agent_id, 100)?;
+
+    let mut proposal_records = Vec::<serde_json::Value>::new();
+    for row in rows {
+        let proposal_id = row
+            .get("id")
+            .and_then(|value| value.as_str())
+            .unwrap_or("")
+            .to_string();
+        if !proposal_id_filter.is_empty() && !proposal_id_filter.contains(&proposal_id) {
+            continue;
+        }
+        let review = load_review_state(server, &proposal_id)?;
+        let record = proposal_record_from_row(&row, review);
+        let status = record
+            .get("status")
+            .and_then(|value| value.as_str())
+            .unwrap_or("proposed");
+        if params.approved_only && status != "approved" {
+            continue;
+        }
+        proposal_records.push(record);
+    }
+
+    if proposal_records.is_empty() {
+        return serde_json::to_string(&json!({
+            "status": "skipped",
+            "reason": "no_matching_proposals",
+            "agent_id": params.agent_id,
+        }))
+        .map_err(|e| format!("Failed to serialize projection response: {e}"));
+    }
+
+    let mut projected_documents = Vec::<serde_json::Value>::new();
+    let mut applied_proposal_ids = std::collections::HashSet::<String>::new();
+
+    for doc in &params.documents {
+        let mut content = doc.content.clone();
+        let mut applied = Vec::<serde_json::Value>::new();
+        for record in &proposal_records {
+            let proposal_id = record
+                .get("proposal_id")
+                .and_then(|value| value.as_str())
+                .unwrap_or("")
+                .to_string();
+            let status = record
+                .get("status")
+                .and_then(|value| value.as_str())
+                .unwrap_or("proposed")
+                .to_string();
+            let Some(synthesis) = record.get("synthesis").cloned().and_then(|value| {
+                serde_json::from_value::<memory_core::AgentEvolutionSynthesis>(value).ok()
+            }) else {
+                continue;
+            };
+            for proposal in synthesis.proposals {
+                if !proposal_targets_document(&proposal, doc) {
+                    continue;
+                }
+                content = apply_markdown_section_update(
+                    &content,
+                    proposal.target_section.as_deref(),
+                    &proposal.suggested_value,
+                );
+                applied.push(json!({
+                    "proposal_id": proposal_id,
+                    "status": status,
+                    "title": proposal.title,
+                    "target_section": proposal.target_section,
+                }));
+                applied_proposal_ids.insert(proposal_id.clone());
+            }
+        }
+
+        let written = if params.write && !applied.is_empty() {
+            let path = doc.path.as_deref().ok_or_else(|| {
+                "project_agent_profile write=true requires document paths".to_string()
+            })?;
+            write_document_if_requested(path, &content)?;
+            true
+        } else {
+            false
+        };
+
+        projected_documents.push(json!({
+            "kind": doc.kind,
+            "path": doc.path,
+            "written": written,
+            "applied_proposals": applied,
+            "content": content,
+        }));
+    }
+
+    if params.write {
+        for proposal_id in &applied_proposal_ids {
+            mark_proposal_applied(server, proposal_id)?;
+        }
+    }
+
+    serde_json::to_string(&json!({
+        "status": "completed",
+        "agent_id": params.agent_id,
+        "applied_count": applied_proposal_ids.len(),
+        "documents": projected_documents,
+    }))
+    .map_err(|e| format!("Failed to serialize projection response: {e}"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -520,5 +792,22 @@ mod tests {
         assert_eq!(parse_review_status("rejected").unwrap(), "rejected");
         assert_eq!(parse_review_status("applied").unwrap(), "applied");
         assert!(parse_review_status("queued").is_err());
+    }
+
+    #[test]
+    fn apply_markdown_section_update_replaces_existing_section() {
+        let original = "# Identity\n\n## Routing\n\nold value\n\n## Other\n\nstay\n";
+        let updated = apply_markdown_section_update(original, Some("Routing"), "new value");
+        assert!(updated.contains("## Routing\n\nnew value"));
+        assert!(updated.contains("## Other\n\nstay"));
+        assert!(!updated.contains("old value"));
+    }
+
+    #[test]
+    fn apply_markdown_section_update_appends_missing_section() {
+        let updated =
+            apply_markdown_section_update("# Identity\n", Some("Memory Policy"), "write less");
+        assert!(updated.contains("## Memory Policy"));
+        assert!(updated.contains("write less"));
     }
 }
