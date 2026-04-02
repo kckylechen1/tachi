@@ -225,6 +225,7 @@ export class MemoryMcpClient {
     const env = {
       ...process.env,
       MEMORY_DB_PATH: this.dbPath,
+      TACHI_PROFILE: process.env.TACHI_PROFILE || "runtime",
     } as Record<string, string>;
     const candidates: LaunchConfig[] = [
       // First candidate: explicit global-db, no project db (clean isolation)
