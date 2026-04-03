@@ -30,7 +30,6 @@ type SearchOptions = {
   top_k?: number;
   candidates?: number;
   path_prefix?: string;
-  record_access?: boolean;
   weights?: { semantic: number; fts: number; symbolic: number; decay: number };
 };
 
@@ -289,7 +288,7 @@ export class MemoryMcpClient {
     const client = new Client(
       {
         name: "memory-hybrid-bridge",
-        version: "0.0.0",
+        version: "0.13.1",
       },
       {},
     );
@@ -529,6 +528,9 @@ export class MemoryMcpClient {
     estimated_tokens: number;
     queued_job_ids?: string[];
   }> {
+    if (!this.availableTools.has("compact_context")) {
+      throw new Error("compact_context tool is unavailable");
+    }
     return await this.callJson("compact_context", params);
   }
 

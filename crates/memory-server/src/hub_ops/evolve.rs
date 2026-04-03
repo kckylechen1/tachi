@@ -237,7 +237,11 @@ Respond with ONLY a JSON object (no markdown fences):
         "auto_activated": params.auto_activate,
         "description": new_description,
         "reasoning": reasoning,
-        "prompt_preview": if new_prompt.len() > 200 { &new_prompt[..200] } else { new_prompt }
+        "prompt_preview": if new_prompt.len() > 200 {
+            &new_prompt[..new_prompt.char_indices().nth(200).map(|(i, _)| i).unwrap_or(new_prompt.len())]
+        } else {
+            new_prompt
+        }
     }))
     .map_err(|e| format!("serialize: {e}"))
 }

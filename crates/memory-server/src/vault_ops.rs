@@ -280,7 +280,11 @@ fn select_vault_entry(
 
             let selected = match rotation.rotation_strategy.as_str() {
                 "round_robin" => {
-                    let idx = (rotation.current_index as usize - 1) % matching_keys.len();
+                    let idx = if rotation.current_index <= 0 {
+                        matching_keys.len() - 1
+                    } else {
+                        (rotation.current_index as usize - 1) % matching_keys.len()
+                    };
                     let new_rotation = VaultKeyRotation {
                         current_index: (rotation.current_index % matching_keys.len() as i64) + 1,
                         total_keys: matching_keys.len() as i64,

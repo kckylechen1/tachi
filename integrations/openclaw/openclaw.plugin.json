@@ -8,9 +8,6 @@
     "type": "object",
     "additionalProperties": true,
     "properties": {
-      "shadowStorePath": {
-        "type": "string"
-      },
       "auditLogPath": {
         "type": "string"
       },
