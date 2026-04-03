@@ -142,7 +142,15 @@ jobs:
 
       - name: Prepare npm package layout
         working-directory: crates/memory-node
-        run: npx napi prepublish -t npm --skip-gh-release
+        run: |
+          for target in \
+            x86_64-pc-windows-msvc \
+            x86_64-apple-darwin \
+            aarch64-apple-darwin \
+            x86_64-unknown-linux-gnu \
+            aarch64-unknown-linux-gnu; do
+            npx napi create-npm-dir --target "$target"
+          done
 
       - name: Download all artifacts
         uses: actions/download-artifact@v4
