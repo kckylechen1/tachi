@@ -109,7 +109,9 @@ Please configure the Tachi local memory MCP server:
 The server loads API keys from the `.env` file in the project root (see `.env.example`).
 Required providers:
 - Voyage API (Embedding + Rerank): https://dash.voyageai.com/
-- SiliconFlow (Extraction): https://cloud.siliconflow.cn/
+- At least one OpenAI-compatible chat provider for extraction / reasoning lanes
+  - SiliconFlow is the default extraction path used by the bundled examples
+  - Additional lane-specific providers can be configured via `EXTRACT_*`, `DISTILL_*`, `SUMMARY_*`, and `REASONING_*`
 
 IMPORTANT Database Safety Rules:
 - NEVER place the database file in a cloud-synced folder (iCloud, Dropbox, OneDrive, Google Drive). SQLite WAL mode is incompatible with network filesystems.
@@ -154,8 +156,9 @@ Please install the Tachi memory extension for OpenClaw:
    - `plugins.slots.memory` is set to `tachi`
 
 3. Configure API keys in the project root `.env` file (see `.env.example`):
-   - VOYAGE_API_KEY (Embedding + Rerank)
-   - SILICONFLOW_API_KEY (Extraction)
+   - `VOYAGE_API_KEY` for embedding + rerank
+   - `SILICONFLOW_API_KEY` for the default extraction lane
+   - Optional per-lane overrides: `EXTRACT_*`, `DISTILL_*`, `SUMMARY_*`, `REASONING_*`
 
 Operational notes:
 - Current OpenClaw runtime topology is per-agent: `data/agents/<agent>/memory.db`.
@@ -202,7 +205,7 @@ Operational notes:
 Tachi incorporates advanced reasoning components to maintain long-term logical consistency (Note: this pipeline is **disabled by default** to prioritize latency; enable it with `ENABLE_PIPELINE=true`):
 
 ### 1. The Causal Extraction Pipeline
-When an agent submits execution logs, an asynchronous worker utilizes **Qwen3.5-27B** via SiliconFlow to analyze the interaction and extract:
+When an agent submits execution logs, an asynchronous worker can route extraction, compaction, and evolution prompts through dedicated model lanes. The default extraction lane uses **Qwen3.5-27B** via SiliconFlow to analyze the interaction and extract:
 *   `Causes`: The events triggering the action.
 *   `Decisions`: The reasoning pathway and logic applied.
 *   `Results`: The concrete outcomes.
@@ -276,14 +279,23 @@ graph TD
 
 ## 🧩 Model Stack
 
-The following model stack is optimized to balance latency, quality, and cost for internal asynchronous workers:
+Tachi now exposes separate text lanes so you can tune extraction, compaction, summary, and reasoning independently.
 
-| Role | Recommended Model | Rationale |
-|------|-------------------|------------------|
-| **Embedding** | [Voyage-4](https://voyageai.com/) | 1024d vectors offering top-tier multilingual retrieval capabilities. |
-| **Extraction & Summarization** | [Qwen3.5-27B](https://cloud.siliconflow.cn/) (SiliconFlow) | High accuracy for structured JSON parsing and L0 fast-summarization. (Requires `ENABLE_PIPELINE=true`) |
-| **Distillation** | [Qwen3.5-27B](https://cloud.siliconflow.cn/) (SiliconFlow) | Unified model implementation for periodic global schema logic. (Same as above) |
-| **Async Client Libraries** | [`async-openai`](https://github.com/64bit/async-openai) + [`reqwest`](https://docs.rs/reqwest/) | Rust-native async HTTP clients for direct API integration within the MCP server. |
+Current benchmark-backed guidance:
+
+| Lane | Recommended Model | Why |
+|------|-------------------|-----|
+| **Embedding / Rerank** | [Voyage-4](https://voyageai.com/) | Best retrieval quality in local A/B tests; remains the default vector backbone. |
+| **Extract** | [Qwen3.5-27B](https://cloud.siliconflow.cn/) via SiliconFlow | Most reliable structured fact extraction in the current Tachi/OpenClaw benchmarks. |
+| **Distill** | MiniMax M2.7 (when available through a compatible gateway) | Best compaction fidelity and reusable context blocks in round-2 lane tests. |
+| **Summary** | MiniMax M2.7 (when available through a compatible gateway) | Strongest low-token status summaries while preserving useful signal density. |
+| **Reasoning / Skill Audit** | GLM-5.1 via Z.AI | Best architectural judgment, evolution prioritization, and skill audit final-pass decisions. |
+| **Fast Pre-Audit / Scout (Optional)** | Gemini Flash or MiniMax M2.7 | Useful for cheap first-pass scanning before a GLM final decision. |
+
+Implementation note:
+- The current Rust client speaks OpenAI-compatible chat completions directly.
+- If a provider is exposed as Anthropic-style messages in your host runtime, route it through a compatible gateway before pointing `DISTILL_*` / `SUMMARY_*` at it.
+- The default out-of-the-box release path remains fully usable with Voyage + SiliconFlow, while the lane configuration lets you override individual roles as your gateways mature.
 
 ---
 
@@ -325,12 +337,35 @@ Copy `.env.example` to `.env` in the root directory.
 # Core Embedding and Retrieval
 VOYAGE_API_KEY="your_voyage_key_here"
 
-# LLM Extractor & Distiller
+# Shared OpenAI-compatible default lane
 SILICONFLOW_API_KEY="your_siliconflow_key_here"
+SILICONFLOW_BASE_URL="https://api.siliconflow.cn/v1/chat/completions"
+SILICONFLOW_MODEL="Qwen/Qwen3.5-27B"
+
+# Optional per-lane overrides
+EXTRACT_API_KEY=""
+EXTRACT_BASE_URL=""
+EXTRACT_MODEL="Qwen/Qwen3.5-27B"
+
+DISTILL_API_KEY=""
+DISTILL_BASE_URL=""
+DISTILL_MODEL=""
+
+SUMMARY_API_KEY=""
+SUMMARY_BASE_URL=""
+SUMMARY_MODEL=""
+
+REASONING_API_KEY=""
+REASONING_BASE_URL=""
+REASONING_MODEL=""
 
 # Database path (Optional — auto-resolves to ~/.Tachi/global/memory.db + .Tachi/memory.db per project)
 MEMORY_DB_PATH="~/.Tachi/global/memory.db"
 ```
+
+Operational note:
+- The Rust release currently expects OpenAI-compatible chat-completions endpoints for lane overrides.
+- Host runtimes like OpenClaw may already know about Anthropic-style providers (for example MiniMax or Kimi). In that case, either keep those providers in the host for now or route them through an OpenAI-compatible gateway before wiring them into Tachi.
 
 ---
 

@@ -5,6 +5,29 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.13.0] - 2026-04-03
+
+### Added
+- **Neural Foundry V1 runtime**: introduced server-owned `recall_context`, `capture_session`, `compact_context`, `section_build`, `compact_rollup`, and `compact_session_memory` so memory capture, context compaction, and durable session artifacts live in Tachi instead of host adapters.
+- **Capability recommendation layer**: added `recommend_capability`, `recommend_skill`, `recommend_toolchain`, and `prepare_capability_bundle` to let Tachi recommend and package skills, packs, and host toolchains from one kernel surface.
+- **Agent evolution pipeline**: added proposal synthesis, queue/review/project tools for agent profile evolution, plus richer evidence ingestion from inline docs, file paths, and memory-query bundles.
+- **Read-only memory graph tool**: added `memory_graph` so agents can inspect graph neighborhoods without direct edge mutation access.
+- **Kernel surface docs**: documented `kernel / capability / runtime / workflow / admin` layers and lane benchmark round-2 guidance for model selection.
+
+### Changed
+- **OpenClaw became a thin adapter**: the OpenClaw integration now keeps only a small agent-facing tool surface (`memory_search`, `memory_save`, `memory_get`, `memory_graph`) while `before_agent_start` and `agent_end` delegate recall/capture back to Tachi.
+- **Tool exposure profiles**: built-in `ide`, `runtime`, `workflow`, and `admin` profiles now gate MCP tool exposure by host/runtime needs instead of exposing the full server by default.
+- **LLM lane configuration**: the Rust client now supports separate `EXTRACT_*`, `DISTILL_*`, `SUMMARY_*`, and `REASONING_*` environment slots on top of the shared `SILICONFLOW_*` fallback, preparing Tachi for per-lane model routing.
+- **CLI/server split cleanup**: `memory-server` moved CLI argument parsing, enrichment batching, and MCP pool logic into dedicated modules (`cli.rs`, `enrichment.rs`, `mcp_pool.rs`) to reduce `main.rs` churn.
+
+### Fixed
+- **OpenClaw / Opencode naming drift**: local configs now consistently refer to the memory kernel as `tachi`, and stale `sigil-node` package-lock remnants were removed from the live OpenClaw plugin copy.
+- **Projection and maintenance hardening**: proposal writes remain rooted, distilled-memory retention is recency-safe, and foundry maintenance claims include state fingerprints to avoid skipping post-enrichment reruns.
+
+### Tests
+- **`memory-server` suite**: `cargo test -p memory-server` now passes with 99 tests after the module split and Foundry lane work.
+- **OpenClaw build**: `npm --prefix integrations/openclaw run build` passes against the thin-adapter plugin.
+
 ## [0.12.3] - 2026-04-01
 
 ### Added
