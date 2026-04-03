@@ -140,6 +140,10 @@ jobs:
         working-directory: crates/memory-node
         run: npm install
 
+      - name: Prepare npm package layout
+        working-directory: crates/memory-node
+        run: npx napi prepublish -t npm
+
       - name: Download all artifacts
         uses: actions/download-artifact@v4
         with:
@@ -149,10 +153,9 @@ jobs:
         working-directory: crates/memory-node
         run: npx napi artifacts -d artifacts
 
-      - name: Verify prepublish output
+      - name: Verify package output
         working-directory: crates/memory-node
         run: |
-          npx napi prepublish -t npm
           echo "=== Checking platform sub-packages ==="
           for dir in npm/*/; do
             if [ -f "$dir/package.json" ]; then
