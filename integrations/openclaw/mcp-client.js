@@ -193,7 +193,7 @@ export class MemoryMcpClient {
         });
         const client = new Client({
             name: "memory-hybrid-bridge",
-            version: "0.13.1",
+            version: "0.14.0",
         }, {});
         await client.connect(transport);
         const listed = await client.listTools();
