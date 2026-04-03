@@ -142,7 +142,7 @@ jobs:
 
       - name: Prepare npm package layout
         working-directory: crates/memory-node
-        run: npx napi create-npm-dirs
+        run: npx napi prepublish -t npm --skip-gh-release
 
       - name: Download all artifacts
         uses: actions/download-artifact@v4
