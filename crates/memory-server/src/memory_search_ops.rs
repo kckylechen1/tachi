@@ -88,7 +88,7 @@ pub(super) async fn handle_save_memory(
     // the Voyage API in batch (up to 128 per request), dramatically
     // reducing API calls when the agent saves multiple memories in sequence.
     if needs_embedding || needs_summary {
-        let _ = server.enrich_tx.send(super::EnrichmentItem {
+        let _ = server.enrich_tx.try_send(super::EnrichmentItem {
             id: id.clone(),
             text: entry.text.clone(),
             needs_embedding,

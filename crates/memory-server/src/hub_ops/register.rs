@@ -241,30 +241,33 @@ pub(in crate) async fn handle_hub_register(
                             }
                         };
 
-                        // Auto-fill description if it was empty
+                        // Auto-fill description if it was empty — use spawn_blocking
+                        // to avoid holding the SQLite connection on the async runtime
+                        // and risking "database is locked" under concurrent writes.
                         if desc_empty {
                             if let Some(summary) = analysis_json["summary"].as_str() {
                                 let mut updated_cap = cap_clone;
                                 updated_cap.description = summary.to_string();
-                                let db_str = db_path.to_string_lossy();
-                                match MemoryStore::open(db_str.as_ref()) {
-                                    Ok(store) => {
-                                        if let Err(e) = store.hub_register(&updated_cap) {
+                                let db_str = db_path.to_string_lossy().to_string();
+                                let cap_id_inner = cap_id.clone();
+                                let _ = tokio::task::spawn_blocking(move || {
+                                    match MemoryStore::open(&db_str) {
+                                        Ok(store) => {
+                                            if let Err(e) = store.hub_register(&updated_cap) {
+                                                eprintln!(
+                                                    "[skill-analysis] failed to persist auto description for {}: {}",
+                                                    cap_id_inner, e
+                                                );
+                                            }
+                                        }
+                                        Err(e) => {
                                             eprintln!(
-                                                "[skill-analysis] failed to persist auto description for {}: {}",
-                                                cap_id, e
+                                                "[skill-analysis] failed to open DB for {} at '{}': {}",
+                                                cap_id_inner, db_str, e
                                             );
                                         }
                                     }
-                                    Err(e) => {
-                                        eprintln!(
-                                            "[skill-analysis] failed to open DB for {} at '{}': {}",
-                                            cap_id,
-                                            db_path.display(),
-                                            e
-                                        );
-                                    }
-                                }
+                                }).await;
                             }
                         }
                         eprintln!("[skill-analysis] {}: {:?}", cap_id, analysis_json);

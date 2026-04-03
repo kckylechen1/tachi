@@ -568,7 +568,7 @@ async fn handle_foundry_maintenance_item(
 
 pub(in crate) async fn run_foundry_maintenance_worker(
     server: MemoryServer,
-    mut rx: mpsc::UnboundedReceiver<FoundryMaintenanceItem>,
+    mut rx: mpsc::Receiver<FoundryMaintenanceItem>,
 ) {
     while let Some(item) = rx.recv().await {
         server.foundry_stats.queued.fetch_sub(1, Ordering::Relaxed);

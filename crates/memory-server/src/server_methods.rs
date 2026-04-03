@@ -20,7 +20,7 @@ impl MemoryServer {
         self.foundry_stats
             .queued
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        if self.foundry_tx.send(item).is_err() {
+        if self.foundry_tx.try_send(item).is_err() {
             self.foundry_stats
                 .queued
                 .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
@@ -801,6 +801,15 @@ impl MemoryServer {
                 .rate_limit_windows
                 .lock()
                 .unwrap_or_else(|e| e.into_inner());
+
+            // Evict stale sessions when map exceeds cap
+            if windows.len() > RATE_LIMIT_MAX_SESSIONS {
+                let cutoff = now - Duration::from_secs(120);
+                windows.retain(|_, deque| {
+                    deque.back().map_or(false, |&t| t >= cutoff)
+                });
+            }
+
             let window = windows
                 .entry(session_id.to_string())
                 .or_insert_with(VecDeque::new);
@@ -842,6 +851,15 @@ impl MemoryServer {
                 .rate_limit_bursts
                 .lock()
                 .unwrap_or_else(|e| e.into_inner());
+
+            // Evict stale burst keys when map exceeds cap
+            if bursts.len() > RATE_LIMIT_MAX_BURST_KEYS {
+                let cutoff = now - RATE_LIMIT_BURST_WINDOW;
+                bursts.retain(|_, deque| {
+                    deque.back().map_or(false, |&t| t >= cutoff)
+                });
+            }
+
             let stamps = bursts.entry(burst_key).or_insert_with(VecDeque::new);
 
             // Evict entries outside the burst window

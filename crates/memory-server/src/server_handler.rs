@@ -282,6 +282,25 @@ impl ServerHandler for MemoryServer {
             // ─── Phantom Tools: store result in cache ────────────────────
             if let (Some(key), Ok(ref res)) = (&cache_key, &result) {
                 if let Ok(mut cache) = self.tool_cache.lock() {
+                    // Evict expired entries when cache exceeds cap
+                    if cache.len() >= TOOL_CACHE_MAX_ENTRIES {
+                        cache.retain(|_, v| v.created_at.elapsed() < TOOL_CACHE_TTL);
+                        // If still over cap after TTL eviction, remove oldest entries
+                        if cache.len() >= TOOL_CACHE_MAX_ENTRIES {
+                            let mut oldest_key = None;
+                            let mut oldest_age = Duration::ZERO;
+                            for (k, v) in cache.iter() {
+                                let age = v.created_at.elapsed();
+                                if age > oldest_age {
+                                    oldest_age = age;
+                                    oldest_key = Some(k.clone());
+                                }
+                            }
+                            if let Some(k) = oldest_key {
+                                cache.remove(&k);
+                            }
+                        }
+                    }
                     cache.insert(
                         key.clone(),
                         CachedResult {

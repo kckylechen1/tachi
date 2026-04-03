@@ -169,6 +169,8 @@ impl DbScope {
 
 /// TTL for cached tool results (Phantom Tools)
 const TOOL_CACHE_TTL: Duration = Duration::from_secs(30);
+/// Maximum entries in the tool cache before LRU eviction kicks in
+const TOOL_CACHE_MAX_ENTRIES: usize = 256;
 const DEFAULT_MCP_DISCOVERY_TIMEOUT_MS: u64 = 10_000;
 
 // ─── Rate Limiter Constants ──────────────────────────────────────────────────
@@ -178,6 +180,16 @@ const DEFAULT_RATE_LIMIT_RPM: u64 = 0;
 const DEFAULT_RATE_LIMIT_BURST: u64 = 8;
 /// Burst detection window
 const RATE_LIMIT_BURST_WINDOW: Duration = Duration::from_secs(60);
+/// Maximum tracked sessions in rate limiter before stale eviction
+const RATE_LIMIT_MAX_SESSIONS: usize = 1024;
+/// Maximum tracked burst keys in rate limiter before stale eviction
+const RATE_LIMIT_MAX_BURST_KEYS: usize = 4096;
+
+// ─── Channel Backpressure ────────────────────────────────────────────────────
+/// Bounded channel capacity for enrichment batcher
+const ENRICH_CHANNEL_CAPACITY: usize = 512;
+/// Bounded channel capacity for foundry maintenance worker
+const FOUNDRY_CHANNEL_CAPACITY: usize = 256;
 
 /// Tools whose results can be cached (read-only, no side effects)
 const CACHEABLE_TOOLS: &[&str] = &[
@@ -321,9 +333,9 @@ struct MemoryServer {
     mcp_discovery_timeout: Duration,
     mcp_tool_exposure_mode: McpToolExposureMode,
     // ─── Enrichment Batcher ──────────────────────────────────────────────────
-    enrich_tx: mpsc::UnboundedSender<EnrichmentItem>,
+    enrich_tx: mpsc::Sender<EnrichmentItem>,
     // ─── Foundry Maintenance Worker ──────────────────────────────────────────
-    foundry_tx: mpsc::UnboundedSender<FoundryMaintenanceItem>,
+    foundry_tx: mpsc::Sender<FoundryMaintenanceItem>,
     foundry_stats: Arc<FoundryWorkerStats>,
     // ─── Vault (Encrypted Secret Storage) ────────────────────────────────────
     vault_key: Arc<StdRwLock<Option<[u8; 32]>>>,
@@ -415,8 +427,8 @@ impl MemoryServer {
             })
             .unwrap_or(McpToolExposureMode::Flatten);
 
-        let (enrich_tx, enrich_rx) = mpsc::unbounded_channel::<EnrichmentItem>();
-        let (foundry_tx, foundry_rx) = mpsc::unbounded_channel::<FoundryMaintenanceItem>();
+        let (enrich_tx, enrich_rx) = mpsc::channel::<EnrichmentItem>(ENRICH_CHANNEL_CAPACITY);
+        let (foundry_tx, foundry_rx) = mpsc::channel::<FoundryMaintenanceItem>(FOUNDRY_CHANNEL_CAPACITY);
         let foundry_stats = Arc::new(FoundryWorkerStats::default());
 
         // Build hot-swap state before moving project_store into the struct

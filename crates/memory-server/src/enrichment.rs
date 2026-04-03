@@ -25,7 +25,7 @@ impl MemoryServer {
     /// Flushes every ENRICH_FLUSH_INTERVAL_MS or when ENRICH_BATCH_MAX items accumulate.
     pub(super) async fn run_enrichment_batcher(
         server: MemoryServer,
-        mut rx: mpsc::UnboundedReceiver<EnrichmentItem>,
+        mut rx: mpsc::Receiver<EnrichmentItem>,
     ) {
         let mut batch: Vec<EnrichmentItem> = Vec::with_capacity(ENRICH_BATCH_MAX);
         let flush_interval = Duration::from_millis(ENRICH_FLUSH_INTERVAL_MS);
