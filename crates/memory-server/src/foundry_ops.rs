@@ -439,7 +439,7 @@ async fn run_agent_evolution_synthesis(
         .map_err(|e| format!("Failed to serialize synthesis request: {e}"))?;
     let response = server
         .llm
-        .call_llm(
+        .call_reasoning_llm(
             crate::prompts::AGENT_EVOLUTION_SYNTHESIS_PROMPT,
             &user,
             None,

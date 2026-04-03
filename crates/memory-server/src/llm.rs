@@ -1,21 +1,41 @@
 // llm.rs — LLM & Embedding client for memory server
 //
-// Uses raw reqwest for SiliconFlow (OpenAI-compatible) chat completions
-// to support `enable_thinking: false` for Qwen3 models.
+// Uses raw reqwest for OpenAI-compatible chat completions.
+// SiliconFlow/Qwen still gets `enable_thinking: false` to avoid empty content.
 
 use reqwest::header::{AUTHORIZATION, CONTENT_TYPE};
 use serde_json::Value;
 use std::time::Duration;
 
+const DEFAULT_CHAT_BASE_URL: &str = "https://api.siliconflow.cn/v1/chat/completions";
+const DEFAULT_EXTRACT_MODEL: &str = "Qwen/Qwen3.5-27B";
+const DEFAULT_REASONING_MODEL: &str = "Qwen/Qwen3.5-27B";
+
+#[derive(Clone)]
+struct ChatLaneConfig {
+    base_url: String,
+    api_key: String,
+    model: String,
+}
+
+#[derive(Clone, Copy)]
+enum ChatLane {
+    Extract,
+    Distill,
+    Reasoning,
+    Summary,
+}
+
 /// LLM and embedding client using Voyage API for embeddings
-/// and SiliconFlow (OpenAI-compatible) for chat completions.
+/// and lane-specific OpenAI-compatible chat providers.
 #[derive(Clone)]
 pub struct LlmClient {
     http: reqwest::Client,
     voyage_api_key: String,
-    siliconflow_api_key: String,
-    siliconflow_model: String,
-    summary_model: String,
+    extract: ChatLaneConfig,
+    distill: ChatLaneConfig,
+    reasoning: ChatLaneConfig,
+    summary: ChatLaneConfig,
 }
 
 impl LlmClient {
@@ -26,14 +46,61 @@ impl LlmClient {
         let voyage_api_key = std::env::var("VOYAGE_API_KEY")
             .map_err(|_| "VOYAGE_API_KEY environment variable not set".to_string())?;
 
-        let siliconflow_api_key = std::env::var("SILICONFLOW_API_KEY")
-            .map_err(|_| "SILICONFLOW_API_KEY environment variable not set".to_string())?;
+        let extract = Self::load_lane(
+            &["EXTRACT_API_KEY", "SILICONFLOW_API_KEY"],
+            &["EXTRACT_BASE_URL", "SILICONFLOW_BASE_URL", "EXTRACTOR_BASE_URL"],
+            &["EXTRACT_MODEL", "SILICONFLOW_MODEL", "EXTRACTOR_MODEL"],
+            DEFAULT_EXTRACT_MODEL,
+        )?;
 
-        let siliconflow_model =
-            std::env::var("SILICONFLOW_MODEL").unwrap_or_else(|_| "Qwen/Qwen3.5-27B".to_string());
+        let distill = Self::load_lane(
+            &["DISTILL_API_KEY", "SUMMARY_API_KEY", "SILICONFLOW_API_KEY"],
+            &[
+                "DISTILL_BASE_URL",
+                "SUMMARY_BASE_URL",
+                "SILICONFLOW_BASE_URL",
+                "EXTRACTOR_BASE_URL",
+            ],
+            &[
+                "DISTILL_MODEL",
+                "SUMMARY_MODEL",
+                "SILICONFLOW_MODEL",
+                "EXTRACTOR_MODEL",
+            ],
+            &extract.model,
+        )?;
 
-        let summary_model =
-            std::env::var("SUMMARY_MODEL").unwrap_or_else(|_| siliconflow_model.clone());
+        let reasoning = Self::load_lane(
+            &["REASONING_API_KEY", "SILICONFLOW_API_KEY"],
+            &[
+                "REASONING_BASE_URL",
+                "SILICONFLOW_BASE_URL",
+                "EXTRACTOR_BASE_URL",
+            ],
+            &["REASONING_MODEL", "SILICONFLOW_MODEL", "EXTRACTOR_MODEL"],
+            DEFAULT_REASONING_MODEL,
+        )?;
+
+        let summary = Self::load_lane(
+            &[
+                "SUMMARY_API_KEY",
+                "DISTILL_API_KEY",
+                "SILICONFLOW_API_KEY",
+            ],
+            &[
+                "SUMMARY_BASE_URL",
+                "DISTILL_BASE_URL",
+                "SILICONFLOW_BASE_URL",
+                "EXTRACTOR_BASE_URL",
+            ],
+            &[
+                "SUMMARY_MODEL",
+                "DISTILL_MODEL",
+                "SILICONFLOW_MODEL",
+                "EXTRACTOR_MODEL",
+            ],
+            &distill.model,
+        )?;
 
         let http = reqwest::Client::builder()
             .timeout(Duration::from_secs(60))
@@ -43,10 +110,54 @@ impl LlmClient {
         Ok(Self {
             http,
             voyage_api_key,
-            siliconflow_api_key,
-            siliconflow_model,
-            summary_model,
+            extract,
+            distill,
+            reasoning,
+            summary,
         })
+    }
+
+    fn load_lane(
+        api_key_envs: &[&str],
+        base_url_envs: &[&str],
+        model_envs: &[&str],
+        default_model: &str,
+    ) -> Result<ChatLaneConfig, String> {
+        let api_key = Self::first_env(api_key_envs)
+            .ok_or_else(|| format!("Missing API key env vars: {}", api_key_envs.join(", ")))?;
+        let base_url = Self::first_env(base_url_envs)
+            .unwrap_or_else(|| DEFAULT_CHAT_BASE_URL.to_string());
+        let model =
+            Self::first_env(model_envs).unwrap_or_else(|| default_model.trim().to_string());
+
+        Ok(ChatLaneConfig {
+            base_url,
+            api_key,
+            model,
+        })
+    }
+
+    fn first_env(keys: &[&str]) -> Option<String> {
+        keys.iter().find_map(|key| {
+            std::env::var(key)
+                .ok()
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty())
+        })
+    }
+
+    fn lane(&self, lane: ChatLane) -> &ChatLaneConfig {
+        match lane {
+            ChatLane::Extract => &self.extract,
+            ChatLane::Distill => &self.distill,
+            ChatLane::Reasoning => &self.reasoning,
+            ChatLane::Summary => &self.summary,
+        }
+    }
+
+    fn should_disable_thinking(base_url: &str, model: &str) -> bool {
+        base_url.to_ascii_lowercase().contains("siliconflow")
+            && model.to_ascii_lowercase().contains("qwen")
     }
 
     /// Call Voyage-4 embedding API and return 1024-dim f32 vector.
@@ -193,9 +304,8 @@ impl LlmClient {
         Ok(out)
     }
 
-    /// Call SiliconFlow chat API via raw reqwest.
-    /// Includes `enable_thinking: false` for Qwen3 models to prevent
-    /// empty `content` when the model puts output in `reasoning_content`.
+    /// Backward-compatible generic chat call.
+    /// Defaults to the reasoning lane unless a caller uses a lane-specific helper.
     pub async fn call_llm(
         &self,
         system: &str,
@@ -204,30 +314,91 @@ impl LlmClient {
         temperature: f32,
         max_tokens: u32,
     ) -> Result<String, String> {
-        let model = model.unwrap_or(&self.siliconflow_model);
+        self.call_lane_llm(ChatLane::Reasoning, system, user, model, temperature, max_tokens)
+            .await
+    }
 
-        let body = serde_json::json!({
+    pub async fn call_extract_llm(
+        &self,
+        system: &str,
+        user: &str,
+        model: Option<&str>,
+        temperature: f32,
+        max_tokens: u32,
+    ) -> Result<String, String> {
+        self.call_lane_llm(ChatLane::Extract, system, user, model, temperature, max_tokens)
+            .await
+    }
+
+    pub async fn call_distill_llm(
+        &self,
+        system: &str,
+        user: &str,
+        model: Option<&str>,
+        temperature: f32,
+        max_tokens: u32,
+    ) -> Result<String, String> {
+        self.call_lane_llm(ChatLane::Distill, system, user, model, temperature, max_tokens)
+            .await
+    }
+
+    pub async fn call_reasoning_llm(
+        &self,
+        system: &str,
+        user: &str,
+        model: Option<&str>,
+        temperature: f32,
+        max_tokens: u32,
+    ) -> Result<String, String> {
+        self.call_lane_llm(ChatLane::Reasoning, system, user, model, temperature, max_tokens)
+            .await
+    }
+
+    pub async fn call_summary_llm(
+        &self,
+        system: &str,
+        user: &str,
+        model: Option<&str>,
+        temperature: f32,
+        max_tokens: u32,
+    ) -> Result<String, String> {
+        self.call_lane_llm(ChatLane::Summary, system, user, model, temperature, max_tokens)
+            .await
+    }
+
+    async fn call_lane_llm(
+        &self,
+        lane: ChatLane,
+        system: &str,
+        user: &str,
+        model_override: Option<&str>,
+        temperature: f32,
+        max_tokens: u32,
+    ) -> Result<String, String> {
+        let lane_cfg = self.lane(lane);
+        let model = model_override.unwrap_or(&lane_cfg.model);
+
+        let mut body = serde_json::json!({
             "model": model,
             "messages": [
                 {"role": "system", "content": system},
                 {"role": "user", "content": user}
             ],
             "temperature": temperature,
-            "max_tokens": max_tokens,
-            "enable_thinking": false
+            "max_tokens": max_tokens
         });
+        if Self::should_disable_thinking(&lane_cfg.base_url, model) {
+            body["enable_thinking"] = Value::Bool(false);
+        }
 
         let mut last_err = String::new();
 
         for attempt in 1..=Self::MAX_ATTEMPTS {
             let resp = self
                 .http
-                .post("https://api.siliconflow.cn/v1/chat/completions")
+                .post(&lane_cfg.base_url)
                 .header(CONTENT_TYPE, "application/json")
-                .header(
-                    AUTHORIZATION,
-                    format!("Bearer {}", self.siliconflow_api_key),
-                )
+                .header(AUTHORIZATION, format!("Bearer {}", lane_cfg.api_key))
                 .json(&body)
                 .send()
                 .await;
@@ -326,10 +497,10 @@ impl LlmClient {
     /// Generate L0 summary using SUMMARY_PROMPT
     pub async fn generate_summary(&self, text: &str) -> Result<String, String> {
         match self
-            .call_llm(
+            .call_summary_llm(
                 crate::prompts::SUMMARY_PROMPT,
                 text,
-                Some(&self.summary_model),
+                None,
                 0.3,
                 100,
             )
@@ -346,7 +517,7 @@ impl LlmClient {
     /// Extract structured facts from text using EXTRACTION_PROMPT
     pub async fn extract_facts(&self, text: &str) -> Result<Vec<Value>, String> {
         let response = self
-            .call_llm(crate::prompts::EXTRACTION_PROMPT, text, None, 0.3, 2000)
+            .call_extract_llm(crate::prompts::EXTRACTION_PROMPT, text, None, 0.3, 2000)
             .await?;
         let json_str = Self::strip_code_fence(&response);
 
