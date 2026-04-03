@@ -193,7 +193,7 @@ export class MemoryMcpClient {
         });
         const client = new Client({
             name: "memory-hybrid-bridge",
-            version: "0.0.0",
+            version: "0.13.1",
         }, {});
         await client.connect(transport);
         const listed = await client.listTools();
@@ -384,6 +384,9 @@ export class MemoryMcpClient {
         return await this.callJson("capture_session", params);
     }
     async compactContext(params) {
+        if (!this.availableTools.has("compact_context")) {
+            throw new Error("compact_context tool is unavailable");
+        }
         return await this.callJson("compact_context", params);
     }
     async findSimilarMemory(queryVec, topK) {

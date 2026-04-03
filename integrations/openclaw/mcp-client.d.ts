@@ -19,7 +19,6 @@ type SearchOptions = {
     top_k?: number;
     candidates?: number;
     path_prefix?: string;
-    record_access?: boolean;
     weights?: {
         semantic: number;
         fts: number;
