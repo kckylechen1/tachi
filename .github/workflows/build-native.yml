@@ -142,7 +142,7 @@ jobs:
 
       - name: Prepare npm package layout
         working-directory: crates/memory-node
-        run: npx napi prepublish -t npm
+        run: npx napi create-npm-dirs
 
       - name: Download all artifacts
         uses: actions/download-artifact@v4
