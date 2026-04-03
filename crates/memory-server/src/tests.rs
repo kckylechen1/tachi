@@ -2670,12 +2670,10 @@ async fn prepare_capability_bundle_returns_primary_skill_and_section() {
         .filter_map(|row| row.as_str())
         .collect::<Vec<_>>();
     assert!(host_tools.contains(&"python"));
-    assert!(
-        json["bundle"]["section"]["block"]
-            .as_str()
-            .unwrap_or("")
-            .contains("Capability Bundle")
-    );
+    assert!(json["bundle"]["section"]["block"]
+        .as_str()
+        .unwrap_or("")
+        .contains("Capability Bundle"));
 }
 
 #[tokio::test]
@@ -2759,7 +2757,8 @@ async fn synthesize_agent_evolution_dry_run_loads_paths_and_memory_queries() {
     memory.path = "/openclaw/agent-yaya/tooluse".to_string();
     memory.topic = "tooluse".to_string();
     memory.summary = "Excel workflow succeeded via python and filesystem".to_string();
-    memory.text = "The Excel workflow succeeded when the agent used python plus filesystem.".to_string();
+    memory.text =
+        "The Excel workflow succeeded when the agent used python plus filesystem.".to_string();
     server
         .with_global_store(|store| store.upsert(&memory).map_err(|e| e.to_string()))
         .expect("seed query memory");
@@ -2810,18 +2809,14 @@ async fn synthesize_agent_evolution_dry_run_loads_paths_and_memory_queries() {
             .len(),
         2
     );
-    assert!(
-        json["request"]["documents"][0]["content"]
-            .as_str()
-            .unwrap_or("")
-            .contains("Mutable profile state")
-    );
-    assert!(
-        json["request"]["evidence"][1]["content"]
-            .as_str()
-            .unwrap_or("")
-            .contains("Excel workflow succeeded")
-    );
+    assert!(json["request"]["documents"][0]["content"]
+        .as_str()
+        .unwrap_or("")
+        .contains("Mutable profile state"));
+    assert!(json["request"]["evidence"][1]["content"]
+        .as_str()
+        .unwrap_or("")
+        .contains("Excel workflow succeeded"));
 
     let _ = std::fs::remove_dir_all(&temp_dir);
 }
@@ -2834,7 +2829,8 @@ async fn compact_session_memory_persists_rollup_and_signal_entries() {
             agent_id: "main".to_string(),
             conversation_id: "conv-1".to_string(),
             window_id: "window-1".to_string(),
-            compacted_text: "User prefers Tachi-managed memory and wants Excel-first workflows.".to_string(),
+            compacted_text: "User prefers Tachi-managed memory and wants Excel-first workflows."
+                .to_string(),
             salient_topics: vec!["memory".to_string(), "excel".to_string()],
             durable_signals: vec![
                 "User prefers Tachi-managed memory.".to_string(),
@@ -2851,12 +2847,10 @@ async fn compact_session_memory_persists_rollup_and_signal_entries() {
     let json: Value = serde_json::from_str(&result).expect("json");
     assert_eq!(json["status"], json!("completed"));
     assert_eq!(json["captured"].as_u64().unwrap_or(0), 3);
-    assert!(
-        json["section"]["block"]
-            .as_str()
-            .unwrap_or("")
-            .contains("Durable Session Memory")
-    );
+    assert!(json["section"]["block"]
+        .as_str()
+        .unwrap_or("")
+        .contains("Durable Session Memory"));
 }
 
 #[tokio::test]

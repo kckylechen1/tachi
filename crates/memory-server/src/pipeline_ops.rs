@@ -39,9 +39,7 @@ pub(super) async fn handle_extract_facts(
                         "extract_source": source.clone(),
                     }),
                 );
-                let Some(entry) =
-                    fact_to_entry(fact, "extraction", metadata)
-                else {
+                let Some(entry) = fact_to_entry(fact, "extraction", metadata) else {
                     continue;
                 };
                 if store.upsert(&entry).is_ok() {

@@ -186,6 +186,26 @@ impl MemoryStore {
         Ok(rows)
     }
 
+    /// List entries that are missing summaries.
+    /// Returns (id, text, revision) tuples.
+    pub fn entries_missing_summaries(&self) -> Result<Vec<(String, String, i64)>, MemoryError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, text, revision FROM memories
+             WHERE trim(summary) = ''
+             ORDER BY rowid",
+        )?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, i64>(2)?,
+                ))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
     /// Get total memory count and vector count.
     pub fn vector_stats(&self) -> Result<(i64, i64), MemoryError> {
         let total: i64 = self

@@ -65,12 +65,22 @@ export const memoryHybridBridgePlugin = {
 
   register(api: OpenClawPluginApi) {
     const config = bridgeConfigSchema.parse(api.pluginConfig);
-    const dbPath = resolveConfigPath(api, config.dbPath);
-    let initClient: Promise<MemoryMcpClient> | null = null;
+    const configuredDbPath = resolveConfigPath(api, config.dbPath);
+    const clientCache = new Map<string, Promise<MemoryMcpClient>>();
 
-    function ensureClient(): Promise<MemoryMcpClient> {
+    function resolveAgentDbPath(agentId?: string): string {
+      const normalizedAgentId = (agentId || "main").trim() || "main";
+      const baseDir = path.dirname(configuredDbPath);
+      const dbName = path.basename(configuredDbPath) || "memory.db";
+      return path.resolve(baseDir, `agents/${normalizedAgentId}/${dbName}`);
+    }
+
+    function ensureClient(agentId?: string): Promise<MemoryMcpClient> {
+      const dbPath = resolveAgentDbPath(agentId);
+      let initClient = clientCache.get(dbPath);
       if (!initClient) {
         initClient = Promise.resolve(new MemoryMcpClient(dbPath, api.logger));
+        clientCache.set(dbPath, initClient);
       }
       return initClient;
     }
@@ -78,9 +88,10 @@ export const memoryHybridBridgePlugin = {
     async function runWithClient<T>(
       operation: string,
       run: (client: MemoryMcpClient) => Promise<T>,
+      agentId?: string,
     ): Promise<{ ok: true; value: T } | { ok: false; error: unknown }> {
       try {
-        const client = await ensureClient();
+        const client = await ensureClient(agentId);
         return { ok: true, value: await run(client) };
       } catch (error) {
         api.logger.warn(`tachi: ${operation} unavailable: ${String(error)}`);
@@ -88,7 +99,11 @@ export const memoryHybridBridgePlugin = {
       }
     }
 
-    async function performSearch(query: string, searchTopK?: number): Promise<SearchResult> {
+    async function performSearch(
+      query: string,
+      searchTopK?: number,
+      agentId?: string,
+    ): Promise<SearchResult> {
       const topK = searchTopK ?? config.topK;
       const result = await runWithClient("search_memory", async (client) => {
         const { docs, scores } = await client.searchMemory(query, undefined, {
@@ -99,7 +114,7 @@ export const memoryHybridBridgePlugin = {
           final_score: scores[entry.id] ?? 0,
           entry,
         }));
-      });
+      }, agentId);
 
       if (!result.ok) {
         return { available: false, message: "Tachi MCP client unavailable." };
@@ -116,6 +131,7 @@ export const memoryHybridBridgePlugin = {
           agent_id: agentId,
           exclude_topics: ["imsg_conversation"],
         }),
+        agentId,
       );
 
       return result.ok ? result.value : null;
@@ -180,14 +196,15 @@ export const memoryHybridBridgePlugin = {
         maxResults: Type.Optional(Type.Number({ description: "Max results (default: 6)" })),
         minScore: Type.Optional(Type.Number({ description: "Min score threshold (default: 0)" })),
       }),
-      async execute(_toolCallId, params) {
+      async execute(_toolCallId, params, _signal, context) {
         const { query, maxResults, minScore } = params as {
           query: string;
           maxResults?: number;
           minScore?: number;
         };
 
-        const result = await performSearch(query, maxResults ?? config.topK);
+        const agentId = (context as any)?.agentId || "main";
+        const result = await performSearch(query, maxResults ?? config.topK, agentId);
         if (!result.available) {
           return formatSearchResults(result);
         }
@@ -213,10 +230,15 @@ export const memoryHybridBridgePlugin = {
         from: Type.Optional(Type.Number({ description: "Ignored (compat)" })),
         lines: Type.Optional(Type.Number({ description: "Ignored (compat)" })),
       }),
-      async execute(_toolCallId, params) {
+      async execute(_toolCallId, params, _signal, context) {
         const rawPath = (params as { path: string }).path;
         const entryId = rawPath.replace(/^(?:shadow-store|memory)\//, "");
-        const result = await runWithClient("get_memory", async (client) => await client.getMemory(entryId));
+        const agentId = (context as any)?.agentId || "main";
+        const result = await runWithClient(
+          "get_memory",
+          async (client) => await client.getMemory(entryId),
+          agentId,
+        );
 
         if (!result.ok) {
           return textResult("Tachi MCP client unavailable.", {
@@ -300,7 +322,7 @@ export const memoryHybridBridgePlugin = {
             metadata: { source_refs: [] },
           });
           return { ok: true };
-        });
+        }, agentId);
 
         return result.ok
           ? textResult(JSON.stringify(result.value))
@@ -318,20 +340,24 @@ export const memoryHybridBridgePlugin = {
         top_k: Type.Optional(Type.Number({ description: "Query seed count (default: 5)" })),
         depth: Type.Optional(Type.Number({ description: "Traversal depth (default: 1)" })),
       }),
-      async execute(_toolCallId, params) {
+      async execute(_toolCallId, params, _signal, context) {
         const { memory_id, query, top_k, depth } = params as {
           memory_id?: string;
           query?: string;
           top_k?: number;
           depth?: number;
         };
-        const result = await runWithClient("memory_graph", async (client) =>
-          await client.memoryGraph({
-            memory_id,
-            query,
-            top_k,
-            depth,
-          }),
+        const agentId = (context as any)?.agentId || "main";
+        const result = await runWithClient(
+          "memory_graph",
+          async (client) =>
+            await client.memoryGraph({
+              memory_id,
+              query,
+              top_k,
+              depth,
+            }),
+          agentId,
         );
 
         return result.ok
@@ -379,15 +405,18 @@ export const memoryHybridBridgePlugin = {
         context?.sessionKey || event?.conversationId || event?.sessionId || `openclaw:${agentId}`;
       const turnId = event?.turnId || event?.runId || `agent_end:${Date.now()}`;
 
-      const result = await runWithClient("capture_session", async (client) =>
-        await client.captureSession({
-          conversation_id: conversationId,
-          turn_id: turnId,
-          agent_id: agentId,
-          messages: recentMessages,
-          path_prefix: `/openclaw/agent-${agentId}`,
-          scope: "project",
-        }),
+      const result = await runWithClient(
+        "capture_session",
+        async (client) =>
+          await client.captureSession({
+            conversation_id: conversationId,
+            turn_id: turnId,
+            agent_id: agentId,
+            messages: recentMessages,
+            path_prefix: `/openclaw/agent-${agentId}`,
+            scope: "project",
+          }),
+        agentId,
       );
 
       if (!result.ok) {
@@ -400,9 +429,9 @@ export const memoryHybridBridgePlugin = {
       start: () => api.logger.info("tachi: service started"),
       stop: async () => {
         api.logger.info("tachi: shutting down...");
-        const clientPromise = initClient;
-        initClient = null;
-        if (clientPromise) {
+        const clientPromises = Array.from(clientCache.values());
+        clientCache.clear();
+        for (const clientPromise of clientPromises) {
           try {
             const client = await clientPromise;
             await client.close();

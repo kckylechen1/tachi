@@ -182,6 +182,9 @@ async fn run_cli_command(
         Commands::BackfillVectors { .. } => {
             unreachable!("BackfillVectors is handled in async context before this point")
         }
+        Commands::BackfillSummaries { .. } => {
+            unreachable!("BackfillSummaries is handled in async context before this point")
+        }
         Commands::Hub { action } => {
             let store = open_cli_store(db_path)?;
             match action {
@@ -379,6 +382,15 @@ async fn tokio_main(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             global_db_path.clone()
         };
         return run_backfill_vectors(&target_path, *batch_size, *dry_run).await;
+    }
+
+    if let Commands::BackfillSummaries { db, dry_run } = &command {
+        let target_path = if let Some(p) = db {
+            expand_user_path(p.to_string_lossy().as_ref())
+        } else {
+            global_db_path.clone()
+        };
+        return run_backfill_summaries(&target_path, *dry_run).await;
     }
 
     if !matches!(command, Commands::Serve) {
@@ -898,5 +910,68 @@ async fn run_backfill_vectors(
 
     let (total, final_vec) = store.vector_stats()?;
     println!("\n✅ Done! Vectors: {with_vec} → {final_vec} / {total}");
+    Ok(())
+}
+
+/// Backfill missing summaries for a given DB.
+async fn run_backfill_summaries(
+    db_path: &PathBuf,
+    dry_run: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use crate::llm::LlmClient;
+
+    let db_str = db_path.to_str().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("DB path contains invalid UTF-8: {}", db_path.display()),
+        )
+    })?;
+
+    let store = MemoryStore::open(db_str)?;
+    let total = store.stats(false)?.total;
+    let entries = store.entries_missing_summaries()?;
+    let missing = entries.len();
+    let with_summary = total.saturating_sub(missing as u64);
+
+    println!("DB:        {}", db_path.display());
+    println!("Total:     {total}");
+    println!("Summaries: {with_summary}");
+    println!("Missing:   {missing}");
+
+    if missing == 0 {
+        println!("\n✅ All entries have summaries!");
+        return Ok(());
+    }
+
+    if dry_run {
+        println!("\n(dry-run mode, no changes made)");
+        return Ok(());
+    }
+
+    let llm = LlmClient::new().map_err(|e| format!("LLM client init failed: {e}"))?;
+
+    println!("\nBackfilling {missing} entries...\n");
+
+    drop(store);
+    let mut store = MemoryStore::open(db_str)?;
+    let mut processed = 0usize;
+
+    for (id, text, revision) in &entries {
+        let input: String = text.chars().take(8000).collect();
+        let summary = llm.generate_summary(&input).await?;
+
+        match store.update_enrichment_fields(id, Some(&summary), None, *revision) {
+            Ok(true) => {
+                processed += 1;
+                println!("  [{processed}/{missing}] ✓ {id}");
+            }
+            Ok(false) => eprintln!("  WARN: revision mismatch for {id}, skipped"),
+            Err(e) => eprintln!("  WARN: DB write failed for {id}: {e}"),
+        }
+    }
+
+    let final_missing = store.entries_missing_summaries()?.len();
+    let final_with_summary = total.saturating_sub(final_missing as u64);
+    println!("\n✅ Done! Summaries: {with_summary} → {final_with_summary} / {total}");
     Ok(())
 }

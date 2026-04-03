@@ -205,7 +205,13 @@ async fn publish_event(server: &MemoryServer, event_type: &str, message: &str) {
 
     let result = server.with_global_store(|store| {
         store
-            .ghost_publish_message(&msg_id, "clawdoctor", &payload_str, "clawdoctor", &timestamp)
+            .ghost_publish_message(
+                &msg_id,
+                "clawdoctor",
+                &payload_str,
+                "clawdoctor",
+                &timestamp,
+            )
             .map_err(|e| format!("ghost publish: {e}"))
     });
 
@@ -247,9 +253,8 @@ async fn save_incident_memory(server: &MemoryServer, text: &str) {
         vector: None,
     };
 
-    let result = server.with_global_store(|store| {
-        store.upsert(&entry).map_err(|e| format!("upsert: {e}"))
-    });
+    let result =
+        server.with_global_store(|store| store.upsert(&entry).map_err(|e| format!("upsert: {e}")));
 
     if let Err(e) = result {
         eprintln!("[clawdoctor] failed to save incident memory: {}", e);

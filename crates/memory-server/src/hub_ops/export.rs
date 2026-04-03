@@ -8,7 +8,7 @@ use std::collections::HashSet;
 /// - **openclaw**: `~/.openclaw/plugins/tachi-skills.json` with hook configuration
 /// - **cursor**: `.cursor/rules/<name>.mdc` rule files in the working directory
 /// - **generic**: Raw SKILL.md files to a specified directory
-pub(in crate) async fn handle_export_skills(
+pub(crate) async fn handle_export_skills(
     server: &MemoryServer,
     params: ExportSkillsParams,
 ) -> Result<String, String> {
@@ -59,8 +59,7 @@ pub(in crate) async fn handle_export_skills(
             match vis_filter.as_str() {
                 "listed" => vis == CapabilityVisibility::Listed,
                 "discoverable" => {
-                    vis == CapabilityVisibility::Discoverable
-                        || vis == CapabilityVisibility::Listed
+                    vis == CapabilityVisibility::Discoverable || vis == CapabilityVisibility::Listed
                 }
                 _ => true,
             }
@@ -227,8 +226,7 @@ fn export_for_openclaw(
         home.join(".openclaw").join("plugins")
     };
 
-    std::fs::create_dir_all(&output_dir)
-        .map_err(|e| format!("create {:?}: {e}", output_dir))?;
+    std::fs::create_dir_all(&output_dir).map_err(|e| format!("create {:?}: {e}", output_dir))?;
 
     // Build OpenClaw plugin manifest with skill hooks
     let skill_entries: Vec<serde_json::Value> = skills
@@ -294,8 +292,7 @@ fn export_for_cursor(
         PathBuf::from(".cursor").join("rules")
     };
 
-    std::fs::create_dir_all(&output_dir)
-        .map_err(|e| format!("create {:?}: {e}", output_dir))?;
+    std::fs::create_dir_all(&output_dir).map_err(|e| format!("create {:?}: {e}", output_dir))?;
 
     let mut exported = Vec::new();
     let mut errors = Vec::new();
@@ -385,8 +382,7 @@ fn export_for_generic(
         PathBuf::from("exported-skills")
     };
 
-    std::fs::create_dir_all(&output_dir)
-        .map_err(|e| format!("create {:?}: {e}", output_dir))?;
+    std::fs::create_dir_all(&output_dir).map_err(|e| format!("create {:?}: {e}", output_dir))?;
 
     let mut exported = Vec::new();
     let mut errors = Vec::new();

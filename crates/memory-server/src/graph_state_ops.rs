@@ -8,9 +8,12 @@ fn load_memory_entry(
 ) -> Result<Option<(MemoryEntry, DbScope)>, String> {
     if let Some(project_name) = project {
         let project_entry = server.with_named_project_store_read(project_name, |store| {
-            store
-                .get_with_options(id, include_archived)
-                .map_err(|e| format!("Failed to get memory from project '{}': {}", project_name, e))
+            store.get_with_options(id, include_archived).map_err(|e| {
+                format!(
+                    "Failed to get memory from project '{}': {}",
+                    project_name, e
+                )
+            })
         })?;
         if let Some(entry) = project_entry {
             return Ok(Some((entry, DbScope::Project)));
@@ -210,7 +213,10 @@ pub(super) async fn handle_memory_graph(
         for edge in current_edges {
             let key = format!(
                 "{}|{}|{}|{}",
-                edge.source_id, edge.target_id, edge.relation, scope.as_str()
+                edge.source_id,
+                edge.target_id,
+                edge.relation,
+                scope.as_str()
             );
             if seen_edge_keys.insert(key) {
                 edges.push(json!({

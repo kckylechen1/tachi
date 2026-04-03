@@ -1,5 +1,5 @@
-use super::*;
 use super::security_scan::normalize_review_status;
+use super::*;
 
 async fn refresh_mcp_capability_state(
     server: &MemoryServer,
@@ -46,7 +46,7 @@ async fn refresh_mcp_capability_state(
     Ok(updated_cap)
 }
 
-pub(in crate) async fn handle_hub_review(
+pub(crate) async fn handle_hub_review(
     server: &MemoryServer,
     params: HubReviewParams,
 ) -> Result<String, String> {
@@ -137,7 +137,7 @@ pub(in crate) async fn handle_hub_review(
     .map_err(|e| format!("serialize: {e}"))
 }
 
-pub(in crate) async fn handle_hub_set_active_version(
+pub(crate) async fn handle_hub_set_active_version(
     server: &MemoryServer,
     params: HubSetActiveVersionParams,
 ) -> Result<String, String> {
@@ -188,7 +188,7 @@ pub(in crate) async fn handle_hub_set_active_version(
     .map_err(|e| format!("serialize: {e}"))
 }
 
-pub(in crate) async fn handle_hub_set_enabled(
+pub(crate) async fn handle_hub_set_enabled(
     server: &MemoryServer,
     params: HubSetEnabledParams,
 ) -> Result<String, String> {

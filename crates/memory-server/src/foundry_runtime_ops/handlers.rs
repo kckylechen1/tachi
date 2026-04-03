@@ -1,8 +1,11 @@
-use super::*;
 use super::capture::*;
 use super::helpers::*;
 use super::maintenance::enqueue_capture_maintenance_jobs;
 use super::recall::*;
+use super::*;
+use regex::Regex;
+use std::collections::HashSet;
+use std::sync::OnceLock;
 
 pub(in crate) async fn handle_section_build(
     _server: &MemoryServer,
@@ -420,7 +423,10 @@ pub(in crate) async fn handle_compact_context(
     response.insert("compacted_text".into(), json!(compacted_text));
     response.insert("estimated_tokens".into(), json!(estimated_tokens));
     response.insert("target_tokens".into(), json!(params.target_tokens.max(32)));
-    response.insert("salient_topics".into(), json!(dedup_strings(draft.salient_topics)));
+    response.insert(
+        "salient_topics".into(),
+        json!(dedup_strings(draft.salient_topics)),
+    );
     response.insert(
         "durable_signals".into(),
         json!(dedup_strings(draft.durable_signals)),
@@ -428,10 +434,7 @@ pub(in crate) async fn handle_compact_context(
     response.insert("captured_memory_ids".into(), json!(Vec::<String>::new()));
     response.insert("queued_job_ids".into(), json!(Vec::<String>::new()));
     if params.persist {
-        response.insert(
-            "warning".into(),
-            json!("persist_requested_but_deferred"),
-        );
+        response.insert("warning".into(), json!("persist_requested_but_deferred"));
     }
 
     serde_json::to_string(&Value::Object(response))
@@ -536,6 +539,112 @@ pub(in crate) async fn handle_recall_context(
     .map_err(|e| format!("Failed to serialize recall_context response: {e}"))
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct BracketSelfEvolutionNote {
+    pub id: String,
+    pub text: String,
+    pub category: String,
+}
+
+fn bracket_note_regex() -> &'static Regex {
+    static REGEX: OnceLock<Regex> = OnceLock::new();
+    REGEX.get_or_init(|| Regex::new(r"（([^（）\r\n]{4,240})）|\(([^()\r\n]{4,240})\)").unwrap())
+}
+
+fn bracket_strategy_regexes() -> &'static [Regex] {
+    static REGEXES: OnceLock<Vec<Regex>> = OnceLock::new();
+    REGEXES
+        .get_or_init(|| {
+            [
+                r"原来.{0,20}(喜欢|不喜欢)",
+                r"记住了",
+                r"下次我要|下次我会",
+                r"以后我要|以后我会",
+                r"雷区",
+                r"更吃这一套|不吃这一套",
+                r"这样更有效|这种方式有用",
+                r"策略失败|无效",
+            ]
+            .into_iter()
+            .map(|pattern| Regex::new(pattern).unwrap())
+            .collect()
+        })
+        .as_slice()
+}
+
+fn bracket_decision_regex() -> &'static Regex {
+    static REGEX: OnceLock<Regex> = OnceLock::new();
+    REGEX.get_or_init(|| Regex::new(r"记住了|下次我要|下次我会|以后").unwrap())
+}
+
+fn bracket_preference_regex() -> &'static Regex {
+    static REGEX: OnceLock<Regex> = OnceLock::new();
+    REGEX.get_or_init(|| Regex::new(r"喜欢|不喜欢|雷区|偏好|讨厌|更吃|不吃").unwrap())
+}
+
+pub(super) fn build_bracket_self_evolution_id(agent_id: &str, note_text: &str) -> String {
+    let seed = format!("{}{}", agent_id.trim(), note_text.trim());
+    format!(
+        "bracket-self-evolution:{}",
+        uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_OID, seed.as_bytes())
+    )
+}
+
+pub(super) fn classify_bracket_self_evolution(note_text: &str) -> String {
+    let trimmed = note_text.trim();
+    if bracket_decision_regex().is_match(trimmed) {
+        "decision".to_string()
+    } else if bracket_preference_regex().is_match(trimmed) {
+        "preference".to_string()
+    } else {
+        "experience".to_string()
+    }
+}
+
+pub(super) fn extract_bracket_self_evolution_notes(
+    agent_id: &str,
+    messages: &[Message],
+) -> Vec<BracketSelfEvolutionNote> {
+    let mut seen_ids = HashSet::new();
+    let mut notes = Vec::new();
+
+    for message in messages
+        .iter()
+        .filter(|message| message.role.trim().eq_ignore_ascii_case("assistant"))
+    {
+        for captures in bracket_note_regex().captures_iter(&message.content) {
+            let note_text = captures
+                .get(1)
+                .or_else(|| captures.get(2))
+                .map(|value| value.as_str().trim())
+                .unwrap_or("");
+            let char_count = note_text.chars().count();
+            if !(4..=240).contains(&char_count) {
+                continue;
+            }
+            if !bracket_strategy_regexes()
+                .iter()
+                .any(|pattern| pattern.is_match(note_text))
+            {
+                continue;
+            }
+
+            let id = build_bracket_self_evolution_id(agent_id, note_text);
+            if !seen_ids.insert(id.clone()) {
+                continue;
+            }
+
+            notes.push(BracketSelfEvolutionNote {
+                id,
+                text: note_text.to_string(),
+                category: classify_bracket_self_evolution(note_text),
+            });
+        }
+    }
+
+    notes
+}
+
 pub(in crate) async fn handle_capture_session(
     server: &MemoryServer,
     params: CaptureSessionParams,
@@ -565,6 +674,88 @@ pub(in crate) async fn handle_capture_session(
         .map_err(|e| format!("Failed to serialize capture_session response: {e}"));
     }
 
+    let requested_scope = normalize_scope(&params.scope, "project");
+    let named_project = params.project.clone();
+    let (target_db, warning) = if named_project.is_some() {
+        (DbScope::Project, None)
+    } else {
+        server.resolve_write_scope(&requested_scope)
+    };
+
+    let base_path = params.path_prefix.clone().unwrap_or_else(|| {
+        format!(
+            "/openclaw/agent-{}",
+            sanitize_safe_path_name(&params.agent_id)
+        )
+    });
+    let source_ref_id = format!("{}:{}", params.conversation_id, params.turn_id);
+    let self_evolution_path = format!("{}/self-evolution", base_path.trim_end_matches('/'));
+    let attach_kyle_person = params.agent_id.to_ascii_lowercase().contains("jayne");
+
+    let mut entries = Vec::<MemoryEntry>::new();
+    for note in extract_bracket_self_evolution_notes(&params.agent_id, &params.messages) {
+        let metadata = crate::provenance::inject_provenance(
+            server,
+            json!({
+                "source_refs": [{
+                    "ref_type": "turn",
+                    "ref_id": source_ref_id.clone(),
+                }],
+                "conversation_id": params.conversation_id,
+                "turn_id": params.turn_id,
+                "agent_id": params.agent_id,
+                "message_count": params.messages.len(),
+                "artifact_kind": "bracket_self_evolution",
+            }),
+            "capture_session",
+            "bracket_self_evolution",
+            Some(requested_scope.as_str()),
+            target_db,
+            json!({
+                "conversation_id": params.conversation_id,
+                "turn_id": params.turn_id,
+                "agent_id": params.agent_id,
+                "path_prefix": base_path,
+            }),
+        );
+        let strategy_keyword = if note.category == "preference" {
+            "kyle-preference".to_string()
+        } else {
+            "strategy".to_string()
+        };
+
+        entries.push(MemoryEntry {
+            id: note.id,
+            path: self_evolution_path.clone(),
+            summary: note.text.chars().take(100).collect(),
+            text: note.text,
+            importance: 0.88,
+            timestamp: Utc::now().to_rfc3339(),
+            category: note.category,
+            topic: "self_evolution".to_string(),
+            keywords: dedup_strings(vec![
+                "self-evolution".to_string(),
+                "bracket-note".to_string(),
+                strategy_keyword,
+            ]),
+            persons: if attach_kyle_person {
+                vec!["Kyle".to_string()]
+            } else {
+                Vec::new()
+            },
+            entities: Vec::new(),
+            location: String::new(),
+            source: "bracket_self_evolution".to_string(),
+            scope: requested_scope.clone(),
+            archived: false,
+            access_count: 0,
+            last_access: None,
+            revision: 1,
+            metadata,
+            vector: None,
+        });
+    }
+
     let payload = json!({
         "conversation_id": params.conversation_id,
         "turn_id": params.turn_id,
@@ -585,7 +776,7 @@ pub(in crate) async fn handle_capture_session(
         .await?;
     let drafts = parse_session_capture_response(&raw)?;
 
-    if drafts.is_empty() {
+    if drafts.is_empty() && entries.is_empty() {
         return serde_json::to_string(&json!({
             "status": "skipped",
             "reason": "no_durable_memories",
@@ -594,9 +785,70 @@ pub(in crate) async fn handle_capture_session(
         .map_err(|e| format!("Failed to serialize capture_session response: {e}"));
     }
 
-    let texts = drafts
+    for draft in drafts {
+        let topic = if draft.topic.trim().is_empty() {
+            "session_capture".to_string()
+        } else {
+            draft.topic.trim().to_string()
+        };
+        let scope = normalize_scope(&draft.scope, &requested_scope);
+        let metadata = crate::provenance::inject_provenance(
+            server,
+            json!({
+                "source_refs": [{
+                    "ref_type": "turn",
+                    "ref_id": source_ref_id.clone(),
+                }],
+                "conversation_id": params.conversation_id,
+                "turn_id": params.turn_id,
+                "agent_id": params.agent_id,
+                "message_count": params.messages.len(),
+            }),
+            "capture_session",
+            "session_capture",
+            Some(scope.as_str()),
+            target_db,
+            json!({
+                "conversation_id": params.conversation_id,
+                "turn_id": params.turn_id,
+                "agent_id": params.agent_id,
+                "path_prefix": base_path,
+            }),
+        );
+
+        let summary = if draft.summary.trim().is_empty() {
+            draft.text.chars().take(100).collect::<String>()
+        } else {
+            draft.summary.trim().to_string()
+        };
+
+        entries.push(MemoryEntry {
+            id: uuid::Uuid::new_v4().to_string(),
+            path: build_entry_path(&base_path, &topic),
+            summary,
+            text: draft.text.trim().to_string(),
+            importance: draft.importance.clamp(0.0, 1.0),
+            timestamp: Utc::now().to_rfc3339(),
+            category: normalize_category(&draft.category),
+            topic,
+            keywords: dedup_strings(draft.keywords),
+            persons: dedup_strings(draft.persons),
+            entities: dedup_strings(draft.entities),
+            location: draft.location.trim().to_string(),
+            source: "capture_session".to_string(),
+            scope,
+            archived: false,
+            access_count: 0,
+            last_access: None,
+            revision: 1,
+            metadata,
+            vector: None,
+        });
+    }
+
+    let texts = entries
         .iter()
-        .map(|draft| draft.text.clone())
+        .map(|entry| entry.text.clone())
         .collect::<Vec<_>>();
     let embeddings = match server.llm.embed_voyage_batch(&texts, "document").await {
         Ok(vectors) => Some(vectors),
@@ -605,89 +857,11 @@ pub(in crate) async fn handle_capture_session(
             None
         }
     };
-
-    let requested_scope = normalize_scope(&params.scope, "project");
-    let named_project = params.project.clone();
-    let (target_db, warning) = if named_project.is_some() {
-        (DbScope::Project, None)
-    } else {
-        server.resolve_write_scope(&requested_scope)
-    };
-
-    let base_path = params.path_prefix.clone().unwrap_or_else(|| {
-        format!(
-            "/openclaw/agent-{}",
-            sanitize_safe_path_name(&params.agent_id)
-        )
-    });
-    let source_ref_id = format!("{}:{}", params.conversation_id, params.turn_id);
-
-    let entries = drafts
-        .into_iter()
-        .enumerate()
-        .map(|(idx, draft)| {
-            let topic = if draft.topic.trim().is_empty() {
-                "session_capture".to_string()
-            } else {
-                draft.topic.trim().to_string()
-            };
-            let scope = normalize_scope(&draft.scope, &requested_scope);
-            let metadata = crate::provenance::inject_provenance(
-                server,
-                json!({
-                    "source_refs": [{
-                        "ref_type": "turn",
-                        "ref_id": source_ref_id,
-                    }],
-                    "conversation_id": params.conversation_id,
-                    "turn_id": params.turn_id,
-                    "agent_id": params.agent_id,
-                    "message_count": params.messages.len(),
-                }),
-                "capture_session",
-                "session_capture",
-                Some(scope.as_str()),
-                target_db,
-                json!({
-                    "conversation_id": params.conversation_id,
-                    "turn_id": params.turn_id,
-                    "agent_id": params.agent_id,
-                    "path_prefix": base_path,
-                }),
-            );
-
-            let summary = if draft.summary.trim().is_empty() {
-                draft.text.chars().take(100).collect::<String>()
-            } else {
-                draft.summary.trim().to_string()
-            };
-
-            MemoryEntry {
-                id: uuid::Uuid::new_v4().to_string(),
-                path: build_entry_path(&base_path, &topic),
-                summary,
-                text: draft.text.trim().to_string(),
-                importance: draft.importance.clamp(0.0, 1.0),
-                timestamp: Utc::now().to_rfc3339(),
-                category: normalize_category(&draft.category),
-                topic,
-                keywords: dedup_strings(draft.keywords),
-                persons: dedup_strings(draft.persons),
-                entities: dedup_strings(draft.entities),
-                location: draft.location.trim().to_string(),
-                source: "capture_session".to_string(),
-                scope,
-                archived: false,
-                access_count: 0,
-                last_access: None,
-                revision: 1,
-                metadata,
-                vector: embeddings
-                    .as_ref()
-                    .and_then(|vectors| vectors.get(idx).cloned()),
-            }
-        })
-        .collect::<Vec<_>>();
+    if let Some(vectors) = embeddings.as_ref() {
+        for (entry, vector) in entries.iter_mut().zip(vectors.iter()) {
+            entry.vector = Some(vector.clone());
+        }
+    }
 
     let mut saved_ids = Vec::new();
 

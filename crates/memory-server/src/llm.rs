@@ -48,7 +48,11 @@ impl LlmClient {
 
         let extract = Self::load_lane(
             &["EXTRACT_API_KEY", "SILICONFLOW_API_KEY"],
-            &["EXTRACT_BASE_URL", "SILICONFLOW_BASE_URL", "EXTRACTOR_BASE_URL"],
+            &[
+                "EXTRACT_BASE_URL",
+                "SILICONFLOW_BASE_URL",
+                "EXTRACTOR_BASE_URL",
+            ],
             &["EXTRACT_MODEL", "SILICONFLOW_MODEL", "EXTRACTOR_MODEL"],
             DEFAULT_EXTRACT_MODEL,
         )?;
@@ -82,11 +86,7 @@ impl LlmClient {
         )?;
 
         let summary = Self::load_lane(
-            &[
-                "SUMMARY_API_KEY",
-                "DISTILL_API_KEY",
-                "SILICONFLOW_API_KEY",
-            ],
+            &["SUMMARY_API_KEY", "DISTILL_API_KEY", "SILICONFLOW_API_KEY"],
             &[
                 "SUMMARY_BASE_URL",
                 "DISTILL_BASE_URL",
@@ -125,10 +125,9 @@ impl LlmClient {
     ) -> Result<ChatLaneConfig, String> {
         let api_key = Self::first_env(api_key_envs)
             .ok_or_else(|| format!("Missing API key env vars: {}", api_key_envs.join(", ")))?;
-        let base_url = Self::first_env(base_url_envs)
-            .unwrap_or_else(|| DEFAULT_CHAT_BASE_URL.to_string());
-        let model =
-            Self::first_env(model_envs).unwrap_or_else(|| default_model.trim().to_string());
+        let base_url =
+            Self::first_env(base_url_envs).unwrap_or_else(|| DEFAULT_CHAT_BASE_URL.to_string());
+        let model = Self::first_env(model_envs).unwrap_or_else(|| default_model.trim().to_string());
 
         Ok(ChatLaneConfig {
             base_url,
@@ -314,8 +313,15 @@ impl LlmClient {
         temperature: f32,
         max_tokens: u32,
     ) -> Result<String, String> {
-        self.call_lane_llm(ChatLane::Reasoning, system, user, model, temperature, max_tokens)
-            .await
+        self.call_lane_llm(
+            ChatLane::Reasoning,
+            system,
+            user,
+            model,
+            temperature,
+            max_tokens,
+        )
+        .await
     }
 
     pub async fn call_extract_llm(
@@ -326,8 +332,15 @@ impl LlmClient {
         temperature: f32,
         max_tokens: u32,
     ) -> Result<String, String> {
-        self.call_lane_llm(ChatLane::Extract, system, user, model, temperature, max_tokens)
-            .await
+        self.call_lane_llm(
+            ChatLane::Extract,
+            system,
+            user,
+            model,
+            temperature,
+            max_tokens,
+        )
+        .await
     }
 
     pub async fn call_distill_llm(
@@ -338,8 +351,15 @@ impl LlmClient {
         temperature: f32,
         max_tokens: u32,
     ) -> Result<String, String> {
-        self.call_lane_llm(ChatLane::Distill, system, user, model, temperature, max_tokens)
-            .await
+        self.call_lane_llm(
+            ChatLane::Distill,
+            system,
+            user,
+            model,
+            temperature,
+            max_tokens,
+        )
+        .await
     }
 
     pub async fn call_reasoning_llm(
@@ -350,8 +370,15 @@ impl LlmClient {
         temperature: f32,
         max_tokens: u32,
     ) -> Result<String, String> {
-        self.call_lane_llm(ChatLane::Reasoning, system, user, model, temperature, max_tokens)
-            .await
+        self.call_lane_llm(
+            ChatLane::Reasoning,
+            system,
+            user,
+            model,
+            temperature,
+            max_tokens,
+        )
+        .await
     }
 
     pub async fn call_summary_llm(
@@ -362,8 +389,15 @@ impl LlmClient {
         temperature: f32,
         max_tokens: u32,
     ) -> Result<String, String> {
-        self.call_lane_llm(ChatLane::Summary, system, user, model, temperature, max_tokens)
-            .await
+        self.call_lane_llm(
+            ChatLane::Summary,
+            system,
+            user,
+            model,
+            temperature,
+            max_tokens,
+        )
+        .await
     }
 
     async fn call_lane_llm(
@@ -497,13 +531,7 @@ impl LlmClient {
     /// Generate L0 summary using SUMMARY_PROMPT
     pub async fn generate_summary(&self, text: &str) -> Result<String, String> {
         match self
-            .call_summary_llm(
-                crate::prompts::SUMMARY_PROMPT,
-                text,
-                None,
-                0.3,
-                100,
-            )
+            .call_summary_llm(crate::prompts::SUMMARY_PROMPT, text, None, 0.3, 100)
             .await
         {
             Ok(summary) => Ok(summary),

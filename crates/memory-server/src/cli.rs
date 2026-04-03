@@ -107,6 +107,15 @@ pub(crate) enum Commands {
         #[arg(long)]
         dry_run: bool,
     },
+    /// Backfill missing summaries using the configured summary LLM
+    BackfillSummaries {
+        /// Target DB path (defaults to global DB)
+        #[arg(long, value_name = "PATH")]
+        db: Option<PathBuf>,
+        /// Only count missing entries, don't generate summaries
+        #[arg(long)]
+        dry_run: bool,
+    },
 }
 
 #[derive(Subcommand, Debug, Clone)]

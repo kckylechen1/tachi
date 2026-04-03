@@ -38,7 +38,9 @@ fn build_foundry_job(
         target_agent_id: Some(params.agent_id.clone()),
         requested_by,
         created_at: Utc::now().to_rfc3339(),
-        evidence_count: params.evidence.len() + params.evidence_paths.len() + params.memory_queries.len(),
+        evidence_count: params.evidence.len()
+            + params.evidence_paths.len()
+            + params.memory_queries.len(),
         goal_count: params.goals.len(),
         metadata: json!({
             "display_name": params.display_name,
@@ -71,7 +73,10 @@ fn resolve_foundry_input_path(path: &str) -> Result<std::path::PathBuf, String> 
         let mut candidates = vec![cwd.join(raw)];
         if let Some(git_root) = find_git_root() {
             let repo_candidate = git_root.join(raw);
-            if !candidates.iter().any(|candidate| candidate == &repo_candidate) {
+            if !candidates
+                .iter()
+                .any(|candidate| candidate == &repo_candidate)
+            {
                 candidates.push(repo_candidate);
             }
         }
@@ -185,7 +190,10 @@ async fn build_evidence(
             kind,
             title: item.title.clone().or(fallback_title),
             content,
-            source_ref: item.source_ref.clone().or_else(|| Some(resolved_path.clone())),
+            source_ref: item
+                .source_ref
+                .clone()
+                .or_else(|| Some(resolved_path.clone())),
             path: Some(resolved_path),
             weight: item.weight.max(0.0),
         });
@@ -216,13 +224,22 @@ async fn build_evidence(
         let mut lines = vec![format!("Memory query: {}", query.query.trim())];
         for (idx, row) in rows.iter().enumerate() {
             let id = row.get("id").and_then(|value| value.as_str()).unwrap_or("");
-            let topic = row.get("topic").and_then(|value| value.as_str()).unwrap_or("");
+            let topic = row
+                .get("topic")
+                .and_then(|value| value.as_str())
+                .unwrap_or("");
             let summary = row
                 .get("summary")
                 .and_then(|value| value.as_str())
                 .unwrap_or("");
-            let text = row.get("text").and_then(|value| value.as_str()).unwrap_or("");
-            let path = row.get("path").and_then(|value| value.as_str()).unwrap_or("");
+            let text = row
+                .get("text")
+                .and_then(|value| value.as_str())
+                .unwrap_or("");
+            let path = row
+                .get("path")
+                .and_then(|value| value.as_str())
+                .unwrap_or("");
             let relevance = row
                 .get("relevance")
                 .and_then(|value| value.as_f64())

@@ -1,7 +1,7 @@
 use super::*;
 use std::collections::HashSet;
 
-pub(in crate) async fn handle_hub_discover(
+pub(crate) async fn handle_hub_discover(
     server: &MemoryServer,
     params: HubDiscoverParams,
 ) -> Result<String, String> {
@@ -79,7 +79,7 @@ pub(super) fn hub_discover_inner(
     Ok(output)
 }
 
-pub(in crate) async fn handle_hub_get(
+pub(crate) async fn handle_hub_get(
     server: &MemoryServer,
     params: HubGetParams,
 ) -> Result<String, String> {
@@ -123,7 +123,7 @@ pub(in crate) async fn handle_hub_get(
     }
 }
 
-pub(in crate) async fn handle_hub_feedback(
+pub(crate) async fn handle_hub_feedback(
     server: &MemoryServer,
     params: HubFeedbackParams,
 ) -> Result<String, String> {
@@ -154,7 +154,7 @@ pub(in crate) async fn handle_hub_feedback(
         .map_err(|e| format!("serialize: {e}"))
 }
 
-pub(in crate) async fn handle_hub_stats(server: &MemoryServer) -> Result<String, String> {
+pub(crate) async fn handle_hub_stats(server: &MemoryServer) -> Result<String, String> {
     let global_caps = server.with_global_store(|store| {
         store
             .hub_list(None, false)

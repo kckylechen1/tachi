@@ -1,6 +1,6 @@
-use super::*;
 use super::capture::*;
 use super::helpers::*;
+use super::*;
 use std::sync::atomic::Ordering;
 
 fn foundry_requested_by(server: &MemoryServer) -> Option<String> {
@@ -131,7 +131,7 @@ pub(super) fn enqueue_capture_maintenance_jobs(
     Ok(specs)
 }
 
-pub(in crate) fn enqueue_foundry_capture_maintenance(
+pub(crate) fn enqueue_foundry_capture_maintenance(
     server: &MemoryServer,
     target_db: DbScope,
     named_project: Option<String>,
@@ -566,7 +566,7 @@ async fn handle_foundry_maintenance_item(
     result
 }
 
-pub(in crate) async fn run_foundry_maintenance_worker(
+pub(crate) async fn run_foundry_maintenance_worker(
     server: MemoryServer,
     mut rx: mpsc::Receiver<FoundryMaintenanceItem>,
 ) {

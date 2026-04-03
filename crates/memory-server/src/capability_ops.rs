@@ -506,7 +506,8 @@ fn build_bundle_section(
         lines.push(format!(
             "Primary skill: {}{}",
             skill.id,
-            skill.suggested_tool_name
+            skill
+                .suggested_tool_name
                 .as_ref()
                 .map(|name| format!(" ({name})"))
                 .unwrap_or_default()
@@ -525,7 +526,8 @@ fn build_bundle_section(
     if !packs.is_empty() {
         lines.push(format!(
             "Relevant packs: {}",
-            packs.iter()
+            packs
+                .iter()
                 .map(|pack| pack.id.clone())
                 .collect::<Vec<_>>()
                 .join(", ")
@@ -686,7 +688,9 @@ pub(super) async fn handle_prepare_capability_bundle(
     let mut activation_steps = Vec::new();
     if let Some(skill) = primary_skill.as_ref() {
         if let Some(tool_name) = skill.suggested_tool_name.as_ref() {
-            activation_steps.push(format!("Load or call {tool_name} as the primary skill path."));
+            activation_steps.push(format!(
+                "Load or call {tool_name} as the primary skill path."
+            ));
         } else {
             activation_steps.push(format!("Start with skill {}.", skill.id));
         }

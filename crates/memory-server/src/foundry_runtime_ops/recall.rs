@@ -1,6 +1,6 @@
-use super::*;
 use super::helpers::*;
 use super::maintenance::*;
+use super::*;
 
 fn value_text(row: &Value) -> String {
     row.get("text")
@@ -164,7 +164,9 @@ pub(super) async fn run_compaction_model(
     parse_compact_context_response(&raw)
 }
 
-pub(super) fn parse_session_capture_response(raw: &str) -> Result<Vec<SessionCaptureDraft>, String> {
+pub(super) fn parse_session_capture_response(
+    raw: &str,
+) -> Result<Vec<SessionCaptureDraft>, String> {
     let json_str = llm::LlmClient::strip_code_fence(raw);
     let parsed: Vec<SessionCaptureDraft> = serde_json::from_str(json_str).map_err(|e| {
         format!(
@@ -219,7 +221,10 @@ pub(super) async fn rerank_rows(
     }
 }
 
-pub(super) fn resolve_recall_scope(path_prefix: Option<&str>, agent_id: Option<&str>) -> RecallScope {
+pub(super) fn resolve_recall_scope(
+    path_prefix: Option<&str>,
+    agent_id: Option<&str>,
+) -> RecallScope {
     let requested = path_prefix.and_then(normalize_path_prefix_value);
     let Some(agent_id) = agent_id else {
         return RecallScope {

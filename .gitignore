@@ -62,3 +62,4 @@ data/
 
 # Design docs (local only)
 docs/superpowers/
+.gstack/

@@ -1,7 +1,7 @@
-use super::*;
 use super::discover::hub_discover_inner;
+use super::*;
 
-pub(in crate) async fn handle_vc_register(
+pub(crate) async fn handle_vc_register(
     server: &MemoryServer,
     params: VirtualCapabilityRegisterParams,
 ) -> Result<String, String> {
@@ -100,7 +100,7 @@ pub(in crate) async fn handle_vc_register(
     .map_err(|e| format!("serialize: {e}"))
 }
 
-pub(in crate) async fn handle_vc_bind(
+pub(crate) async fn handle_vc_bind(
     server: &MemoryServer,
     params: VirtualCapabilityBindParams,
 ) -> Result<String, String> {
@@ -164,7 +164,7 @@ pub(in crate) async fn handle_vc_bind(
     .map_err(|e| format!("serialize: {e}"))
 }
 
-pub(in crate) async fn handle_vc_list(
+pub(crate) async fn handle_vc_list(
     server: &MemoryServer,
     mut params: HubDiscoverParams,
 ) -> Result<String, String> {
@@ -188,7 +188,7 @@ pub(in crate) async fn handle_vc_list(
     serde_json::to_string(&items).map_err(|e| format!("serialize: {e}"))
 }
 
-pub(in crate) async fn handle_vc_resolve(
+pub(crate) async fn handle_vc_resolve(
     server: &MemoryServer,
     params: VirtualCapabilityResolveParams,
 ) -> Result<String, String> {

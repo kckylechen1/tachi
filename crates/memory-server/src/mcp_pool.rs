@@ -91,10 +91,7 @@ impl MemoryServer {
     }
 
     #[allow(dead_code)]
-    pub(super) async fn connect_child(
-        &self,
-        server_name: &str,
-    ) -> Result<(), rmcp::ErrorData> {
+    pub(super) async fn connect_child(&self, server_name: &str) -> Result<(), rmcp::ErrorData> {
         self.connect_child_with_context(&format!("mcp:{server_name}"), None)
             .await
     }

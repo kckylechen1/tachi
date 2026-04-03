@@ -1,6 +1,6 @@
 use super::*;
 
-pub(in crate) async fn handle_run_skill(
+pub(crate) async fn handle_run_skill(
     server: &MemoryServer,
     params: RunSkillParams,
 ) -> Result<String, String> {
@@ -60,16 +60,12 @@ pub(in crate) async fn handle_run_skill(
     // Record call outcome for skill telemetry (enables skill_evolve)
     let success = result.is_ok();
     let error_msg = result.as_ref().err().map(|e| format!("{e}"));
-    let _ = server.record_capability_call_outcome(
-        &params.skill_id,
-        success,
-        error_msg.as_deref(),
-    );
+    let _ = server.record_capability_call_outcome(&params.skill_id, success, error_msg.as_deref());
 
     result.map_err(|e| format!("skill execution failed: {}", e))
 }
 
-pub(in crate) async fn handle_tachi_audit_log(
+pub(crate) async fn handle_tachi_audit_log(
     server: &MemoryServer,
     params: AuditLogParams,
 ) -> Result<String, String> {
@@ -81,7 +77,7 @@ pub(in crate) async fn handle_tachi_audit_log(
     })
 }
 
-pub(in crate) async fn handle_hub_call(
+pub(crate) async fn handle_hub_call(
     server: &MemoryServer,
     params: HubCallParams,
 ) -> Result<String, String> {
@@ -159,7 +155,7 @@ pub(in crate) async fn handle_hub_call(
     .map_err(|e| format!("serialize: {e}"))
 }
 
-pub(in crate) async fn handle_hub_disconnect(
+pub(crate) async fn handle_hub_disconnect(
     server: &MemoryServer,
     params: HubDisconnectParams,
 ) -> Result<String, String> {

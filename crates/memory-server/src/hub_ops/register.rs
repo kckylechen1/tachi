@@ -1,7 +1,9 @@
+use super::security_scan::{
+    merge_skill_scans, scan_skill_definition, scan_skill_definition_with_llm,
+};
 use super::*;
-use super::security_scan::{merge_skill_scans, scan_skill_definition, scan_skill_definition_with_llm};
 
-pub(in crate) async fn handle_hub_register(
+pub(crate) async fn handle_hub_register(
     server: &MemoryServer,
     params: HubRegisterParams,
 ) -> Result<String, String> {

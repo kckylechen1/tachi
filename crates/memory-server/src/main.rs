@@ -428,7 +428,8 @@ impl MemoryServer {
             .unwrap_or(McpToolExposureMode::Flatten);
 
         let (enrich_tx, enrich_rx) = mpsc::channel::<EnrichmentItem>(ENRICH_CHANNEL_CAPACITY);
-        let (foundry_tx, foundry_rx) = mpsc::channel::<FoundryMaintenanceItem>(FOUNDRY_CHANNEL_CAPACITY);
+        let (foundry_tx, foundry_rx) =
+            mpsc::channel::<FoundryMaintenanceItem>(FOUNDRY_CHANNEL_CAPACITY);
         let foundry_stats = Arc::new(FoundryWorkerStats::default());
 
         // Build hot-swap state before moving project_store into the struct

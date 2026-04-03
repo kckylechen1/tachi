@@ -9,7 +9,12 @@ pub(super) async fn handle_get_memory(
         let project_entry = server.with_named_project_store_read(project_name, |store| {
             store
                 .get_with_options(&params.id, params.include_archived)
-                .map_err(|e| format!("Failed to get memory from project '{}': {}", project_name, e))
+                .map_err(|e| {
+                    format!(
+                        "Failed to get memory from project '{}': {}",
+                        project_name, e
+                    )
+                })
         })?;
 
         if let Some(entry) = project_entry {

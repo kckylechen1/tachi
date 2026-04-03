@@ -8,7 +8,7 @@ use super::*;
 /// 3. Construct an evolution prompt with the current skill definition + feedback
 /// 4. Call LLM to generate an improved prompt
 /// 5. Create a new versioned capability and optionally activate it
-pub(in crate) async fn handle_skill_evolve(
+pub(crate) async fn handle_skill_evolve(
     server: &MemoryServer,
     params: SkillEvolveParams,
 ) -> Result<String, String> {
@@ -43,7 +43,10 @@ pub(in crate) async fn handle_skill_evolve(
     );
 
     // ── 3. Construct the evolution prompt ────────────────────────────────────
-    let user_feedback = params.feedback.as_deref().unwrap_or("No specific feedback provided.");
+    let user_feedback = params
+        .feedback
+        .as_deref()
+        .unwrap_or("No specific feedback provided.");
 
     let evolution_prompt = format!(
         r#"You are a skill prompt engineer. Your task is to improve the following skill prompt template.
@@ -124,7 +127,9 @@ Respond with ONLY a JSON object (no markdown fences):
             };
             serde_json::from_str(json_str)
         })
-        .map_err(|e| format!("Failed to parse LLM evolution response as JSON: {e}\nRaw: {llm_response}"))?;
+        .map_err(|e| {
+            format!("Failed to parse LLM evolution response as JSON: {e}\nRaw: {llm_response}")
+        })?;
 
     let new_prompt = evolved
         .get("prompt")
@@ -222,7 +227,10 @@ Respond with ONLY a JSON object (no markdown fences):
         // Also update the original skill's active_version pointer
         let _ = server.with_global_store(|store| {
             // Read, modify, write back
-            if let Some(mut orig) = store.hub_get(&params.skill_id).map_err(|e| format!("{e}"))? {
+            if let Some(mut orig) = store
+                .hub_get(&params.skill_id)
+                .map_err(|e| format!("{e}"))?
+            {
                 orig.active_version = Some(new_id.clone());
                 store.hub_register(&orig).map_err(|e| format!("{e}"))?;
             }
