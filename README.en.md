@@ -287,15 +287,15 @@ Current benchmark-backed guidance:
 |------|-------------------|-----|
 | **Embedding / Rerank** | [Voyage-4](https://voyageai.com/) | Best retrieval quality in local A/B tests; remains the default vector backbone. |
 | **Extract** | [Qwen3.5-27B](https://cloud.siliconflow.cn/) via SiliconFlow | Most reliable structured fact extraction in the current Tachi/OpenClaw benchmarks. |
-| **Distill** | MiniMax M2.7 (when available through a compatible gateway) | Best compaction fidelity and reusable context blocks in round-2 lane tests. |
-| **Summary** | MiniMax M2.7 (when available through a compatible gateway) | Strongest low-token status summaries while preserving useful signal density. |
+| **Distill** | MiniMax M2.7 | Best compaction fidelity and reusable context blocks in round-2 lane tests. Can be wired directly through the OpenAI-compatible MiniMax endpoint. |
+| **Summary** | MiniMax M2.7 | Strongest low-token status summaries while preserving useful signal density. Can share the same OpenAI-compatible MiniMax endpoint as `DISTILL`. |
 | **Reasoning / Skill Audit** | GLM-5.1 via Z.AI | Best architectural judgment, evolution prioritization, and skill audit final-pass decisions. |
 | **Fast Pre-Audit / Scout (Optional)** | Gemini Flash or MiniMax M2.7 | Useful for cheap first-pass scanning before a GLM final decision. |
 
 Implementation note:
 - The current Rust client speaks OpenAI-compatible chat completions directly.
-- If a provider is exposed as Anthropic-style messages in your host runtime, route it through a compatible gateway before pointing `DISTILL_*` / `SUMMARY_*` at it.
-- The default out-of-the-box release path remains fully usable with Voyage + SiliconFlow, while the lane configuration lets you override individual roles as your gateways mature.
+- MiniMax's chat-completions endpoint can be used directly for `DISTILL_*` and `SUMMARY_*`.
+- The default out-of-the-box release path remains fully usable with Voyage + SiliconFlow, while the lane configuration lets you override individual roles as your providers mature.
 
 ---
 
@@ -347,17 +347,17 @@ EXTRACT_API_KEY=""
 EXTRACT_BASE_URL=""
 EXTRACT_MODEL="Qwen/Qwen3.5-27B"
 
-DISTILL_API_KEY=""
-DISTILL_BASE_URL=""
-DISTILL_MODEL=""
+DISTILL_API_KEY="your_minimax_key_here"
+DISTILL_BASE_URL="https://api.minimaxi.com/v1/chat/completions"
+DISTILL_MODEL="MiniMax-M2.7"
 
-SUMMARY_API_KEY=""
-SUMMARY_BASE_URL=""
-SUMMARY_MODEL=""
+SUMMARY_API_KEY="your_minimax_key_here"
+SUMMARY_BASE_URL="https://api.minimaxi.com/v1/chat/completions"
+SUMMARY_MODEL="MiniMax-M2.7"
 
-REASONING_API_KEY=""
-REASONING_BASE_URL=""
-REASONING_MODEL=""
+REASONING_API_KEY="your_glm_key_here"
+REASONING_BASE_URL="https://open.bigmodel.cn/api/coding/paas/v4/chat/completions"
+REASONING_MODEL="glm-5.1"
 
 # Database path (Optional — auto-resolves to ~/.Tachi/global/memory.db + .Tachi/memory.db per project)
 MEMORY_DB_PATH="~/.Tachi/global/memory.db"
@@ -365,7 +365,11 @@ MEMORY_DB_PATH="~/.Tachi/global/memory.db"
 
 Operational note:
 - The Rust release currently expects OpenAI-compatible chat-completions endpoints for lane overrides.
-- Host runtimes like OpenClaw may already know about Anthropic-style providers (for example MiniMax or Kimi). In that case, either keep those providers in the host for now or route them through an OpenAI-compatible gateway before wiring them into Tachi.
+- The tested release path is:
+  - `EXTRACT = Qwen3.5-27B`
+  - `DISTILL = MiniMax M2.7`
+  - `SUMMARY = MiniMax M2.7`
+  - `REASONING = GLM-5.1`
 
 ---
 

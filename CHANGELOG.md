@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.13.1] - 2026-04-03
+
+### Changed
+- **MiniMax lane wiring clarified**: documented and configured `MiniMax M2.7` as the default `DISTILL` and `SUMMARY` target using its OpenAI-compatible `chat/completions` endpoint, instead of treating it as a future gateway-only option.
+- **Release examples tightened**: `.env.example` and `README.en.md` now show the tested lane stack explicitly: `Qwen3.5-27B` for extract, `MiniMax M2.7` for distill/summary, and `GLM-5.1` for reasoning/skill-audit.
+- **Cargo lock aligned with release version**: `Cargo.lock` now records the `memory-server` package at `0.13.1`, keeping tagged builds internally consistent.
+
+### Fixed
+- **Post-tag release cleanup**: followed up the initial `0.13.0` lane-config release with lockfile/version consistency fixes and direct MiniMax endpoint guidance.
+
 ## [0.13.0] - 2026-04-03
 
 ### Added
