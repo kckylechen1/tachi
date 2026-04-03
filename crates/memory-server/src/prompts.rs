@@ -71,3 +71,106 @@ Rules:
 - Prefer high recall for dangerous behavior, but do not invent facts not present in the input.
 - Keep findings actionable and specific to detected evidence.
 Output JSON only."#;
+
+/// Session capture prompt — converts a recent agent window into durable memories.
+pub const SESSION_CAPTURE_PROMPT: &str = r#"你是 Neural Foundry 的 session capture 引擎。
+
+任务：阅读最近一段 agent 会话窗口，只提取适合长期保留的结构化记忆。
+
+输出 JSON 数组，不要 markdown，不要解释。每个元素格式：
+{
+  "text": "完整且忠实的记忆陈述",
+  "summary": "10到30字短摘要",
+  "topic": "主题标签",
+  "category": "fact | decision | preference | entity | other",
+  "scope": "user | project | general",
+  "importance": 0.0,
+  "keywords": ["kw1", "kw2"],
+  "persons": ["name1"],
+  "entities": ["entity1"],
+  "location": "可选地点或逻辑位置"
+}
+
+规则：
+1) 只提取 durable memory：偏好、决定、稳定事实、人物/实体属性、长期约束；不要提取临时过程噪音。
+2) 忽略系统提示、cron 指令、角色扮演文本、工具调用样板；除非它们本身形成了稳定决策。
+3) 不编造；证据弱就少提，宁可输出空数组 []。
+4) 每条 text 要独立成立，避免“刚才/这里/上面”这类指代。
+5) category 必须从给定枚举里选；scope 也必须从给定枚举里选。
+6) summary 要短，text 要完整；两者不要重复堆砌。
+7) 最多输出 5 条。"#;
+
+/// Compaction prompt — compresses a session window into a reinjectable context block.
+pub const COMPACT_CONTEXT_PROMPT: &str = r#"You are the Neural Foundry compaction engine.
+
+Your task is to compress a soon-to-be-evicted conversation window into a compact context block that can be safely re-injected later.
+
+Output JSON only, no markdown:
+{
+  "compacted_text": "compact replacement context block",
+  "salient_topics": ["topic 1", "topic 2"],
+  "durable_signals": ["stable signal 1", "stable signal 2"]
+}
+
+Rules:
+1) Preserve stable facts, decisions, preferences, blockers, and open threads.
+2) Drop filler, repetition, and transient conversational noise.
+3) Write the compacted_text as a ready-to-inject note block, not as an essay about what you did.
+4) Keep compacted_text within the requested budget.
+5) If the window contains no durable value, return compacted_text as an empty string and keep arrays empty.
+6) Never output anything except valid JSON."#;
+
+/// Compaction rollup prompt — folds multiple compact artifacts into one rolling summary block.
+pub const COMPACT_ROLLUP_PROMPT: &str = r#"You are the Neural Foundry rollup engine.
+
+Your task is to merge several prior compact artifacts into one new compact summary block that can replace them during prompt assembly.
+
+Output JSON only, no markdown:
+{
+  "compacted_text": "rolled-up replacement context block",
+  "salient_topics": ["topic 1", "topic 2"],
+  "durable_signals": ["stable signal 1", "stable signal 2"]
+}
+
+Rules:
+1) Preserve stable facts, decisions, preferences, blockers, and active threads that still matter.
+2) Merge overlapping artifacts; remove redundancy and stale conversational filler.
+3) Prefer continuity: if current_summary exists, refine it instead of rewriting from scratch.
+4) Keep compacted_text within the requested budget.
+5) If the artifacts contain no durable value, return compacted_text as an empty string and keep arrays empty.
+6) Never output anything except valid JSON."#;
+
+/// Agent evolution synthesis prompt — converts evidence into profile-change proposals.
+pub const AGENT_EVOLUTION_SYNTHESIS_PROMPT: &str = r#"You are the Neural Foundry synthesis engine for agent evolution.
+
+Your task is to read canonical agent documents and supporting evidence, then produce a JSON object describing:
+- stable signals worth preserving
+- drift signals that conflict with the current profile
+- concrete change proposals
+
+Output JSON only, no markdown:
+{
+  "summary": "one short paragraph",
+  "stable_signals": ["signal 1", "signal 2"],
+  "drift_signals": ["signal 1", "signal 2"],
+  "proposals": [
+    {
+      "title": "short proposal title",
+      "target": "IDENTITY.md | AGENTS.md | LATEST_TRUTHS.md | tool_policy | routing_policy | memory_policy | other",
+      "target_section": "optional section name or null",
+      "current_value": "optional current text or null",
+      "suggested_value": "proposed new text",
+      "rationale": "why this change is justified",
+      "risk": "low | medium | high",
+      "evidence_refs": ["evidence-ref-1", "evidence-ref-2"]
+    }
+  ],
+  "no_change_reason": "optional reason when no proposal is needed"
+}
+
+Rules:
+1) Prefer conservative updates. Do not propose changes without evidence.
+2) Only propose durable profile/routing/tool-policy changes, not transient session notes.
+3) If evidence is mixed or weak, keep the proposal list empty and explain why in no_change_reason.
+4) Keep proposed values concise enough to project into managed sections later.
+5) Never output anything except valid JSON."#;

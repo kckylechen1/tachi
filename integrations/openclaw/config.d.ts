@@ -32,11 +32,7 @@ export type BridgeConfig = {
     dbPath: string;
     shadowStorePath: string;
     auditLogPath: string;
-    promptPath: string;
     topK: number;
-    searchReadLimit: number;
-    dedupThreshold: number;
-    mergeThreshold: number;
     captureMinChars: number;
     captureTriggerKeywords: string[];
     weights: {
@@ -44,18 +40,6 @@ export type BridgeConfig = {
         fts: number;
         symbolic: number;
         decay: number;
-    };
-    extractor: {
-        baseUrl: string;
-        apiKey: string;
-        model: string;
-        timeoutMs: number;
-    };
-    embedding: {
-        baseUrl: string;
-        apiKey: string;
-        model: string;
-        dimension: number;
     };
 };
 declare const moduleDir: string;

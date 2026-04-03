@@ -8,6 +8,27 @@ pub(super) struct ResolvedCallTarget {
 }
 
 impl MemoryServer {
+    pub(super) fn set_tool_profile(&self, profile: Option<ToolProfile>) {
+        *write_or_recover(&self.tool_profile, "tool_profile") = profile;
+    }
+
+    pub(super) fn active_tool_profile(&self) -> Option<ToolProfile> {
+        *read_or_recover(&self.tool_profile, "tool_profile")
+    }
+
+    pub(super) fn enqueue_foundry_job(&self, item: FoundryMaintenanceItem) -> Result<(), String> {
+        self.foundry_stats
+            .queued
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        if self.foundry_tx.try_send(item).is_err() {
+            self.foundry_stats
+                .queued
+                .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+            return Err("foundry maintenance worker unavailable".to_string());
+        }
+        Ok(())
+    }
+
     /// Check if a project DB is available (static startup or hot-swapped).
     pub(super) fn has_project_db(&self) -> bool {
         if self.project_db_path.is_some() {
@@ -22,12 +43,12 @@ impl MemoryServer {
 
     /// Hot-activate a project database on a running server.
     /// Called by `tachi_init_project_db` to make the created DB immediately usable.
-    pub(super) fn activate_project_db(
-        &self,
-        db_path: PathBuf,
-    ) -> Result<bool, String> {
+    pub(super) fn activate_project_db(&self, db_path: PathBuf) -> Result<bool, String> {
         let db_str = db_path.to_str().ok_or_else(|| {
-            format!("Project DB path contains invalid UTF-8: {}", db_path.display())
+            format!(
+                "Project DB path contains invalid UTF-8: {}",
+                db_path.display()
+            )
         })?;
         let store = MemoryStore::open(db_str).map_err(|e| format!("open project db: {e}"))?;
         let vec_available = store.vec_available;
@@ -39,7 +60,8 @@ impl MemoryServer {
             vec_available,
         };
 
-        let mut guard = self.hot_project_db
+        let mut guard = self
+            .hot_project_db
             .write()
             .unwrap_or_else(|e| e.into_inner());
         let was_none = guard.is_none();
@@ -52,10 +74,12 @@ impl MemoryServer {
         &self,
         f: impl FnOnce(&mut MemoryStore) -> Result<T, String>,
     ) -> Result<T, String> {
-        let guard = self.hot_project_db
+        let guard = self
+            .hot_project_db
             .read()
             .unwrap_or_else(|e| e.into_inner());
-        let state = guard.as_ref()
+        let state = guard
+            .as_ref()
             .ok_or_else(|| "No hot-swapped project database available".to_string())?;
         let _gate = write_or_recover(&state.rw_gate, "hot_project_rw_gate");
         let mut store = lock_or_recover(&state.store, "hot_project_store");
@@ -67,10 +91,12 @@ impl MemoryServer {
         &self,
         f: impl FnOnce(&mut MemoryStore) -> Result<T, String>,
     ) -> Result<T, String> {
-        let guard = self.hot_project_db
+        let guard = self
+            .hot_project_db
             .read()
             .unwrap_or_else(|e| e.into_inner());
-        let state = guard.as_ref()
+        let state = guard
+            .as_ref()
             .ok_or_else(|| "No hot-swapped project database available".to_string())?;
         let _gate = read_or_recover(&state.rw_gate, "hot_project_rw_gate");
         let mut store = Self::open_read_store(state.db_path.as_ref(), "hot_project")?;
@@ -168,9 +194,18 @@ impl MemoryServer {
     pub(super) fn resolve_named_project_db_path(project_name: &str) -> Result<PathBuf, String> {
         let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
         let app_home = std::env::var("TACHI_HOME")
-            .map(|v| if v.starts_with("~/") { home.join(&v[2..]) } else { PathBuf::from(v) })
+            .map(|v| {
+                if v.starts_with("~/") {
+                    home.join(&v[2..])
+                } else {
+                    PathBuf::from(v)
+                }
+            })
             .unwrap_or_else(|_| home.join(".tachi"));
-        let db_path = app_home.join("projects").join(project_name).join("memory.db");
+        let db_path = app_home
+            .join("projects")
+            .join(project_name)
+            .join("memory.db");
         if !db_path.exists() {
             Err(format!(
                 "Project '{}' not found (expected DB at {})",
@@ -191,7 +226,8 @@ impl MemoryServer {
         let db_path = Self::resolve_named_project_db_path(project_name)?;
         // Use global rw_gate for reader concurrency protection (prevents schema swap while reading)
         let _gate = read_or_recover(&self.global_rw_gate, "named_project_rw_gate");
-        let mut store = Self::open_read_store(&db_path, &format!("named-project:{}", project_name))?;
+        let mut store =
+            Self::open_read_store(&db_path, &format!("named-project:{}", project_name))?;
         f(&mut store)
     }
 
@@ -203,13 +239,17 @@ impl MemoryServer {
     ) -> Result<T, String> {
         let db_path = Self::resolve_named_project_db_path(project_name)?;
         let db_str = db_path.to_str().ok_or_else(|| {
-            format!("Project DB path contains invalid UTF-8: {}", db_path.display())
+            format!(
+                "Project DB path contains invalid UTF-8: {}",
+                db_path.display()
+            )
         })?;
 
         // Use global rw_gate for write lock to avoid concurrent SQLITE_BUSY issues for named projects.
         // It's a coarse lock, but named project writes are fast and this prevents concurrent overlaps.
         let _gate = write_or_recover(&self.global_rw_gate, "named_project_rw_gate");
-        let mut store = MemoryStore::open(db_str).map_err(|e| format!("open named project store: {e}"))?;
+        let mut store =
+            MemoryStore::open(db_str).map_err(|e| format!("open named project store: {e}"))?;
         f(&mut store)
     }
 
@@ -745,10 +785,7 @@ impl MemoryServer {
 
         // Read agent profile overrides (if registered)
         let (effective_rpm, effective_burst) = {
-            let profile = self
-                .agent_profile
-                .read()
-                .unwrap_or_else(|e| e.into_inner());
+            let profile = self.agent_profile.read().unwrap_or_else(|e| e.into_inner());
             match profile.as_ref() {
                 Some(p) => (
                     p.rate_limit_rpm.unwrap_or(self.rate_limit_rpm),
@@ -764,6 +801,15 @@ impl MemoryServer {
                 .rate_limit_windows
                 .lock()
                 .unwrap_or_else(|e| e.into_inner());
+
+            // Evict stale sessions when map exceeds cap
+            if windows.len() > RATE_LIMIT_MAX_SESSIONS {
+                let cutoff = now - Duration::from_secs(120);
+                windows.retain(|_, deque| {
+                    deque.back().map_or(false, |&t| t >= cutoff)
+                });
+            }
+
             let window = windows
                 .entry(session_id.to_string())
                 .or_insert_with(VecDeque::new);
@@ -805,9 +851,16 @@ impl MemoryServer {
                 .rate_limit_bursts
                 .lock()
                 .unwrap_or_else(|e| e.into_inner());
-            let stamps = bursts
-                .entry(burst_key)
-                .or_insert_with(VecDeque::new);
+
+            // Evict stale burst keys when map exceeds cap
+            if bursts.len() > RATE_LIMIT_MAX_BURST_KEYS {
+                let cutoff = now - RATE_LIMIT_BURST_WINDOW;
+                bursts.retain(|_, deque| {
+                    deque.back().map_or(false, |&t| t >= cutoff)
+                });
+            }
+
+            let stamps = bursts.entry(burst_key).or_insert_with(VecDeque::new);
 
             // Evict entries outside the burst window
             let cutoff = now - RATE_LIMIT_BURST_WINDOW;

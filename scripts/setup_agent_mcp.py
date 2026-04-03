@@ -18,6 +18,10 @@ AGENT_TARGETS = {
         "path": Path("~/.gemini/antigravity/mcp_config.json"),
         "server_key": "tachi",
     },
+    "claude-code": {
+        "path": Path("~/.claude/.mcp.json"),
+        "server_key": "tachi",
+    },
     "claude-desktop": {
         "path": Path("~/Library/Application Support/Claude/claude_desktop_config.json"),
         "server_key": "tachi",
@@ -26,10 +30,16 @@ AGENT_TARGETS = {
         "path": Path("~/.cursor/mcp.json"),
         "server_key": "tachi",
     },
+    "gemini-cli": {
+        "path": Path("~/.gemini/mcp.json"),
+        "server_key": "tachi",
+    },
 }
 
 LEGACY_SERVER_KEYS = {
     "antigravity": ["memory"],
+    "claude-code": ["sigil-memory"],
+    "gemini-cli": ["memory"],
 }
 
 

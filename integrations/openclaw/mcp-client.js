@@ -5,9 +5,12 @@ import { fileURLToPath } from "node:url";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 const REQUIRED_TOOLS = [
+    "recall_context",
+    "capture_session",
     "save_memory",
     "search_memory",
     "get_memory",
+    "memory_graph",
     "delete_memory",
     "memory_stats",
     "list_memories",
@@ -151,6 +154,7 @@ export class MemoryMcpClient {
         const env = {
             ...process.env,
             MEMORY_DB_PATH: this.dbPath,
+            TACHI_PROFILE: process.env.TACHI_PROFILE || "runtime",
         };
         const candidates = [
             // First candidate: explicit global-db, no project db (clean isolation)
@@ -189,7 +193,7 @@ export class MemoryMcpClient {
         });
         const client = new Client({
             name: "memory-hybrid-bridge",
-            version: "0.0.0",
+            version: "0.14.0",
         }, {});
         await client.connect(transport);
         const listed = await client.listTools();
@@ -297,6 +301,9 @@ export class MemoryMcpClient {
         }
         return coerceMemoryEntry(payload);
     }
+    async memoryGraph(params) {
+        return await this.callJson("memory_graph", params);
+    }
     async listMemories(limit) {
         const payload = await this.callJson("list_memories", {
             path_prefix: "/",
@@ -345,6 +352,42 @@ export class MemoryMcpClient {
             scoreBreakdowns[entry.id] = breakdown;
         }
         return { docs, scores, scoreBreakdowns };
+    }
+    async recallContext(query, opts) {
+        const payload = await this.callJson("recall_context", {
+            query,
+            top_k: opts?.top_k,
+            candidate_multiplier: opts?.candidate_multiplier,
+            path_prefix: opts?.path_prefix,
+            agent_id: opts?.agent_id,
+            exclude_topics: opts?.exclude_topics,
+            min_score: opts?.min_score,
+        });
+        let prependContext = "";
+        const results = [];
+        if (isRecord(payload) && typeof payload.prepend_context === "string") {
+            prependContext = payload.prepend_context;
+        }
+        const rows = isRecord(payload) && Array.isArray(payload.results) ? payload.results : [];
+        for (const row of rows) {
+            const entry = coerceMemoryEntry(row);
+            if (!entry) {
+                continue;
+            }
+            const finalScore = asFiniteNumber((isRecord(row) ? row.relevance : undefined) ??
+                (isRecord(row) && isRecord(row.score) ? row.score.final : undefined));
+            results.push({ entry, final_score: finalScore });
+        }
+        return { prependContext, results };
+    }
+    async captureSession(params) {
+        return await this.callJson("capture_session", params);
+    }
+    async compactContext(params) {
+        if (!this.availableTools.has("compact_context")) {
+            throw new Error("compact_context tool is unavailable");
+        }
+        return await this.callJson("compact_context", params);
     }
     async findSimilarMemory(queryVec, topK) {
         if (!this.availableTools.has("find_similar_memory")) {

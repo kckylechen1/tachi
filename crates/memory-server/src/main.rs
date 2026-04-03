@@ -4,8 +4,13 @@
 // Stateless design: each tool opens its own DB connection per-request.
 
 mod bootstrap;
+mod capability_ops;
 mod clawdoctor;
+mod cli;
 mod dlq_ops;
+mod enrichment;
+mod foundry_ops;
+mod foundry_runtime_ops;
 mod ghost_ops;
 mod graph_state_ops;
 mod hub_helpers;
@@ -13,14 +18,16 @@ mod hub_ops;
 mod kanban;
 mod llm;
 mod mcp_connection;
+mod mcp_pool;
 mod mcp_proxy;
 mod memory_ops;
 mod memory_search_ops;
 mod pack_ops;
 mod pipeline_ops;
-mod provenance;
+mod profiles;
 mod project_db_ops;
 mod prompts;
+mod provenance;
 mod sandbox_ops;
 mod server_handler;
 mod server_methods;
@@ -31,13 +38,28 @@ mod utils;
 mod vault_crypto;
 mod vault_ops;
 
+use crate::capability_ops::{
+    handle_prepare_capability_bundle, handle_recommend_capability, handle_recommend_skill,
+    handle_recommend_toolchain,
+};
 use crate::dlq_ops::{handle_dlq_list, handle_dlq_retry};
+use crate::foundry_ops::{
+    handle_list_agent_evolution_proposals, handle_project_agent_profile,
+    handle_queue_agent_evolution, handle_review_agent_evolution_proposal,
+    handle_synthesize_agent_evolution,
+};
+use crate::foundry_runtime_ops::{
+    enqueue_foundry_capture_maintenance, handle_capture_session, handle_compact_context,
+    handle_compact_rollup, handle_compact_session_memory, handle_recall_context,
+    handle_section_build, run_foundry_maintenance_worker, FoundryMaintenanceItem,
+    FoundryWorkerStats,
+};
 use crate::ghost_ops::{
     handle_ghost_ack, handle_ghost_promote, handle_ghost_publish, handle_ghost_reflect,
     handle_ghost_subscribe, handle_ghost_topics,
 };
 use crate::graph_state_ops::{
-    handle_add_edge, handle_get_edges, handle_get_state, handle_set_state,
+    handle_add_edge, handle_get_edges, handle_get_state, handle_memory_graph, handle_set_state,
 };
 use crate::hub_helpers::{
     build_skill_tool_from_cap, capability_callable, capability_visibility_for_cap,
@@ -65,7 +87,7 @@ use crate::memory_ops::{
     handle_memory_gc, handle_memory_stats,
 };
 use crate::memory_search_ops::{
-    handle_find_similar_memory, handle_save_memory, handle_search_memory,
+    handle_find_similar_memory, handle_save_memory, handle_search_memory, search_memory_rows,
 };
 use crate::pack_ops::{
     handle_pack_get, handle_pack_list, handle_pack_project, handle_pack_register,
@@ -74,6 +96,7 @@ use crate::pack_ops::{
 use crate::pipeline_ops::{
     handle_extract_facts, handle_get_pipeline_status, handle_ingest_event, handle_sync_memories,
 };
+use crate::profiles::ToolProfile;
 use crate::project_db_ops::handle_tachi_init_project_db;
 use crate::sandbox_ops::{
     handle_sandbox_check, handle_sandbox_exec_audit, handle_sandbox_get_policy,
@@ -87,8 +110,8 @@ use crate::skill_chain_ops::handle_chain_skills;
 use crate::tool_params::*;
 use crate::utils::{
     find_git_root, is_active_global_rule, is_trusted_command, lock_or_recover, parse_env_bool,
-    parse_env_u64, read_or_recover, sanitize_safe_path_name, stable_hash,
-    value_to_template_text, write_or_recover,
+    parse_env_u64, read_or_recover, sanitize_safe_path_name, stable_hash, value_to_template_text,
+    write_or_recover,
 };
 use crate::vault_ops::{
     handle_vault_get, handle_vault_init, handle_vault_list, handle_vault_lock, handle_vault_remove,
@@ -98,7 +121,7 @@ use crate::vault_ops::{
 };
 
 use chrono::Utc;
-use clap::{Parser, Subcommand};
+use clap::Parser;
 use memory_core::{
     HubCapability, HybridWeights, MemoryEntry, MemoryStore, SearchOptions, VirtualCapabilityBinding,
 };
@@ -123,153 +146,9 @@ use std::time::{Duration, Instant};
 use tokio::io::{stdin, stdout};
 use tokio::sync::mpsc;
 
-// ─── Enrichment Batcher ──────────────────────────────────────────────────────
-
-/// An item queued for background embedding + summary enrichment.
-#[derive(Debug, Clone)]
-struct EnrichmentItem {
-    id: String,
-    text: String,
-    needs_embedding: bool,
-    needs_summary: bool,
-    target_db: DbScope,
-    named_project: Option<String>,
-    revision: i64,
-}
-
-/// Batch enrichment queue configuration.
-const ENRICH_BATCH_MAX: usize = 32;
-const ENRICH_FLUSH_INTERVAL_MS: u64 = 500;
-
-// ─── CLI Arguments ────────────────────────────────────────────────────────────
-
-#[derive(Parser, Debug)]
-#[command(name = "tachi", version, about = "Tachi — memory + Hub MCP server")]
-struct Cli {
-    /// Run as HTTP daemon instead of stdio transport
-    #[arg(long)]
-    daemon: bool,
-
-    /// Port for HTTP daemon (default: 6919)
-    #[arg(long, default_value_t = 6919)]
-    port: u16,
-
-    /// Override global memory DB path (equivalent to MEMORY_DB_PATH)
-    #[arg(long, value_name = "PATH")]
-    global_db: Option<PathBuf>,
-
-    /// Override project memory DB path
-    #[arg(long, value_name = "PATH")]
-    project_db: Option<PathBuf>,
-
-    /// Disable project DB entirely (force single-DB mode)
-    #[arg(long)]
-    no_project_db: bool,
-
-    /// Enable/disable background database GC (overrides MEMORY_GC_ENABLED)
-    #[arg(long)]
-    gc_enabled: Option<bool>,
-
-    /// Delay before first background GC run in seconds (overrides MEMORY_GC_INITIAL_DELAY_SECS)
-    #[arg(long)]
-    gc_initial_delay_secs: Option<u64>,
-
-    /// Interval between background GC runs in seconds (overrides MEMORY_GC_INTERVAL_SECS)
-    #[arg(long)]
-    gc_interval_secs: Option<u64>,
-
-    /// Enable clawdoctor: periodic OpenClaw health check + auto-restart
-    /// (overrides CLAWDOCTOR_ENABLED)
-    #[arg(long)]
-    clawdoctor: Option<bool>,
-
-    /// OpenClaw gateway URL for clawdoctor health checks
-    /// (overrides CLAWDOCTOR_URL, default: http://127.0.0.1:18789)
-    #[arg(long)]
-    clawdoctor_url: Option<String>,
-
-    /// Clawdoctor check interval in seconds (overrides CLAWDOCTOR_INTERVAL_SECS, default: 300)
-    #[arg(long)]
-    clawdoctor_interval_secs: Option<u64>,
-
-    /// Consecutive failures before clawdoctor triggers a restart
-    /// (overrides CLAWDOCTOR_FAIL_THRESHOLD, default: 3)
-    #[arg(long)]
-    clawdoctor_fail_threshold: Option<u32>,
-
-    /// CLI command (defaults to `serve` when omitted)
-    #[command(subcommand)]
-    command: Option<Commands>,
-}
-
-#[derive(Subcommand, Debug, Clone)]
-enum Commands {
-    /// Start MCP Server (default when no subcommand is provided)
-    Serve,
-    /// Search memories
-    Search {
-        query: String,
-        #[arg(long)]
-        path: Option<String>,
-        #[arg(long, default_value_t = 5)]
-        top_k: usize,
-    },
-    /// Save a memory
-    Save {
-        text: String,
-        #[arg(long)]
-        path: Option<String>,
-        #[arg(long)]
-        importance: Option<f64>,
-    },
-    /// Show database statistics
-    Stats,
-    /// Run garbage collection
-    Gc,
-    /// Hub management
-    Hub {
-        #[command(subcommand)]
-        action: HubAction,
-    },
-    /// Backfill missing vector embeddings using Voyage API
-    BackfillVectors {
-        /// Target DB path (defaults to global DB)
-        #[arg(long, value_name = "PATH")]
-        db: Option<PathBuf>,
-        /// Batch size for Voyage API calls (max 128)
-        #[arg(long, default_value_t = 64)]
-        batch_size: usize,
-        /// Only count missing entries, don't embed
-        #[arg(long)]
-        dry_run: bool,
-    },
-}
-
-#[derive(Subcommand, Debug, Clone)]
-enum HubAction {
-    List {
-        #[arg(long)]
-        cap_type: Option<String>,
-    },
-    Register {
-        id: String,
-        #[arg(long)]
-        cap_type: String,
-        #[arg(long)]
-        name: String,
-        #[arg(long)]
-        definition: String,
-        #[arg(long)]
-        description: Option<String>,
-    },
-    Enable {
-        id: String,
-    },
-    Disable {
-        id: String,
-    },
-    Stats,
-}
+use crate::cli::{Cli, Commands, HubAction};
+use crate::enrichment::EnrichmentItem;
+use crate::mcp_pool::McpClientPool;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DbScope {
@@ -290,6 +169,8 @@ impl DbScope {
 
 /// TTL for cached tool results (Phantom Tools)
 const TOOL_CACHE_TTL: Duration = Duration::from_secs(30);
+/// Maximum entries in the tool cache before LRU eviction kicks in
+const TOOL_CACHE_MAX_ENTRIES: usize = 256;
 const DEFAULT_MCP_DISCOVERY_TIMEOUT_MS: u64 = 10_000;
 
 // ─── Rate Limiter Constants ──────────────────────────────────────────────────
@@ -299,19 +180,36 @@ const DEFAULT_RATE_LIMIT_RPM: u64 = 0;
 const DEFAULT_RATE_LIMIT_BURST: u64 = 8;
 /// Burst detection window
 const RATE_LIMIT_BURST_WINDOW: Duration = Duration::from_secs(60);
+/// Maximum tracked sessions in rate limiter before stale eviction
+const RATE_LIMIT_MAX_SESSIONS: usize = 1024;
+/// Maximum tracked burst keys in rate limiter before stale eviction
+const RATE_LIMIT_MAX_BURST_KEYS: usize = 4096;
+
+// ─── Channel Backpressure ────────────────────────────────────────────────────
+/// Bounded channel capacity for enrichment batcher
+const ENRICH_CHANNEL_CAPACITY: usize = 512;
+/// Bounded channel capacity for foundry maintenance worker
+const FOUNDRY_CHANNEL_CAPACITY: usize = 256;
 
 /// Tools whose results can be cached (read-only, no side effects)
 const CACHEABLE_TOOLS: &[&str] = &[
+    "section_build",
+    "recommend_capability",
+    "recommend_skill",
+    "recommend_toolchain",
+    "prepare_capability_bundle",
     "search_memory",
     "cyberbrain_search",
     "find_similar_memory",
     "get_memory",
+    "memory_graph",
     "list_memories",
     "memory_stats",
     "get_state",
     "hub_discover",
     "hub_get",
     "hub_stats",
+    "list_agent_evolution_proposals",
     "vc_list",
     "vc_resolve",
     "get_pipeline_status",
@@ -330,6 +228,13 @@ const CACHE_INVALIDATING_TOOLS: &[&str] = &[
     "hub_set_active_version",
     "hub_export_skills",
     "skill_evolve",
+    "capture_session",
+    "compact_rollup",
+    "compact_session_memory",
+    "synthesize_agent_evolution",
+    "queue_agent_evolution",
+    "review_agent_evolution_proposal",
+    "project_agent_profile",
     "vc_register",
     "vc_bind",
     "hub_feedback",
@@ -428,7 +333,10 @@ struct MemoryServer {
     mcp_discovery_timeout: Duration,
     mcp_tool_exposure_mode: McpToolExposureMode,
     // ─── Enrichment Batcher ──────────────────────────────────────────────────
-    enrich_tx: mpsc::UnboundedSender<EnrichmentItem>,
+    enrich_tx: mpsc::Sender<EnrichmentItem>,
+    // ─── Foundry Maintenance Worker ──────────────────────────────────────────
+    foundry_tx: mpsc::Sender<FoundryMaintenanceItem>,
+    foundry_stats: Arc<FoundryWorkerStats>,
     // ─── Vault (Encrypted Secret Storage) ────────────────────────────────────
     vault_key: Arc<StdRwLock<Option<[u8; 32]>>>,
     vault_unlock_time: Arc<StdRwLock<Option<Instant>>>,
@@ -446,50 +354,14 @@ struct MemoryServer {
     // ─── Agent Profile ───────────────────────────────────────────────────────
     /// Per-session agent profile (set via agent_register tool).
     agent_profile: Arc<StdRwLock<Option<AgentProfile>>>,
+    /// Default host-facing tool profile for this server instance.
+    tool_profile: Arc<StdRwLock<Option<ToolProfile>>>,
     // ─── Cross-Agent Handoff ─────────────────────────────────────────────────
     /// Pending handoff memos from previous agent sessions.
     handoff_memos: Arc<StdMutex<Vec<HandoffMemo>>>,
 }
 
-// ─── MCP Client Connection Pool ──────────────────────────────────────────────
-
-#[derive(Debug, Clone, Copy, PartialEq)]
-enum CircuitState {
-    Closed,
-    Open { until: Instant },
-    HalfOpen,
-}
-
-struct ChildConnection {
-    /// The running MCP client service — we call peer() on this
-    client: rmcp::service::RunningService<rmcp::service::RoleClient, ()>,
-    last_used: Instant,
-}
-
-struct McpClientPool {
-    /// Active connections: server_name → connection
-    connections: std::sync::Mutex<HashMap<String, ChildConnection>>,
-    /// Circuit breaker state per server
-    circuits: std::sync::Mutex<HashMap<String, (CircuitState, u32)>>,
-    /// Per-child concurrency semaphores: (semaphore, configured max_concurrency)
-    semaphores: std::sync::Mutex<HashMap<String, (Arc<tokio::sync::Semaphore>, usize)>>,
-    /// Per-child connecting locks to prevent TOCTOU race
-    connecting_locks: std::sync::Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
-    /// Idle TTL before auto-disconnect
-    idle_ttl: Duration,
-}
-
-impl McpClientPool {
-    fn new() -> Self {
-        Self {
-            connections: std::sync::Mutex::new(HashMap::new()),
-            circuits: std::sync::Mutex::new(HashMap::new()),
-            semaphores: std::sync::Mutex::new(HashMap::new()),
-            connecting_locks: std::sync::Mutex::new(HashMap::new()),
-            idle_ttl: Duration::from_secs(300),
-        }
-    }
-}
+// MCP client pool types are in mcp_pool.rs
 
 impl MemoryServer {
     fn new(
@@ -555,7 +427,9 @@ impl MemoryServer {
             })
             .unwrap_or(McpToolExposureMode::Flatten);
 
-        let (enrich_tx, enrich_rx) = mpsc::unbounded_channel::<EnrichmentItem>();
+        let (enrich_tx, enrich_rx) = mpsc::channel::<EnrichmentItem>(ENRICH_CHANNEL_CAPACITY);
+        let (foundry_tx, foundry_rx) = mpsc::channel::<FoundryMaintenanceItem>(FOUNDRY_CHANNEL_CAPACITY);
+        let foundry_stats = Arc::new(FoundryWorkerStats::default());
 
         // Build hot-swap state before moving project_store into the struct
         let hot_project_db = Arc::new(StdRwLock::new(project_store.as_ref().map(|s| {
@@ -596,6 +470,8 @@ impl MemoryServer {
             mcp_discovery_timeout: Duration::from_millis(mcp_discovery_timeout_ms),
             mcp_tool_exposure_mode,
             enrich_tx,
+            foundry_tx,
+            foundry_stats,
             vault_key: Arc::new(StdRwLock::new(None)),
             vault_unlock_time: Arc::new(StdRwLock::new(None)),
             vault_failed_attempts: Arc::new(StdMutex::new((0, None))),
@@ -605,6 +481,7 @@ impl MemoryServer {
             rate_limit_rpm: parse_env_u64("RATE_LIMIT_RPM").unwrap_or(DEFAULT_RATE_LIMIT_RPM),
             rate_limit_burst: parse_env_u64("RATE_LIMIT_BURST").unwrap_or(DEFAULT_RATE_LIMIT_BURST),
             agent_profile: Arc::new(StdRwLock::new(None)),
+            tool_profile: Arc::new(StdRwLock::new(None)),
             handoff_memos: Arc::new(StdMutex::new(Vec::new())),
         };
 
@@ -613,158 +490,16 @@ impl MemoryServer {
             let batcher_server = server.clone();
             tokio::spawn(Self::run_enrichment_batcher(batcher_server, enrich_rx));
         }
+        {
+            let foundry_server = server.clone();
+            tokio::spawn(run_foundry_maintenance_worker(foundry_server, foundry_rx));
+        }
 
         Ok(server)
     }
-
-    /// Background worker that batches enrichment requests (embedding + summary).
-    /// Flushes every ENRICH_FLUSH_INTERVAL_MS or when ENRICH_BATCH_MAX items accumulate.
-    async fn run_enrichment_batcher(
-        server: MemoryServer,
-        mut rx: mpsc::UnboundedReceiver<EnrichmentItem>,
-    ) {
-        let mut batch: Vec<EnrichmentItem> = Vec::with_capacity(ENRICH_BATCH_MAX);
-        let flush_interval = Duration::from_millis(ENRICH_FLUSH_INTERVAL_MS);
-
-        loop {
-            // Wait for first item or channel close
-            let item = if batch.is_empty() {
-                match rx.recv().await {
-                    Some(item) => Some(item),
-                    None => break, // channel closed
-                }
-            } else {
-                None
-            };
-
-            if let Some(item) = item {
-                batch.push(item);
-            }
-
-            // Drain more items until batch is full or timeout expires
-            let deadline = tokio::time::Instant::now() + flush_interval;
-            while batch.len() < ENRICH_BATCH_MAX {
-                match tokio::time::timeout_at(deadline, rx.recv()).await {
-                    Ok(Some(item)) => batch.push(item),
-                    Ok(None) => {
-                        // Channel closed; flush remaining and exit
-                        if !batch.is_empty() {
-                            server.flush_enrichment_batch(&mut batch).await;
-                        }
-                        return;
-                    }
-                    Err(_timeout) => break, // timer expired, flush what we have
-                }
-            }
-
-            if !batch.is_empty() {
-                server.flush_enrichment_batch(&mut batch).await;
-            }
-        }
-
-        eprintln!("[enrichment-batcher] channel closed, worker exiting");
-    }
-
-    /// Flush a batch: batch-embed all texts needing embedding, then update DB.
-    async fn flush_enrichment_batch(&self, batch: &mut Vec<EnrichmentItem>) {
-        let items: Vec<EnrichmentItem> = batch.drain(..).collect();
-        let batch_size = items.len();
-        eprintln!("[enrichment-batcher] flushing batch of {batch_size} items");
-
-        // 1. Batch embedding for items that need it
-        let embed_indices: Vec<usize> = items
-            .iter()
-            .enumerate()
-            .filter(|(_, item)| item.needs_embedding)
-            .map(|(i, _)| i)
-            .collect();
-
-        let embed_texts: Vec<String> = embed_indices
-            .iter()
-            .map(|&i| items[i].text.clone())
-            .collect();
-
-        let mut embed_results: Vec<Option<Vec<f32>>> = vec![None; items.len()];
-
-        if !embed_texts.is_empty() {
-            match self.llm.embed_voyage_batch(&embed_texts, "document").await {
-                Ok(vecs) => {
-                    for (vec_idx, &item_idx) in embed_indices.iter().enumerate() {
-                        if vec_idx < vecs.len() {
-                            embed_results[item_idx] = Some(vecs[vec_idx].clone());
-                        }
-                    }
-                    eprintln!(
-                        "[enrichment-batcher] batch embedded {} texts in 1 API call",
-                        embed_texts.len()
-                    );
-                }
-                Err(e) => {
-                    eprintln!("[enrichment-batcher] batch embedding failed: {e}");
-                }
-            }
-        }
-
-        // 2. Generate summaries concurrently for items that need them
-        let summary_futures: Vec<_> = items
-            .iter()
-            .enumerate()
-            .filter(|(_, item)| item.needs_summary)
-            .map(|(i, item)| {
-                let llm = self.llm.clone();
-                let text = item.text.clone();
-                async move { (i, llm.generate_summary(&text).await) }
-            })
-            .collect();
-
-        let summary_results: Vec<(usize, Result<String, String>)> =
-            futures::future::join_all(summary_futures).await;
-
-        let mut summaries: Vec<Option<String>> = vec![None; items.len()];
-        for (idx, result) in summary_results {
-            match result {
-                Ok(s) => summaries[idx] = Some(s),
-                Err(e) => eprintln!(
-                    "[enrichment-batcher] summary failed for {}: {e}",
-                    items[idx].id
-                ),
-            }
-        }
-
-        // 3. Write results back to DB
-        for (i, item) in items.iter().enumerate() {
-            let new_vec = embed_results[i].as_deref();
-            let new_summary = summaries[i].as_deref();
-
-            if new_vec.is_some() || new_summary.is_some() {
-                let update_action = |store: &mut MemoryStore| {
-                    store
-                        .update_enrichment_fields(&item.id, new_summary, new_vec, item.revision)
-                        .map_err(|e| format!("Failed to update enriched entry: {e}"))
-                };
-
-                let res = if let Some(ref project_name) = item.named_project {
-                    self.with_named_project_store(project_name, update_action)
-                } else {
-                    self.with_store_for_scope(item.target_db, update_action)
-                };
-
-                match res {
-                    Ok(true) => {}
-                    Ok(false) => eprintln!(
-                        "[enrichment-batcher] discarded {} (revision changed)",
-                        item.id
-                    ),
-                    Err(e) => {
-                        eprintln!("[enrichment-batcher] DB update failed for {}: {e}", item.id)
-                    }
-                }
-            }
-        }
-
-        eprintln!("[enrichment-batcher] batch of {batch_size} complete");
-    }
 }
+
+// Enrichment batcher methods are in enrichment.rs
 
 // ─── Tool Parameter Types ───────────────────────────────────────────────────────
 //
@@ -1001,6 +736,16 @@ impl MemoryServer {
         handle_get_edges(self, params).await
     }
 
+    #[tool(
+        description = "Inspect a read-only neighborhood from the memory graph, seeded by memory id or a search query. Returns seed nodes, neighboring nodes, and connecting edges."
+    )]
+    async fn memory_graph(
+        &self,
+        Parameters(params): Parameters<MemoryGraphParams>,
+    ) -> Result<String, String> {
+        handle_memory_graph(self, params).await
+    }
+
     #[tool(description = "Set a key-value pair in server state (stored in hard_state table).")]
     async fn set_state(
         &self,
@@ -1129,6 +874,156 @@ impl MemoryServer {
         Parameters(params): Parameters<SkillEvolveParams>,
     ) -> Result<String, String> {
         handle_skill_evolve(self, params).await
+    }
+
+    #[tool(
+        description = "Recommend the best Tachi capability for a task query. Uses Hub metadata, visibility, host constraints, and telemetry to rank candidate capabilities."
+    )]
+    async fn recommend_capability(
+        &self,
+        Parameters(params): Parameters<RecommendCapabilityParams>,
+    ) -> Result<String, String> {
+        handle_recommend_capability(self, params).await
+    }
+
+    #[tool(
+        description = "Recommend the most relevant skills for a task query. Returns ranked skill candidates plus callable tool aliases when available."
+    )]
+    async fn recommend_skill(
+        &self,
+        Parameters(params): Parameters<RecommendSkillParams>,
+    ) -> Result<String, String> {
+        handle_recommend_skill(self, params).await
+    }
+
+    #[tool(
+        description = "Recommend a host-aware toolchain for a task query, including skills, supporting capabilities, projected packs, and suggested host-native execution tools."
+    )]
+    async fn recommend_toolchain(
+        &self,
+        Parameters(params): Parameters<RecommendToolchainParams>,
+    ) -> Result<String, String> {
+        handle_recommend_toolchain(self, params).await
+    }
+
+    #[tool(
+        description = "Prepare a host-aware capability bundle for a task query. Returns the primary skill, supporting capabilities, relevant packs, suggested host-native tools, and a ready-to-inject bundle section."
+    )]
+    async fn prepare_capability_bundle(
+        &self,
+        Parameters(params): Parameters<PrepareCapabilityBundleParams>,
+    ) -> Result<String, String> {
+        handle_prepare_capability_bundle(self, params).await
+    }
+
+    #[tool(
+        description = "Recall structured memory context for an active agent turn. Returns ranked results plus a ready-to-inject prepend_context block."
+    )]
+    async fn recall_context(
+        &self,
+        Parameters(params): Parameters<RecallContextParams>,
+    ) -> Result<String, String> {
+        handle_recall_context(self, params).await
+    }
+
+    #[tool(
+        description = "Capture durable memories from a recent session window. Extracts structured memories, embeds them inside Tachi, and writes them to the configured store."
+    )]
+    async fn capture_session(
+        &self,
+        Parameters(params): Parameters<CaptureSessionParams>,
+    ) -> Result<String, String> {
+        handle_capture_session(self, params).await
+    }
+
+    #[tool(
+        description = "Compact a soon-to-be-evicted session window into a ready-to-inject context block. Designed for host runtimes that know when token pressure requires compaction."
+    )]
+    async fn compact_context(
+        &self,
+        Parameters(params): Parameters<CompactContextParams>,
+    ) -> Result<String, String> {
+        handle_compact_context(self, params).await
+    }
+
+    #[tool(
+        description = "Render a structured context section with explicit layer and cache-boundary markers. Useful for host runtimes assembling static/session/live prompt sections."
+    )]
+    async fn section_build(
+        &self,
+        Parameters(params): Parameters<SectionBuildParams>,
+    ) -> Result<String, String> {
+        handle_section_build(self, params).await
+    }
+
+    #[tool(
+        description = "Roll up multiple compacted session artifacts into a new compact summary block, preserving salient topics and durable signals for later reinjection."
+    )]
+    async fn compact_rollup(
+        &self,
+        Parameters(params): Parameters<CompactRollupParams>,
+    ) -> Result<String, String> {
+        handle_compact_rollup(self, params).await
+    }
+
+    #[tool(
+        description = "Persist a compacted session artifact and its durable signals into Tachi memory, then optionally queue Foundry maintenance jobs."
+    )]
+    async fn compact_session_memory(
+        &self,
+        Parameters(params): Parameters<CompactSessionMemoryParams>,
+    ) -> Result<String, String> {
+        handle_compact_session_memory(self, params).await
+    }
+
+    #[tool(
+        description = "Synthesize agent evolution proposals from canonical profile documents and evidence. Returns structured JSON proposals; use dry_run=true to inspect the normalized request without calling the model."
+    )]
+    async fn synthesize_agent_evolution(
+        &self,
+        Parameters(params): Parameters<SynthesizeAgentEvolutionParams>,
+    ) -> Result<String, String> {
+        handle_synthesize_agent_evolution(self, params).await
+    }
+
+    #[tool(
+        description = "Queue an agent evolution synthesis job. Persists job state and stores generated proposals for later review."
+    )]
+    async fn queue_agent_evolution(
+        &self,
+        Parameters(params): Parameters<SynthesizeAgentEvolutionParams>,
+    ) -> Result<String, String> {
+        handle_queue_agent_evolution(self, params).await
+    }
+
+    #[tool(
+        description = "List persisted agent evolution proposals for a target agent. Optionally filter by review status."
+    )]
+    async fn list_agent_evolution_proposals(
+        &self,
+        Parameters(params): Parameters<ListAgentEvolutionProposalsParams>,
+    ) -> Result<String, String> {
+        handle_list_agent_evolution_proposals(self, params).await
+    }
+
+    #[tool(
+        description = "Review a persisted agent evolution proposal by marking it approved, rejected, or applied."
+    )]
+    async fn review_agent_evolution_proposal(
+        &self,
+        Parameters(params): Parameters<ReviewAgentEvolutionProposalParams>,
+    ) -> Result<String, String> {
+        handle_review_agent_evolution_proposal(self, params).await
+    }
+
+    #[tool(
+        description = "Project approved agent evolution proposals into host documents. Returns projected content and can optionally write back to disk paths."
+    )]
+    async fn project_agent_profile(
+        &self,
+        Parameters(params): Parameters<ProjectAgentProfileParams>,
+    ) -> Result<String, String> {
+        handle_project_agent_profile(self, params).await
     }
 
     #[tool(description = "View audit log of proxy tool calls through the Hub.")]
@@ -1734,542 +1629,7 @@ impl MemoryServer {
     }
 }
 
-impl MemoryServer {
-    /// Atomically check if connection exists and create if not.
-    /// Prevents TOCTOU race where two concurrent calls both spawn a child.
-    #[allow(dead_code)]
-    async fn ensure_child_connected(&self, server_name: &str) -> Result<(), rmcp::ErrorData> {
-        self.ensure_child_connected_with_context(&format!("mcp:{server_name}"), None)
-            .await
-    }
-
-    async fn ensure_child_connected_with_context(
-        &self,
-        resolved_capability_id: &str,
-        requested_capability_id: Option<&str>,
-    ) -> Result<(), rmcp::ErrorData> {
-        let server_name = resolved_capability_id
-            .strip_prefix("mcp:")
-            .unwrap_or(resolved_capability_id);
-        // Check under lock
-        {
-            let conns = lock_or_recover(&self.pool.connections, "mcp_pool.connections");
-            if conns.contains_key(server_name) {
-                return Ok(());
-            }
-        }
-        // Not connected — acquire connecting lock to serialize connection attempts
-        let connecting_lock = {
-            let mut locks =
-                lock_or_recover(&self.pool.connecting_locks, "mcp_pool.connecting_locks");
-            locks
-                .entry(server_name.to_string())
-                .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
-                .clone()
-        };
-        let _guard = connecting_lock.lock().await;
-        // Double-check after acquiring lock
-        {
-            let conns = lock_or_recover(&self.pool.connections, "mcp_pool.connections");
-            if conns.contains_key(server_name) {
-                return Ok(());
-            }
-        }
-        self.connect_child_with_context(resolved_capability_id, requested_capability_id)
-            .await
-    }
-
-    #[allow(dead_code)]
-    async fn connect_child(&self, server_name: &str) -> Result<(), rmcp::ErrorData> {
-        self.connect_child_with_context(&format!("mcp:{server_name}"), None)
-            .await
-    }
-
-    async fn connect_child_with_context(
-        &self,
-        resolved_capability_id: &str,
-        requested_capability_id: Option<&str>,
-    ) -> Result<(), rmcp::ErrorData> {
-        let server_id = resolved_capability_id.to_string();
-        let server_name = resolved_capability_id
-            .strip_prefix("mcp:")
-            .unwrap_or(resolved_capability_id);
-
-        let cap = self.get_capability(&server_id)?;
-        let (sandbox_policy, policy_source) =
-            self.get_effective_sandbox_policy(requested_capability_id, &server_id);
-        if sandbox_policy.is_none() {
-            self.record_sandbox_exec_audit(
-                &server_id,
-                "preflight",
-                "denied",
-                Some("missing sandbox policy"),
-                0,
-                None,
-                Some("policy_missing"),
-                &json!({
-                    "server_name": server_name,
-                    "requested_capability_id": requested_capability_id,
-                }),
-            );
-            return Err(rmcp::ErrorData::invalid_params(
-                format!(
-                    "Capability '{}' has no sandbox policy. Use sandbox_set_policy before connecting.",
-                    server_id
-                ),
-                None,
-            ));
-        }
-        if sandbox_policy
-            .as_ref()
-            .and_then(|v| v.get("enabled"))
-            .and_then(|v| v.as_bool())
-            == Some(false)
-        {
-            self.record_sandbox_exec_audit(
-                &server_id,
-                "preflight",
-                "denied",
-                Some("sandbox policy disabled capability"),
-                0,
-                None,
-                Some("policy_disabled"),
-                &json!({
-                    "server_name": server_name,
-                    "requested_capability_id": requested_capability_id,
-                    "policy_source": if policy_source.is_empty() { None::<String> } else { Some(policy_source.clone()) },
-                }),
-            );
-            return Err(rmcp::ErrorData::invalid_params(
-                format!(
-                    "Capability '{}' blocked by sandbox policy (enabled=false)",
-                    server_id
-                ),
-                None,
-            ));
-        }
-        if !capability_callable(&cap) {
-            self.record_sandbox_exec_audit(
-                &server_id,
-                "preflight",
-                "denied",
-                Some("capability is not callable"),
-                0,
-                None,
-                Some("capability_not_callable"),
-                &json!({
-                    "server_name": server_name,
-                    "requested_capability_id": requested_capability_id,
-                    "enabled": cap.enabled,
-                    "review_status": cap.review_status,
-                    "health_status": cap.health_status,
-                }),
-            );
-            return Err(rmcp::ErrorData::invalid_params(
-                format!(
-                    "MCP server '{}' is not callable (enabled={}, review_status={}, health_status={}).",
-                    server_id, cap.enabled, cap.review_status, cap.health_status
-                ),
-                None,
-            ));
-        }
-
-        let def: serde_json::Value = serde_json::from_str(&cap.definition)
-            .map_err(|e| rmcp::ErrorData::internal_error(format!("bad definition: {e}"), None))?;
-        let startup_timeout_ms = def["startup_timeout_ms"].as_u64().unwrap_or(30_000);
-        let startup_timeout = Duration::from_millis(startup_timeout_ms.max(1));
-        let client = self
-            .connect_mcp_service(&server_id, requested_capability_id, &def, startup_timeout)
-            .await
-            .map_err(|e| rmcp::ErrorData::internal_error(e, None))?;
-
-        lock_or_recover(&self.pool.connections, "mcp_pool.connections").insert(
-            server_name.to_string(),
-            ChildConnection {
-                client,
-                last_used: Instant::now(),
-            },
-        );
-        Ok(())
-    }
-
-    async fn proxy_call_internal(
-        &self,
-        server_name: &str,
-        tool_name: &str,
-        arguments: Option<serde_json::Map<String, serde_json::Value>>,
-    ) -> Result<rmcp::model::CallToolResult, rmcp::ErrorData> {
-        self.proxy_call_capability_internal(
-            &format!("mcp:{server_name}"),
-            None,
-            tool_name,
-            arguments,
-        )
-        .await
-    }
-
-    async fn proxy_call_capability_internal(
-        &self,
-        resolved_capability_id: &str,
-        requested_capability_id: Option<&str>,
-        tool_name: &str,
-        arguments: Option<serde_json::Map<String, serde_json::Value>>,
-    ) -> Result<rmcp::model::CallToolResult, rmcp::ErrorData> {
-        // 0. Look up capability for deny-list and timeout config
-        let server_id = resolved_capability_id.to_string();
-        let server_name = resolved_capability_id
-            .strip_prefix("mcp:")
-            .unwrap_or(resolved_capability_id);
-        let args_hash = stable_hash(&format!("{:?}", arguments));
-        let audit_reject = |error_kind: &str| {
-            let timestamp = Utc::now().to_rfc3339();
-            let _ = self.with_global_store(|store| {
-                store
-                    .audit_log_insert(
-                        &timestamp,
-                        server_name,
-                        tool_name,
-                        &args_hash,
-                        false,
-                        0,
-                        Some(error_kind),
-                    )
-                    .map_err(|e| format!("{e}"))
-            });
-        };
-        let cap = self.get_capability(&server_id)?;
-        if !capability_callable(&cap) {
-            audit_reject("capability_not_callable");
-            self.record_sandbox_exec_audit(
-                &server_id,
-                "preflight",
-                "denied",
-                Some("capability is not callable"),
-                0,
-                Some(tool_name),
-                Some("capability_not_callable"),
-                &json!({
-                    "server_name": server_name,
-                    "enabled": cap.enabled,
-                    "review_status": cap.review_status,
-                    "health_status": cap.health_status,
-                }),
-            );
-            return Err(rmcp::ErrorData::invalid_params(
-                format!(
-                    "MCP server '{}' is not callable (enabled={}, review_status={}, health_status={}).",
-                    server_id, cap.enabled, cap.review_status, cap.health_status
-                ),
-                None,
-            ));
-        }
-        let cap_def: serde_json::Value = serde_json::from_str(&cap.definition)
-            .map_err(|e| rmcp::ErrorData::internal_error(format!("bad definition: {e}"), None))?;
-        let (sandbox_policy, policy_source) =
-            self.get_effective_sandbox_policy(requested_capability_id, &server_id);
-        if sandbox_policy.is_none() {
-            audit_reject("policy_missing");
-            self.record_sandbox_exec_audit(
-                &server_id,
-                "preflight",
-                "denied",
-                Some("missing sandbox policy"),
-                0,
-                Some(tool_name),
-                Some("policy_missing"),
-                &json!({
-                    "server_name": server_name,
-                    "requested_capability_id": requested_capability_id,
-                }),
-            );
-            return Err(rmcp::ErrorData::invalid_params(
-                format!(
-                    "Capability '{}' has no sandbox policy. Use sandbox_set_policy before calling.",
-                    server_id
-                ),
-                None,
-            ));
-        }
-        if let Some(policy) = sandbox_policy.as_ref() {
-            let policy_enabled = policy
-                .get("enabled")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(true);
-            if !policy_enabled {
-                audit_reject("policy_disabled");
-                self.record_sandbox_exec_audit(
-                    &server_id,
-                    "preflight",
-                    "denied",
-                    Some("sandbox policy disabled capability"),
-                    0,
-                    Some(tool_name),
-                    Some("policy_disabled"),
-                    &json!({
-                        "server_name": server_name,
-                        "requested_capability_id": requested_capability_id,
-                        "policy_source": if policy_source.is_empty() { None::<String> } else { Some(policy_source.clone()) },
-                    }),
-                );
-                return Err(rmcp::ErrorData::invalid_params(
-                    format!(
-                        "Capability '{}' blocked by sandbox policy (enabled=false)",
-                        server_id
-                    ),
-                    None,
-                ));
-            }
-        }
-
-        // 1. Check allow/deny permissions
-        if let Some(allow_list) = cap_def["permissions"]["allow"].as_array() {
-            let allowed: HashSet<&str> = allow_list.iter().filter_map(|v| v.as_str()).collect();
-            if !allowed.is_empty() && !allowed.contains(tool_name) {
-                audit_reject("permission_allow_denied");
-                self.record_sandbox_exec_audit(
-                    &server_id,
-                    "preflight",
-                    "denied",
-                    Some("tool not in permissions.allow"),
-                    0,
-                    Some(tool_name),
-                    Some("permission_allow_denied"),
-                    &json!({
-                        "server_name": server_name,
-                        "requested_capability_id": requested_capability_id,
-                    }),
-                );
-                return Err(rmcp::ErrorData::invalid_params(
-                    format!(
-                        "Tool '{}' is not in permissions.allow for '{}'",
-                        tool_name, server_name
-                    ),
-                    None,
-                ));
-            }
-        }
-
-        if let Some(deny_list) = cap_def["permissions"]["deny"].as_array() {
-            let denied: Vec<&str> = deny_list.iter().filter_map(|v| v.as_str()).collect();
-            if denied.contains(&tool_name) {
-                audit_reject("permission_deny_blocked");
-                self.record_sandbox_exec_audit(
-                    &server_id,
-                    "preflight",
-                    "denied",
-                    Some("tool denied by permissions policy"),
-                    0,
-                    Some(tool_name),
-                    Some("permission_deny_blocked"),
-                    &json!({
-                        "server_name": server_name,
-                        "requested_capability_id": requested_capability_id,
-                    }),
-                );
-                return Err(rmcp::ErrorData::invalid_params(
-                    format!(
-                        "Tool '{}' is denied by permissions policy on '{}'",
-                        tool_name, server_name
-                    ),
-                    None,
-                ));
-            }
-        }
-
-        // 2. Check circuit breaker
-        {
-            let mut circuits = lock_or_recover(&self.pool.circuits, "mcp_pool.circuits");
-            if let Some((state, count)) = circuits.get_mut(server_name) {
-                match state {
-                    CircuitState::Open { until } => {
-                        if Instant::now() < *until {
-                            audit_reject("circuit_open");
-                            self.record_sandbox_exec_audit(
-                                &server_id,
-                                "preflight",
-                                "denied",
-                                Some("circuit breaker open"),
-                                0,
-                                Some(tool_name),
-                                Some("circuit_open"),
-                                &json!({
-                                    "server_name": server_name,
-                                    "requested_capability_id": requested_capability_id,
-                                }),
-                            );
-                            return Err(rmcp::ErrorData::internal_error(
-                                format!("Circuit open for '{}', retry after cooldown", server_name),
-                                None,
-                            ));
-                        }
-                        *state = CircuitState::HalfOpen;
-                        *count = 0;
-                    }
-                    CircuitState::HalfOpen | CircuitState::Closed => {}
-                }
-            }
-        }
-
-        // 3. Acquire per-child concurrency permit (rebuild if max_concurrency changed)
-        let semaphore = {
-            let mut sems = lock_or_recover(&self.pool.semaphores, "mcp_pool.semaphores");
-            let mut max_conc = cap_def["max_concurrency"].as_u64().unwrap_or(1);
-            if let Some(policy_cap) = sandbox_policy
-                .as_ref()
-                .and_then(|v| v.get("max_concurrency"))
-                .and_then(|v| v.as_u64())
-            {
-                max_conc = std::cmp::min(max_conc.max(1), policy_cap.max(1));
-            }
-            let max_conc = max_conc.max(1) as usize;
-            let needs_rebuild = sems
-                .get(server_name)
-                .map(|(_, cached_max)| *cached_max != max_conc)
-                .unwrap_or(true);
-            if needs_rebuild {
-                sems.insert(
-                    server_name.to_string(),
-                    (Arc::new(tokio::sync::Semaphore::new(max_conc)), max_conc),
-                );
-            }
-            sems.get(server_name).unwrap().0.clone()
-        };
-        let _permit = semaphore
-            .acquire()
-            .await
-            .map_err(|_| rmcp::ErrorData::internal_error("semaphore closed", None))?;
-
-        // 4. Ensure connection exists (atomic check-and-connect to avoid TOCTOU race)
-        self.ensure_child_connected_with_context(&server_id, requested_capability_id)
-            .await?;
-
-        // 5. Get peer and call tool with timeout
-        let mut call_params = rmcp::model::CallToolRequestParams::new(tool_name.to_string());
-        if let Some(ref args) = arguments {
-            call_params = call_params.with_arguments(args.clone());
-        }
-
-        let peer = {
-            let mut conns = lock_or_recover(&self.pool.connections, "mcp_pool.connections");
-            if let Some(conn) = conns.get_mut(server_name) {
-                conn.last_used = Instant::now();
-                conn.client.peer().clone()
-            } else {
-                return Err(rmcp::ErrorData::internal_error("connection lost", None));
-            }
-        };
-
-        let mut timeout_ms = cap_def["tool_timeout_ms"].as_u64().unwrap_or(30000);
-        if let Some(policy_tool_ms) = sandbox_policy
-            .as_ref()
-            .and_then(|v| v.get("max_tool_ms"))
-            .and_then(|v| v.as_u64())
-        {
-            timeout_ms = std::cmp::min(timeout_ms.max(1), policy_tool_ms.max(1));
-        }
-        let start = Instant::now();
-
-        let result = tokio::time::timeout(
-            Duration::from_millis(timeout_ms),
-            peer.call_tool(call_params),
-        )
-        .await;
-
-        let duration_ms = start.elapsed().as_millis() as u64;
-
-        // 6. Process result, update circuit breaker, log audit
-        let (final_result, sandbox_decision, sandbox_error_kind) = match result {
-            Ok(Ok(r)) => {
-                // Tool returned successfully (even if r.is_error — that's a tool-level error, not transport)
-                let mut circuits = lock_or_recover(&self.pool.circuits, "mcp_pool.circuits");
-                circuits.insert(server_name.to_string(), (CircuitState::Closed, 0));
-                (Ok(r), "allowed", None)
-            }
-            Ok(Err(e)) => {
-                // Transport/protocol error — increment circuit breaker
-                self.record_circuit_failure(server_name);
-                (
-                    Err(rmcp::ErrorData::internal_error(
-                        format!("proxy call failed: {e}"),
-                        None,
-                    )),
-                    "failed",
-                    Some("proxy_failed"),
-                )
-            }
-            Err(_timeout) => {
-                // Timeout — increment circuit breaker
-                self.record_circuit_failure(server_name);
-                (
-                    Err(rmcp::ErrorData::internal_error(
-                        format!(
-                            "Tool call '{}' on '{}' timed out after {}ms",
-                            tool_name, server_name, timeout_ms
-                        ),
-                        None,
-                    )),
-                    "timeout",
-                    Some("tool_timeout"),
-                )
-            }
-        };
-
-        // 7. Audit log (fire and forget)
-        let success = final_result.is_ok();
-        let error_kind = final_result.as_ref().err().map(|e| format!("{e}"));
-        let timestamp = Utc::now().to_rfc3339();
-        let _ = self.with_global_store(|store| {
-            store
-                .audit_log_insert(
-                    &timestamp,
-                    server_name,
-                    tool_name,
-                    &args_hash,
-                    success,
-                    duration_ms,
-                    error_kind.as_deref(),
-                )
-                .map_err(|e| format!("{e}"))
-        });
-        self.record_sandbox_exec_audit(
-            &server_id,
-            "tool_call",
-            sandbox_decision,
-            error_kind.as_deref(),
-            duration_ms,
-            Some(tool_name),
-            sandbox_error_kind,
-            &json!({
-                "server_name": server_name,
-                "requested_capability_id": requested_capability_id,
-                "policy_source": if policy_source.is_empty() { None::<String> } else { Some(policy_source) },
-                "timeout_ms": timeout_ms,
-            }),
-        );
-
-        final_result
-    }
-
-    fn record_circuit_failure(&self, server_name: &str) {
-        let mut should_remove = false;
-        {
-            let mut circuits = lock_or_recover(&self.pool.circuits, "mcp_pool.circuits");
-            let entry = circuits
-                .entry(server_name.to_string())
-                .or_insert((CircuitState::Closed, 0));
-            entry.1 += 1;
-            if entry.1 >= 3 || matches!(entry.0, CircuitState::HalfOpen) {
-                entry.0 = CircuitState::Open {
-                    until: Instant::now() + Duration::from_secs(30),
-                };
-                should_remove = true;
-            }
-        }
-        if should_remove {
-            lock_or_recover(&self.pool.connections, "mcp_pool.connections").remove(server_name);
-        }
-    }
-}
+// MCP pool proxy methods are in mcp_pool.rs
 
 // ─── Main ────────────────────────────────────────────────────────────────────────
 

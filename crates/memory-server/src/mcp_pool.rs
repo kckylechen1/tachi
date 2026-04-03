@@ -1,0 +1,586 @@
+use super::*;
+
+// ─── MCP Client Connection Pool ──────────────────────────────────────────────
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(super) enum CircuitState {
+    Closed,
+    Open { until: Instant },
+    HalfOpen,
+}
+
+pub(super) struct ChildConnection {
+    /// The running MCP client service — we call peer() on this
+    pub(super) client: rmcp::service::RunningService<rmcp::service::RoleClient, ()>,
+    pub(super) last_used: Instant,
+}
+
+pub(super) struct McpClientPool {
+    /// Active connections: server_name → connection
+    pub(super) connections: std::sync::Mutex<HashMap<String, ChildConnection>>,
+    /// Circuit breaker state per server
+    pub(super) circuits: std::sync::Mutex<HashMap<String, (CircuitState, u32)>>,
+    /// Per-child concurrency semaphores: (semaphore, configured max_concurrency)
+    pub(super) semaphores: std::sync::Mutex<HashMap<String, (Arc<tokio::sync::Semaphore>, usize)>>,
+    /// Per-child connecting locks to prevent TOCTOU race
+    pub(super) connecting_locks: std::sync::Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
+    /// Idle TTL before auto-disconnect
+    pub(super) idle_ttl: Duration,
+}
+
+impl McpClientPool {
+    pub(super) fn new() -> Self {
+        Self {
+            connections: std::sync::Mutex::new(HashMap::new()),
+            circuits: std::sync::Mutex::new(HashMap::new()),
+            semaphores: std::sync::Mutex::new(HashMap::new()),
+            connecting_locks: std::sync::Mutex::new(HashMap::new()),
+            idle_ttl: Duration::from_secs(300),
+        }
+    }
+}
+
+// ─── MCP Pool Proxy Methods on MemoryServer ──────────────────────────────────
+
+impl MemoryServer {
+    /// Atomically check if connection exists and create if not.
+    /// Prevents TOCTOU race where two concurrent calls both spawn a child.
+    #[allow(dead_code)]
+    pub(super) async fn ensure_child_connected(
+        &self,
+        server_name: &str,
+    ) -> Result<(), rmcp::ErrorData> {
+        self.ensure_child_connected_with_context(&format!("mcp:{server_name}"), None)
+            .await
+    }
+
+    pub(super) async fn ensure_child_connected_with_context(
+        &self,
+        resolved_capability_id: &str,
+        requested_capability_id: Option<&str>,
+    ) -> Result<(), rmcp::ErrorData> {
+        let server_name = resolved_capability_id
+            .strip_prefix("mcp:")
+            .unwrap_or(resolved_capability_id);
+        // Check under lock
+        {
+            let conns = lock_or_recover(&self.pool.connections, "mcp_pool.connections");
+            if conns.contains_key(server_name) {
+                return Ok(());
+            }
+        }
+        // Not connected — acquire connecting lock to serialize connection attempts
+        let connecting_lock = {
+            let mut locks =
+                lock_or_recover(&self.pool.connecting_locks, "mcp_pool.connecting_locks");
+            locks
+                .entry(server_name.to_string())
+                .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+                .clone()
+        };
+        let _guard = connecting_lock.lock().await;
+        // Double-check after acquiring lock
+        {
+            let conns = lock_or_recover(&self.pool.connections, "mcp_pool.connections");
+            if conns.contains_key(server_name) {
+                return Ok(());
+            }
+        }
+        self.connect_child_with_context(resolved_capability_id, requested_capability_id)
+            .await
+    }
+
+    #[allow(dead_code)]
+    pub(super) async fn connect_child(
+        &self,
+        server_name: &str,
+    ) -> Result<(), rmcp::ErrorData> {
+        self.connect_child_with_context(&format!("mcp:{server_name}"), None)
+            .await
+    }
+
+    pub(super) async fn connect_child_with_context(
+        &self,
+        resolved_capability_id: &str,
+        requested_capability_id: Option<&str>,
+    ) -> Result<(), rmcp::ErrorData> {
+        let server_id = resolved_capability_id.to_string();
+        let server_name = resolved_capability_id
+            .strip_prefix("mcp:")
+            .unwrap_or(resolved_capability_id);
+
+        let cap = self.get_capability(&server_id)?;
+        let (sandbox_policy, policy_source) =
+            self.get_effective_sandbox_policy(requested_capability_id, &server_id);
+        if sandbox_policy.is_none() {
+            self.record_sandbox_exec_audit(
+                &server_id,
+                "preflight",
+                "denied",
+                Some("missing sandbox policy"),
+                0,
+                None,
+                Some("policy_missing"),
+                &json!({
+                    "server_name": server_name,
+                    "requested_capability_id": requested_capability_id,
+                }),
+            );
+            return Err(rmcp::ErrorData::invalid_params(
+                format!(
+                    "Capability '{}' has no sandbox policy. Use sandbox_set_policy before connecting.",
+                    server_id
+                ),
+                None,
+            ));
+        }
+        if sandbox_policy
+            .as_ref()
+            .and_then(|v| v.get("enabled"))
+            .and_then(|v| v.as_bool())
+            == Some(false)
+        {
+            self.record_sandbox_exec_audit(
+                &server_id,
+                "preflight",
+                "denied",
+                Some("sandbox policy disabled capability"),
+                0,
+                None,
+                Some("policy_disabled"),
+                &json!({
+                    "server_name": server_name,
+                    "requested_capability_id": requested_capability_id,
+                    "policy_source": if policy_source.is_empty() { None::<String> } else { Some(policy_source.clone()) },
+                }),
+            );
+            return Err(rmcp::ErrorData::invalid_params(
+                format!(
+                    "Capability '{}' blocked by sandbox policy (enabled=false)",
+                    server_id
+                ),
+                None,
+            ));
+        }
+        if !capability_callable(&cap) {
+            self.record_sandbox_exec_audit(
+                &server_id,
+                "preflight",
+                "denied",
+                Some("capability is not callable"),
+                0,
+                None,
+                Some("capability_not_callable"),
+                &json!({
+                    "server_name": server_name,
+                    "requested_capability_id": requested_capability_id,
+                    "enabled": cap.enabled,
+                    "review_status": cap.review_status,
+                    "health_status": cap.health_status,
+                }),
+            );
+            return Err(rmcp::ErrorData::invalid_params(
+                format!(
+                    "MCP server '{}' is not callable (enabled={}, review_status={}, health_status={}).",
+                    server_id, cap.enabled, cap.review_status, cap.health_status
+                ),
+                None,
+            ));
+        }
+
+        let def: serde_json::Value = serde_json::from_str(&cap.definition)
+            .map_err(|e| rmcp::ErrorData::internal_error(format!("bad definition: {e}"), None))?;
+        let startup_timeout_ms = def["startup_timeout_ms"].as_u64().unwrap_or(30_000);
+        let startup_timeout = Duration::from_millis(startup_timeout_ms.max(1));
+        let client = self
+            .connect_mcp_service(&server_id, requested_capability_id, &def, startup_timeout)
+            .await
+            .map_err(|e| rmcp::ErrorData::internal_error(e, None))?;
+
+        lock_or_recover(&self.pool.connections, "mcp_pool.connections").insert(
+            server_name.to_string(),
+            ChildConnection {
+                client,
+                last_used: Instant::now(),
+            },
+        );
+        Ok(())
+    }
+
+    pub(super) async fn proxy_call_internal(
+        &self,
+        server_name: &str,
+        tool_name: &str,
+        arguments: Option<serde_json::Map<String, serde_json::Value>>,
+    ) -> Result<rmcp::model::CallToolResult, rmcp::ErrorData> {
+        self.proxy_call_capability_internal(
+            &format!("mcp:{server_name}"),
+            None,
+            tool_name,
+            arguments,
+        )
+        .await
+    }
+
+    pub(super) async fn proxy_call_capability_internal(
+        &self,
+        resolved_capability_id: &str,
+        requested_capability_id: Option<&str>,
+        tool_name: &str,
+        arguments: Option<serde_json::Map<String, serde_json::Value>>,
+    ) -> Result<rmcp::model::CallToolResult, rmcp::ErrorData> {
+        // 0. Look up capability for deny-list and timeout config
+        let server_id = resolved_capability_id.to_string();
+        let server_name = resolved_capability_id
+            .strip_prefix("mcp:")
+            .unwrap_or(resolved_capability_id);
+        let args_hash = stable_hash(&format!("{:?}", arguments));
+        let audit_reject = |error_kind: &str| {
+            let timestamp = Utc::now().to_rfc3339();
+            let _ = self.with_global_store(|store| {
+                store
+                    .audit_log_insert(
+                        &timestamp,
+                        server_name,
+                        tool_name,
+                        &args_hash,
+                        false,
+                        0,
+                        Some(error_kind),
+                    )
+                    .map_err(|e| format!("{e}"))
+            });
+        };
+        let cap = self.get_capability(&server_id)?;
+        if !capability_callable(&cap) {
+            audit_reject("capability_not_callable");
+            self.record_sandbox_exec_audit(
+                &server_id,
+                "preflight",
+                "denied",
+                Some("capability is not callable"),
+                0,
+                Some(tool_name),
+                Some("capability_not_callable"),
+                &json!({
+                    "server_name": server_name,
+                    "enabled": cap.enabled,
+                    "review_status": cap.review_status,
+                    "health_status": cap.health_status,
+                }),
+            );
+            return Err(rmcp::ErrorData::invalid_params(
+                format!(
+                    "MCP server '{}' is not callable (enabled={}, review_status={}, health_status={}).",
+                    server_id, cap.enabled, cap.review_status, cap.health_status
+                ),
+                None,
+            ));
+        }
+        let cap_def: serde_json::Value = serde_json::from_str(&cap.definition)
+            .map_err(|e| rmcp::ErrorData::internal_error(format!("bad definition: {e}"), None))?;
+        let (sandbox_policy, policy_source) =
+            self.get_effective_sandbox_policy(requested_capability_id, &server_id);
+        if sandbox_policy.is_none() {
+            audit_reject("policy_missing");
+            self.record_sandbox_exec_audit(
+                &server_id,
+                "preflight",
+                "denied",
+                Some("missing sandbox policy"),
+                0,
+                Some(tool_name),
+                Some("policy_missing"),
+                &json!({
+                    "server_name": server_name,
+                    "requested_capability_id": requested_capability_id,
+                }),
+            );
+            return Err(rmcp::ErrorData::invalid_params(
+                format!(
+                    "Capability '{}' has no sandbox policy. Use sandbox_set_policy before calling.",
+                    server_id
+                ),
+                None,
+            ));
+        }
+        if let Some(policy) = sandbox_policy.as_ref() {
+            let policy_enabled = policy
+                .get("enabled")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(true);
+            if !policy_enabled {
+                audit_reject("policy_disabled");
+                self.record_sandbox_exec_audit(
+                    &server_id,
+                    "preflight",
+                    "denied",
+                    Some("sandbox policy disabled capability"),
+                    0,
+                    Some(tool_name),
+                    Some("policy_disabled"),
+                    &json!({
+                        "server_name": server_name,
+                        "requested_capability_id": requested_capability_id,
+                        "policy_source": if policy_source.is_empty() { None::<String> } else { Some(policy_source.clone()) },
+                    }),
+                );
+                return Err(rmcp::ErrorData::invalid_params(
+                    format!(
+                        "Capability '{}' blocked by sandbox policy (enabled=false)",
+                        server_id
+                    ),
+                    None,
+                ));
+            }
+        }
+
+        // 1. Check allow/deny permissions
+        if let Some(allow_list) = cap_def["permissions"]["allow"].as_array() {
+            let allowed: HashSet<&str> = allow_list.iter().filter_map(|v| v.as_str()).collect();
+            if !allowed.is_empty() && !allowed.contains(tool_name) {
+                audit_reject("permission_allow_denied");
+                self.record_sandbox_exec_audit(
+                    &server_id,
+                    "preflight",
+                    "denied",
+                    Some("tool not in permissions.allow"),
+                    0,
+                    Some(tool_name),
+                    Some("permission_allow_denied"),
+                    &json!({
+                        "server_name": server_name,
+                        "requested_capability_id": requested_capability_id,
+                    }),
+                );
+                return Err(rmcp::ErrorData::invalid_params(
+                    format!(
+                        "Tool '{}' is not in permissions.allow for '{}'",
+                        tool_name, server_name
+                    ),
+                    None,
+                ));
+            }
+        }
+
+        if let Some(deny_list) = cap_def["permissions"]["deny"].as_array() {
+            let denied: Vec<&str> = deny_list.iter().filter_map(|v| v.as_str()).collect();
+            if denied.contains(&tool_name) {
+                audit_reject("permission_deny_blocked");
+                self.record_sandbox_exec_audit(
+                    &server_id,
+                    "preflight",
+                    "denied",
+                    Some("tool denied by permissions policy"),
+                    0,
+                    Some(tool_name),
+                    Some("permission_deny_blocked"),
+                    &json!({
+                        "server_name": server_name,
+                        "requested_capability_id": requested_capability_id,
+                    }),
+                );
+                return Err(rmcp::ErrorData::invalid_params(
+                    format!(
+                        "Tool '{}' is denied by permissions policy on '{}'",
+                        tool_name, server_name
+                    ),
+                    None,
+                ));
+            }
+        }
+
+        // 2. Check circuit breaker
+        {
+            let mut circuits = lock_or_recover(&self.pool.circuits, "mcp_pool.circuits");
+            if let Some((state, count)) = circuits.get_mut(server_name) {
+                match state {
+                    CircuitState::Open { until } => {
+                        if Instant::now() < *until {
+                            audit_reject("circuit_open");
+                            self.record_sandbox_exec_audit(
+                                &server_id,
+                                "preflight",
+                                "denied",
+                                Some("circuit breaker open"),
+                                0,
+                                Some(tool_name),
+                                Some("circuit_open"),
+                                &json!({
+                                    "server_name": server_name,
+                                    "requested_capability_id": requested_capability_id,
+                                }),
+                            );
+                            return Err(rmcp::ErrorData::internal_error(
+                                format!("Circuit open for '{}', retry after cooldown", server_name),
+                                None,
+                            ));
+                        }
+                        *state = CircuitState::HalfOpen;
+                        *count = 0;
+                    }
+                    CircuitState::HalfOpen | CircuitState::Closed => {}
+                }
+            }
+        }
+
+        // 3. Acquire per-child concurrency permit (rebuild if max_concurrency changed)
+        let semaphore = {
+            let mut sems = lock_or_recover(&self.pool.semaphores, "mcp_pool.semaphores");
+            let mut max_conc = cap_def["max_concurrency"].as_u64().unwrap_or(1);
+            if let Some(policy_cap) = sandbox_policy
+                .as_ref()
+                .and_then(|v| v.get("max_concurrency"))
+                .and_then(|v| v.as_u64())
+            {
+                max_conc = std::cmp::min(max_conc.max(1), policy_cap.max(1));
+            }
+            let max_conc = max_conc.max(1) as usize;
+            let needs_rebuild = sems
+                .get(server_name)
+                .map(|(_, cached_max)| *cached_max != max_conc)
+                .unwrap_or(true);
+            if needs_rebuild {
+                sems.insert(
+                    server_name.to_string(),
+                    (Arc::new(tokio::sync::Semaphore::new(max_conc)), max_conc),
+                );
+            }
+            sems.get(server_name).unwrap().0.clone()
+        };
+        let _permit = semaphore
+            .acquire()
+            .await
+            .map_err(|_| rmcp::ErrorData::internal_error("semaphore closed", None))?;
+
+        // 4. Ensure connection exists (atomic check-and-connect to avoid TOCTOU race)
+        self.ensure_child_connected_with_context(&server_id, requested_capability_id)
+            .await?;
+
+        // 5. Get peer and call tool with timeout
+        let mut call_params = rmcp::model::CallToolRequestParams::new(tool_name.to_string());
+        if let Some(ref args) = arguments {
+            call_params = call_params.with_arguments(args.clone());
+        }
+
+        let peer = {
+            let mut conns = lock_or_recover(&self.pool.connections, "mcp_pool.connections");
+            if let Some(conn) = conns.get_mut(server_name) {
+                conn.last_used = Instant::now();
+                conn.client.peer().clone()
+            } else {
+                return Err(rmcp::ErrorData::internal_error("connection lost", None));
+            }
+        };
+
+        let mut timeout_ms = cap_def["tool_timeout_ms"].as_u64().unwrap_or(30000);
+        if let Some(policy_tool_ms) = sandbox_policy
+            .as_ref()
+            .and_then(|v| v.get("max_tool_ms"))
+            .and_then(|v| v.as_u64())
+        {
+            timeout_ms = std::cmp::min(timeout_ms.max(1), policy_tool_ms.max(1));
+        }
+        let start = Instant::now();
+
+        let result = tokio::time::timeout(
+            Duration::from_millis(timeout_ms),
+            peer.call_tool(call_params),
+        )
+        .await;
+
+        let duration_ms = start.elapsed().as_millis() as u64;
+
+        // 6. Process result, update circuit breaker, log audit
+        let (final_result, sandbox_decision, sandbox_error_kind) = match result {
+            Ok(Ok(r)) => {
+                // Tool returned successfully (even if r.is_error — that's a tool-level error, not transport)
+                let mut circuits = lock_or_recover(&self.pool.circuits, "mcp_pool.circuits");
+                circuits.insert(server_name.to_string(), (CircuitState::Closed, 0));
+                (Ok(r), "allowed", None)
+            }
+            Ok(Err(e)) => {
+                // Transport/protocol error — increment circuit breaker
+                self.record_circuit_failure(server_name);
+                (
+                    Err(rmcp::ErrorData::internal_error(
+                        format!("proxy call failed: {e}"),
+                        None,
+                    )),
+                    "failed",
+                    Some("proxy_failed"),
+                )
+            }
+            Err(_timeout) => {
+                // Timeout — increment circuit breaker
+                self.record_circuit_failure(server_name);
+                (
+                    Err(rmcp::ErrorData::internal_error(
+                        format!(
+                            "Tool call '{}' on '{}' timed out after {}ms",
+                            tool_name, server_name, timeout_ms
+                        ),
+                        None,
+                    )),
+                    "timeout",
+                    Some("tool_timeout"),
+                )
+            }
+        };
+
+        // 7. Audit log (fire and forget)
+        let success = final_result.is_ok();
+        let error_kind = final_result.as_ref().err().map(|e| format!("{e}"));
+        let timestamp = Utc::now().to_rfc3339();
+        let _ = self.with_global_store(|store| {
+            store
+                .audit_log_insert(
+                    &timestamp,
+                    server_name,
+                    tool_name,
+                    &args_hash,
+                    success,
+                    duration_ms,
+                    error_kind.as_deref(),
+                )
+                .map_err(|e| format!("{e}"))
+        });
+        self.record_sandbox_exec_audit(
+            &server_id,
+            "tool_call",
+            sandbox_decision,
+            error_kind.as_deref(),
+            duration_ms,
+            Some(tool_name),
+            sandbox_error_kind,
+            &json!({
+                "server_name": server_name,
+                "requested_capability_id": requested_capability_id,
+                "policy_source": if policy_source.is_empty() { None::<String> } else { Some(policy_source) },
+                "timeout_ms": timeout_ms,
+            }),
+        );
+
+        final_result
+    }
+
+    pub(super) fn record_circuit_failure(&self, server_name: &str) {
+        let mut should_remove = false;
+        {
+            let mut circuits = lock_or_recover(&self.pool.circuits, "mcp_pool.circuits");
+            let entry = circuits
+                .entry(server_name.to_string())
+                .or_insert((CircuitState::Closed, 0));
+            entry.1 += 1;
+            if entry.1 >= 3 || matches!(entry.0, CircuitState::HalfOpen) {
+                entry.0 = CircuitState::Open {
+                    until: Instant::now() + Duration::from_secs(30),
+                };
+                should_remove = true;
+            }
+        }
+        if should_remove {
+            lock_or_recover(&self.pool.connections, "mcp_pool.connections").remove(server_name);
+        }
+    }
+}

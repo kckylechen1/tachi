@@ -5,6 +5,63 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.14.0] - 2026-04-03
+
+### Added
+- **Agent-first installation guide** (`docs/INSTALL.md`): A standalone document that any AI agent can read to autonomously install and configure Tachi — no human intervention needed. All three READMEs now link to this guide as the primary install path.
+
+### Fixed
+- **CRITICAL: Vault rotation underflow** (`vault_ops.rs`): Unsigned integer underflow in round-robin key rotation when `current_index` was 0 and subtraction wrapped. Now uses checked arithmetic with modular fallback.
+- **HIGH: UTF-8 boundary panic** (`hub_ops/evolve.rs`): Multi-byte character slicing in skill evolution output could panic at byte boundaries. Switched to `char_indices`-based truncation.
+- **Unbounded channel backpressure**: `enrich_tx` and `foundry_tx` were `mpsc::unbounded_channel` with no backpressure. Replaced with bounded channels (512 and 256 respectively) and `try_send` to prevent memory growth under sustained load.
+- **Unbounded rate limiter maps**: `rate_limit_bursts` and `rate_limit_windows` HashMaps grew without bound per unique session. Added stale-entry eviction at 1024 and 4096 caps.
+- **Unbounded tool cache**: `tool_cache` HashMap in `ServerHandler` grew without limit. Added LRU eviction at 256 entries.
+- **DB lock contention on hub register**: Background `tokio::spawn` in `hub_ops/register.rs` held the async runtime while waiting for the DB write lock. Switched to `spawn_blocking` to avoid starving the Tokio thread pool.
+
+### Changed
+- **Python MCP server removed**: The legacy `mcp/` directory (Python 3.10+ MCP server) has been deleted. The native Rust binary is now the only MCP server. All READMEs updated to remove Python references and badges.
+- **READMEs overhauled** (English, 简体中文, 文言文): Added agent-driven install option, updated architecture diagrams (removed Python paths), added Ghost Whispers / Neural Foundry / Skill Packs / Capability Recommendations to feature lists.
+- **OpenClaw compatibility hardened**: Version aligned to `0.14.0`, `compact_context` guard added (checks required parameters before calling), phantom `record_access` field removed from TypeScript types, deprecated `shadowStorePath` removed from `plugin.json`.
+- **Agent MCP configs updated**: Gemini CLI and Antigravity configs had stale `TACHI_EXPOSED_TOOLS` restrictions — removed to expose full tool surface.
+- **All crates and packages bumped to 0.14.0**: `memory-core`, `memory-node`, `memory-python`, `memory-server`, `integrations/openclaw`, and npm optionalDependencies.
+
+### Known Issues
+- **Homebrew tap CI**: The "Update Homebrew Tap" GitHub Actions workflow requires a `HOMEBREW_TAP_GITHUB_TOKEN` secret to be configured in the repository settings. This is a manual step.
+- **Low-severity items deferred**: Various `.unwrap()` calls in non-critical paths, unbounded `proxy_tools` vec, `hub_ops/export.rs` clean mode may delete non-tachi files, and extensive `#[allow(dead_code)]` annotations remain for a future cleanup pass.
+
+## [0.13.1] - 2026-04-03
+
+### Changed
+- **MiniMax lane wiring clarified**: documented and configured `MiniMax M2.7` as the default `DISTILL` and `SUMMARY` target using its OpenAI-compatible `chat/completions` endpoint, instead of treating it as a future gateway-only option.
+- **Release examples tightened**: `.env.example` and `README.en.md` now show the tested lane stack explicitly: `Qwen3.5-27B` for extract, `MiniMax M2.7` for distill/summary, and `GLM-5.1` for reasoning/skill-audit.
+- **Cargo lock aligned with release version**: `Cargo.lock` now records the `memory-server` package at `0.13.1`, keeping tagged builds internally consistent.
+
+### Fixed
+- **Post-tag release cleanup**: followed up the initial `0.13.0` lane-config release with lockfile/version consistency fixes and direct MiniMax endpoint guidance.
+
+## [0.13.0] - 2026-04-03
+
+### Added
+- **Neural Foundry V1 runtime**: introduced server-owned `recall_context`, `capture_session`, `compact_context`, `section_build`, `compact_rollup`, and `compact_session_memory` so memory capture, context compaction, and durable session artifacts live in Tachi instead of host adapters.
+- **Capability recommendation layer**: added `recommend_capability`, `recommend_skill`, `recommend_toolchain`, and `prepare_capability_bundle` to let Tachi recommend and package skills, packs, and host toolchains from one kernel surface.
+- **Agent evolution pipeline**: added proposal synthesis, queue/review/project tools for agent profile evolution, plus richer evidence ingestion from inline docs, file paths, and memory-query bundles.
+- **Read-only memory graph tool**: added `memory_graph` so agents can inspect graph neighborhoods without direct edge mutation access.
+- **Kernel surface docs**: documented `kernel / capability / runtime / workflow / admin` layers and lane benchmark round-2 guidance for model selection.
+
+### Changed
+- **OpenClaw became a thin adapter**: the OpenClaw integration now keeps only a small agent-facing tool surface (`memory_search`, `memory_save`, `memory_get`, `memory_graph`) while `before_agent_start` and `agent_end` delegate recall/capture back to Tachi.
+- **Tool exposure profiles**: built-in `ide`, `runtime`, `workflow`, and `admin` profiles now gate MCP tool exposure by host/runtime needs instead of exposing the full server by default.
+- **LLM lane configuration**: the Rust client now supports separate `EXTRACT_*`, `DISTILL_*`, `SUMMARY_*`, and `REASONING_*` environment slots on top of the shared `SILICONFLOW_*` fallback, preparing Tachi for per-lane model routing.
+- **CLI/server split cleanup**: `memory-server` moved CLI argument parsing, enrichment batching, and MCP pool logic into dedicated modules (`cli.rs`, `enrichment.rs`, `mcp_pool.rs`) to reduce `main.rs` churn.
+
+### Fixed
+- **OpenClaw / Opencode naming drift**: local configs now consistently refer to the memory kernel as `tachi`, and stale `sigil-node` package-lock remnants were removed from the live OpenClaw plugin copy.
+- **Projection and maintenance hardening**: proposal writes remain rooted, distilled-memory retention is recency-safe, and foundry maintenance claims include state fingerprints to avoid skipping post-enrichment reruns.
+
+### Tests
+- **`memory-server` suite**: `cargo test -p memory-server` now passes with 99 tests after the module split and Foundry lane work.
+- **OpenClaw build**: `npm --prefix integrations/openclaw run build` passes against the thin-adapter plugin.
+
 ## [0.12.3] - 2026-04-01
 
 ### Added

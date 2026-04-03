@@ -48,37 +48,17 @@ export type BridgeConfig = {
   dbPath: string;
   shadowStorePath: string; // Keep for migration only
   auditLogPath: string;
-  promptPath: string;
   topK: number;
-  searchReadLimit: number;
-  dedupThreshold: number;
-  mergeThreshold: number;
   captureMinChars: number;
   captureTriggerKeywords: string[];
   weights: { semantic: number; fts: number; symbolic: number; decay: number };
-  extractor: {
-    baseUrl: string;
-    apiKey: string;
-    model: string;
-    timeoutMs: number;
-  };
-  embedding: {
-    baseUrl: string;
-    apiKey: string;
-    model: string;
-    dimension: number;
-  };
 };
 
 const moduleDir = path.dirname(fileURLToPath(import.meta.url));
 const pluginDataDir = path.resolve(moduleDir, "data");
 const workspaceRoot = process.env.OPENCLAW_WORKSPACE || "";
-const repoRoot = path.resolve(moduleDir, "../..");
 
 export const defaultConfig: BridgeConfig = {
-  promptPath: workspaceRoot
-    ? path.resolve(workspaceRoot, "scripts/memory_builder_prompt.txt")
-    : path.resolve(repoRoot, "scripts/memory_builder_prompt.txt"),
   dbPath: process.env.MEMORY_DB_PATH
     ? resolveUserPath(process.env.MEMORY_DB_PATH)
     : defaultDbPath,
@@ -88,9 +68,6 @@ export const defaultConfig: BridgeConfig = {
   ),
   auditLogPath: path.resolve(pluginDataDir, "audit-log.jsonl"),
   topK: 6,
-  searchReadLimit: Number(process.env.MEMORY_BRIDGE_SEARCH_READ_LIMIT || 2000),
-  dedupThreshold: Number(process.env.MEMORY_BRIDGE_DEDUP_THRESHOLD || 0.95),
-  mergeThreshold: Number(process.env.MEMORY_BRIDGE_MERGE_THRESHOLD || 0.85),
   captureMinChars: Number(process.env.MEMORY_BRIDGE_CAPTURE_MIN_CHARS || 24),
   captureTriggerKeywords: (
     process.env.MEMORY_BRIDGE_CAPTURE_TRIGGERS ||
@@ -105,22 +82,6 @@ export const defaultConfig: BridgeConfig = {
     symbolic: 0.2,
     decay: 0.1,
   },
-  extractor: {
-    baseUrl: process.env.MEMORY_BRIDGE_OPENAI_BASE_URL || "https://api.siliconflow.cn/v1",
-    apiKey:
-      process.env.MEMORY_BRIDGE_OPENAI_API_KEY ||
-      process.env.SILICONFLOW_API_KEY ||
-      process.env.OPENAI_API_KEY ||
-      "",
-    model: process.env.MEMORY_BRIDGE_OPENAI_MODEL || "THUDM/GLM-4-9B-0414",
-    timeoutMs: Number(process.env.MEMORY_BRIDGE_OPENAI_TIMEOUT_MS || 25000),
-  },
-  embedding: {
-    baseUrl: process.env.MEMORY_BRIDGE_EMBEDDING_BASE_URL || "https://api.voyageai.com/v1",
-    apiKey: process.env.VOYAGE_API_KEY || "",
-    model: process.env.MEMORY_BRIDGE_EMBEDDING_MODEL || "voyage-4",
-    dimension: Number(process.env.MEMORY_BRIDGE_EMBEDDING_DIMENSION || 1024),
-  },
 };
 
 export const bridgeConfigSchema = {
@@ -133,14 +94,6 @@ export const bridgeConfigSchema = {
       weights: {
         ...defaultConfig.weights,
         ...(overrides.weights || {}),
-      },
-      extractor: {
-        ...defaultConfig.extractor,
-        ...(overrides.extractor || {}),
-      },
-      embedding: {
-        ...defaultConfig.embedding,
-        ...(overrides.embedding || {}),
       },
     };
   },

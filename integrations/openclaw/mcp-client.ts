@@ -30,8 +30,37 @@ type SearchOptions = {
   top_k?: number;
   candidates?: number;
   path_prefix?: string;
-  record_access?: boolean;
   weights?: { semantic: number; fts: number; symbolic: number; decay: number };
+};
+
+type RecallContextOptions = {
+  top_k?: number;
+  candidate_multiplier?: number;
+  path_prefix?: string;
+  agent_id?: string;
+  exclude_topics?: string[];
+  min_score?: number;
+};
+
+type CompactContextParams = {
+  agent_id: string;
+  conversation_id: string;
+  window_id: string;
+  trigger?: string;
+  messages: Array<{ role: string; content: string }>;
+  current_summary?: string;
+  path_prefix?: string;
+  target_tokens?: number;
+  max_output_tokens?: number;
+  persist?: boolean;
+};
+
+type MemoryGraphParams = {
+  memory_id?: string;
+  query?: string;
+  path_prefix?: string;
+  top_k?: number;
+  depth?: number;
 };
 
 type LaunchConfig = {
@@ -48,9 +77,12 @@ type RawToolResult = CallToolResult & {
 };
 
 const REQUIRED_TOOLS = [
+  "recall_context",
+  "capture_session",
   "save_memory",
   "search_memory",
   "get_memory",
+  "memory_graph",
   "delete_memory",
   "memory_stats",
   "list_memories",
@@ -214,6 +246,7 @@ export class MemoryMcpClient {
     const env = {
       ...process.env,
       MEMORY_DB_PATH: this.dbPath,
+      TACHI_PROFILE: process.env.TACHI_PROFILE || "runtime",
     } as Record<string, string>;
     const candidates: LaunchConfig[] = [
       // First candidate: explicit global-db, no project db (clean isolation)
@@ -255,7 +288,7 @@ export class MemoryMcpClient {
     const client = new Client(
       {
         name: "memory-hybrid-bridge",
-        version: "0.0.0",
+        version: "0.14.0",
       },
       {},
     );
@@ -374,6 +407,10 @@ export class MemoryMcpClient {
     return coerceMemoryEntry(payload);
   }
 
+  async memoryGraph(params: MemoryGraphParams): Promise<unknown> {
+    return await this.callJson("memory_graph", params);
+  }
+
   async listMemories(limit: number): Promise<MemoryEntry[]> {
     const payload = await this.callJson<unknown>("list_memories", {
       path_prefix: "/",
@@ -429,6 +466,72 @@ export class MemoryMcpClient {
     }
 
     return { docs, scores, scoreBreakdowns };
+  }
+
+  async recallContext(
+    query: string,
+    opts?: RecallContextOptions,
+  ): Promise<{
+    prependContext: string;
+    results: Array<{ entry: MemoryEntry; final_score: number }>;
+  }> {
+    const payload = await this.callJson<unknown>("recall_context", {
+      query,
+      top_k: opts?.top_k,
+      candidate_multiplier: opts?.candidate_multiplier,
+      path_prefix: opts?.path_prefix,
+      agent_id: opts?.agent_id,
+      exclude_topics: opts?.exclude_topics,
+      min_score: opts?.min_score,
+    });
+
+    let prependContext = "";
+    const results: Array<{ entry: MemoryEntry; final_score: number }> = [];
+
+    if (isRecord(payload) && typeof payload.prepend_context === "string") {
+      prependContext = payload.prepend_context;
+    }
+
+    const rows = isRecord(payload) && Array.isArray(payload.results) ? payload.results : [];
+    for (const row of rows) {
+      const entry = coerceMemoryEntry(row);
+      if (!entry) {
+        continue;
+      }
+      const finalScore = asFiniteNumber(
+        (isRecord(row) ? row.relevance : undefined) ??
+          (isRecord(row) && isRecord(row.score) ? row.score.final : undefined),
+      );
+      results.push({ entry, final_score: finalScore });
+    }
+
+    return { prependContext, results };
+  }
+
+  async captureSession(params: {
+    conversation_id: string;
+    turn_id: string;
+    agent_id: string;
+    messages: Array<{ role: string; content: string }>;
+    path_prefix?: string;
+    scope?: string;
+    force?: boolean;
+  }): Promise<unknown> {
+    return await this.callJson<unknown>("capture_session", params);
+  }
+
+  async compactContext(
+    params: CompactContextParams,
+  ): Promise<{
+    status: string;
+    compacted_text: string;
+    estimated_tokens: number;
+    queued_job_ids?: string[];
+  }> {
+    if (!this.availableTools.has("compact_context")) {
+      throw new Error("compact_context tool is unavailable");
+    }
+    return await this.callJson("compact_context", params);
   }
 
   async findSimilarMemory(

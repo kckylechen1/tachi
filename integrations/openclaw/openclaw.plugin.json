@@ -8,29 +8,13 @@
     "type": "object",
     "additionalProperties": true,
     "properties": {
-      "shadowStorePath": {
-        "type": "string"
-      },
       "auditLogPath": {
-        "type": "string"
-      },
-      "promptPath": {
         "type": "string"
       },
       "topK": {
         "type": "integer",
         "minimum": 1,
         "maximum": 20
-      },
-      "dedupThreshold": {
-        "type": "number",
-        "minimum": 0,
-        "maximum": 1
-      },
-      "searchReadLimit": {
-        "type": "integer",
-        "minimum": 100,
-        "maximum": 100000
       },
       "captureMinChars": {
         "type": "integer",

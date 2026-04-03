@@ -1,0 +1,110 @@
+use super::*;
+use serde::{Deserialize, Serialize};
+use std::sync::atomic::AtomicU64;
+
+mod capture;
+mod handlers;
+mod helpers;
+mod maintenance;
+mod recall;
+
+#[cfg(test)]
+mod tests;
+
+const CAPTURE_DEDUP_THRESHOLD: f64 = 0.95;
+const CAPTURE_MERGE_THRESHOLD: f64 = 0.85;
+const FOUNDRY_DISTILL_SOURCE: &str = "foundry_distill";
+const FOUNDRY_RELATED_LIMIT: usize = 4;
+const FOUNDRY_DISTILL_WINDOW: usize = 8;
+const FOUNDRY_DISTILL_KEEP: usize = 6;
+
+#[derive(Debug, Default)]
+pub(super) struct FoundryWorkerStats {
+    pub queued: AtomicU64,
+    pub running: AtomicU64,
+    pub completed: AtomicU64,
+    pub failed: AtomicU64,
+    pub skipped: AtomicU64,
+}
+
+#[derive(Debug, Clone)]
+pub(super) struct FoundryMaintenanceItem {
+    pub job: memory_core::FoundryJobSpec,
+    pub target_db: DbScope,
+    pub named_project: Option<String>,
+    pub path_prefix: String,
+    pub memory_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct SessionCaptureDraft {
+    text: String,
+    #[serde(default)]
+    summary: String,
+    #[serde(default)]
+    topic: String,
+    #[serde(default = "default_capture_category")]
+    category: String,
+    #[serde(default = "default_capture_scope")]
+    scope: String,
+    #[serde(default = "default_capture_importance")]
+    importance: f64,
+    #[serde(default)]
+    keywords: Vec<String>,
+    #[serde(default)]
+    persons: Vec<String>,
+    #[serde(default)]
+    entities: Vec<String>,
+    #[serde(default)]
+    location: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct CompactContextDraft {
+    compacted_text: String,
+    #[serde(default)]
+    salient_topics: Vec<String>,
+    #[serde(default)]
+    durable_signals: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct SectionArtifact {
+    section_id: String,
+    layer: String,
+    kind: String,
+    title: Option<String>,
+    cache_boundary: String,
+    estimated_tokens: usize,
+    item_count: usize,
+    source_refs: Vec<String>,
+    block: String,
+}
+
+#[derive(Debug, Clone)]
+struct RecallScope {
+    search_prefixes: Vec<Option<String>>,
+    allowed_prefixes: Vec<String>,
+    warning: Option<String>,
+}
+
+fn default_capture_category() -> String {
+    "fact".to_string()
+}
+
+fn default_capture_scope() -> String {
+    "project".to_string()
+}
+
+fn default_capture_importance() -> f64 {
+    0.7
+}
+
+// Re-export items so sibling modules (main.rs etc.) can use them
+pub(crate) use handlers::{
+    handle_capture_session, handle_compact_context, handle_compact_rollup,
+    handle_compact_session_memory, handle_recall_context, handle_section_build,
+};
+pub(crate) use maintenance::{
+    enqueue_foundry_capture_maintenance, run_foundry_maintenance_worker,
+};

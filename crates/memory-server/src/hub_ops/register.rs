@@ -1,0 +1,285 @@
+use super::*;
+use super::security_scan::{merge_skill_scans, scan_skill_definition, scan_skill_definition_with_llm};
+
+pub(in crate) async fn handle_hub_register(
+    server: &MemoryServer,
+    params: HubRegisterParams,
+) -> Result<String, String> {
+    let (target_db, warning) = server.resolve_write_scope(&params.scope);
+
+    let mut resp = serde_json::Map::new();
+    resp.insert("id".into(), json!(params.id));
+    resp.insert("db".into(), json!(target_db.as_str()));
+    resp.insert("version".into(), json!(params.version));
+    if let Some(w) = warning {
+        append_warning(&mut resp, w);
+    }
+
+    let mut cap_definition = params.definition.clone();
+    let mut enabled = true;
+    let mut exposure_mode = "direct".to_string();
+
+    if params.cap_type == "mcp" {
+        let mut def: serde_json::Value = serde_json::from_str(&params.definition)
+            .map_err(|e| format!("invalid mcp definition JSON: {e}"))?;
+        let transport_type = def["transport"].as_str().unwrap_or("stdio").to_string();
+        let tool_exposure_mode = resolve_mcp_tool_exposure(&def, server.mcp_tool_exposure_mode);
+        exposure_mode = tool_exposure_mode.as_str().to_string();
+        def["tool_exposure"] = json!(tool_exposure_mode.as_str());
+        resp.insert("tool_exposure".into(), json!(tool_exposure_mode.as_str()));
+
+        // Security: validate MCP server commands against allowlist
+        let auto_enabled = if transport_type == "stdio" {
+            if let Some(cmd) = def["command"].as_str() {
+                is_trusted_command(cmd)
+            } else {
+                false
+            }
+        } else {
+            true // SSE/HTTP are URLs, no local exec risk
+        };
+
+        let server_name = params
+            .id
+            .strip_prefix("mcp:")
+            .unwrap_or(&params.id)
+            .to_string();
+        server.clear_proxy_tools(&server_name);
+
+        clear_mcp_discovery_metadata(&mut def);
+        server.clear_proxy_tools(&server_name);
+
+        if !auto_enabled {
+            let cmd = def["command"].as_str().unwrap_or("unknown");
+            append_warning(
+                &mut resp,
+                format!(
+                    "Command '{}' is not in the trusted allowlist. Capability registered in pending review state; approve and enable explicitly before discovery.",
+                    cmd
+                ),
+            );
+        } else {
+            append_warning(
+                &mut resp,
+                "MCP discovery is deferred until review approval and enablement.",
+            );
+        }
+        resp.insert("discovery".into(), json!("deferred"));
+
+        cap_definition = serde_json::to_string(&def)
+            .map_err(|e| format!("Failed to serialize MCP definition: {e}"))?;
+
+        // Governance gate: MCP capabilities must be reviewed before activation.
+        enabled = false;
+        resp.insert("enabled".into(), json!(false));
+        resp.insert("review_status".into(), json!("pending"));
+        append_warning(
+            &mut resp,
+            "MCP capability registered in pending review state; use hub_review to approve before hub_call.",
+        );
+    }
+
+    if params.cap_type == "skill" {
+        let mut def: serde_json::Value =
+            match serde_json::from_str::<serde_json::Value>(&cap_definition) {
+                Ok(v) if v.is_object() => v,
+                Ok(_) => {
+                    append_warning(
+                        &mut resp,
+                        "Skill definition is not a JSON object; skipped static skill scan",
+                    );
+                    serde_json::json!({})
+                }
+                Err(_) => {
+                    append_warning(
+                        &mut resp,
+                        "Skill definition is not valid JSON; skipped static skill scan",
+                    );
+                    serde_json::json!({})
+                }
+            };
+
+        if def.is_object() {
+            let static_scan = scan_skill_definition(&def);
+            let llm_scan = scan_skill_definition_with_llm(server, &def).await;
+            let scan = merge_skill_scans(&static_scan, llm_scan.as_ref());
+
+            let blocked = scan
+                .get("blocked")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            let risk = scan
+                .get("risk")
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown")
+                .to_string();
+            def["security_scan"] = scan.clone();
+            resp.insert("skill_scan".into(), scan);
+            if blocked {
+                enabled = false;
+                resp.insert("enabled".into(), json!(false));
+                append_warning(
+                    &mut resp,
+                    format!(
+                        "Skill static scan blocked registration activation (risk={risk}). Review definition and re-enable explicitly."
+                    ),
+                );
+            }
+            cap_definition = serde_json::to_string(&def)
+                .map_err(|e| format!("Failed to serialize skill definition: {e}"))?;
+        }
+    }
+
+    let cap = HubCapability {
+        id: params.id.clone(),
+        cap_type: params.cap_type.clone(),
+        name: params.name.clone(),
+        version: params.version,
+        description: params.description.clone(),
+        definition: cap_definition,
+        enabled,
+        review_status: if params.cap_type == "mcp" {
+            "pending".to_string()
+        } else {
+            "approved".to_string()
+        },
+        health_status: if params.cap_type == "mcp" {
+            "unknown".to_string()
+        } else {
+            "healthy".to_string()
+        },
+        last_error: None,
+        last_success_at: None,
+        last_failure_at: None,
+        fail_streak: 0,
+        active_version: None,
+        exposure_mode,
+        uses: 0,
+        successes: 0,
+        failures: 0,
+        avg_rating: 0.0,
+        last_used: None,
+        created_at: String::new(),
+        updated_at: String::new(),
+    };
+    let visibility = capability_visibility_for_cap(&cap);
+    resp.insert("visibility".into(), json!(visibility.as_str()));
+    resp.insert("callable".into(), json!(capability_callable(&cap)));
+
+    server.with_store_for_scope(target_db, |store| {
+        store
+            .hub_register(&cap)
+            .map_err(|e| format!("Failed to register: {e}"))
+    })?;
+
+    if params.cap_type == "skill" {
+        if should_expose_skill_tool(&cap) {
+            match server.register_skill_tool(&cap) {
+                Ok(tool_name) => {
+                    resp.insert("tool_name".into(), json!(tool_name));
+                }
+                Err(e) => {
+                    resp.insert("skill_error".into(), json!(e));
+                }
+            }
+        } else {
+            let _ = server.unregister_skill_tool(&cap.id);
+            append_warning(
+                &mut resp,
+                "Skill registered but not listed in tools (policy.visibility != 'listed'). Use run_skill or change policy.visibility.",
+            );
+        }
+
+        // L0 analysis: async background scan of the prompt template
+        let def: serde_json::Value = match serde_json::from_str(&params.definition) {
+            Ok(def) => def,
+            Err(e) => {
+                append_warning(
+                    &mut resp,
+                    format!("Skill definition is not valid JSON; skipped async analysis ({e})"),
+                );
+                json!({})
+            }
+        };
+        if let Some(prompt_text) = def.get("prompt").and_then(|v| v.as_str()) {
+            let llm = server.llm.clone();
+            let cap_clone = cap.clone();
+            let desc_empty = params.description.is_empty();
+            let db_path = match target_db {
+                DbScope::Global => server.global_db_path.clone(),
+                DbScope::Project => server
+                    .project_db_path
+                    .clone()
+                    .unwrap_or_else(|| server.global_db_path.clone()),
+            };
+            let prompt_text = prompt_text.to_string();
+
+            let cap_id = cap_clone.id.clone();
+
+            tokio::spawn(async move {
+                match llm
+                    .call_reasoning_llm(
+                        crate::prompts::SKILL_ANALYSIS_PROMPT,
+                        &prompt_text,
+                        None,
+                        0.3,
+                        500,
+                    )
+                    .await
+                {
+                    Ok(analysis_raw) => {
+                        let analysis_json: serde_json::Value = match serde_json::from_str(
+                            llm::LlmClient::strip_code_fence(&analysis_raw),
+                        ) {
+                            Ok(parsed) => parsed,
+                            Err(e) => {
+                                eprintln!(
+                                        "[skill-analysis] invalid JSON output for {}: {}; using raw summary fallback",
+                                        cap_id, e
+                                    );
+                                serde_json::json!({"summary": analysis_raw})
+                            }
+                        };
+
+                        // Auto-fill description if it was empty — use spawn_blocking
+                        // to avoid holding the SQLite connection on the async runtime
+                        // and risking "database is locked" under concurrent writes.
+                        if desc_empty {
+                            if let Some(summary) = analysis_json["summary"].as_str() {
+                                let mut updated_cap = cap_clone;
+                                updated_cap.description = summary.to_string();
+                                let db_str = db_path.to_string_lossy().to_string();
+                                let cap_id_inner = cap_id.clone();
+                                let _ = tokio::task::spawn_blocking(move || {
+                                    match MemoryStore::open(&db_str) {
+                                        Ok(store) => {
+                                            if let Err(e) = store.hub_register(&updated_cap) {
+                                                eprintln!(
+                                                    "[skill-analysis] failed to persist auto description for {}: {}",
+                                                    cap_id_inner, e
+                                                );
+                                            }
+                                        }
+                                        Err(e) => {
+                                            eprintln!(
+                                                "[skill-analysis] failed to open DB for {} at '{}': {}",
+                                                cap_id_inner, db_str, e
+                                            );
+                                        }
+                                    }
+                                }).await;
+                            }
+                        }
+                        eprintln!("[skill-analysis] {}: {:?}", cap_id, analysis_json);
+                    }
+                    Err(e) => {
+                        eprintln!("[skill-analysis] failed for {}: {}", cap_id, e);
+                    }
+                }
+            });
+            resp.insert("analysis".into(), json!("pending (async)"));
+        }
+    }
+
+    serde_json::to_string(&serde_json::Value::Object(resp)).map_err(|e| format!("serialize: {e}"))
+}

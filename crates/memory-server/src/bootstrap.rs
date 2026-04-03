@@ -461,6 +461,20 @@ async fn tokio_main(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
 
     let server = MemoryServer::new(global_db_path.clone(), project_db_path.clone())?;
 
+    let requested_tool_profile = cli
+        .profile
+        .clone()
+        .or_else(|| std::env::var("TACHI_PROFILE").ok());
+    if let Some(raw_profile) = requested_tool_profile.as_deref() {
+        match crate::profiles::parse_tool_profile(raw_profile) {
+            Some(profile) => server.set_tool_profile(Some(profile)),
+            None => eprintln!(
+                "Ignoring unknown tool profile '{}'; expected one of ide | runtime | workflow | admin",
+                raw_profile
+            ),
+        }
+    }
+
     // Spawn idle connection cleanup task
     {
         let pool = server.pool.clone();
@@ -534,7 +548,10 @@ async fn tokio_main(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                         match store.archive_stale_memories(90) {
                             Ok(archived) => {
                                 if archived > 0 {
-                                    eprintln!("[gc] Archived {} stale memories (project)", archived);
+                                    eprintln!(
+                                        "[gc] Archived {} stale memories (project)",
+                                        archived
+                                    );
                                 }
                                 if let Some(object) = gc.as_object_mut() {
                                     object.insert("memories_archived".into(), json!(archived));
@@ -722,6 +739,13 @@ async fn tokio_main(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         "Vector search: global={}, project={}",
         server.global_vec_available, server.project_vec_available
     );
+    eprintln!(
+        "Tool profile: {}",
+        server
+            .active_tool_profile()
+            .map(|profile| profile.as_str().to_string())
+            .unwrap_or_else(|| "admin".to_string())
+    );
 
     if cli.daemon {
         // HTTP daemon mode
@@ -838,7 +862,11 @@ async fn run_backfill_vectors(
             .map(|(_, text, summary, _)| {
                 let t = text.trim();
                 let s = if t.len() < 10 { summary.as_str() } else { t };
-                if s.len() > 8000 { s[..8000].to_string() } else { s.to_string() }
+                if s.len() > 8000 {
+                    s[..8000].to_string()
+                } else {
+                    s.to_string()
+                }
             })
             .collect();
 

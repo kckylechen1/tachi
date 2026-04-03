@@ -14,20 +14,7 @@ impl ServerHandler for MemoryServer {
     {
         async move {
             let all_native = self.tool_router.list_all();
-
-            // Filter native tools by TACHI_EXPOSED_TOOLS whitelist (comma-separated).
-            // If not set, all native tools are exposed (backward compatible).
-            let mut tools: Vec<rmcp::model::Tool> =
-                if let Ok(whitelist) = std::env::var("TACHI_EXPOSED_TOOLS") {
-                    let allowed: std::collections::HashSet<&str> =
-                        whitelist.split(',').map(|s| s.trim()).collect();
-                    all_native
-                        .into_iter()
-                        .filter(|t| allowed.contains(t.name.as_ref()))
-                        .collect()
-                } else {
-                    all_native
-                };
+            let mut tools: Vec<rmcp::model::Tool> = all_native;
 
             // Add proxy tools from registered MCP servers
             let proxy_snapshot = match self.proxy_tools.lock() {
@@ -85,6 +72,16 @@ impl ServerHandler for MemoryServer {
                     tools.extend(poisoned.into_inner().values().cloned());
                 }
             }
+
+            let env_patterns = std::env::var("TACHI_EXPOSED_TOOLS")
+                .ok()
+                .map(|raw| crate::profiles::parse_tool_patterns_csv(&raw))
+                .filter(|patterns| !patterns.is_empty());
+            tools = crate::profiles::filter_tool_defs(
+                tools,
+                self.active_tool_profile(),
+                env_patterns.as_deref(),
+            );
 
             Ok(rmcp::model::ListToolsResult {
                 tools,
@@ -285,6 +282,25 @@ impl ServerHandler for MemoryServer {
             // ─── Phantom Tools: store result in cache ────────────────────
             if let (Some(key), Ok(ref res)) = (&cache_key, &result) {
                 if let Ok(mut cache) = self.tool_cache.lock() {
+                    // Evict expired entries when cache exceeds cap
+                    if cache.len() >= TOOL_CACHE_MAX_ENTRIES {
+                        cache.retain(|_, v| v.created_at.elapsed() < TOOL_CACHE_TTL);
+                        // If still over cap after TTL eviction, remove oldest entries
+                        if cache.len() >= TOOL_CACHE_MAX_ENTRIES {
+                            let mut oldest_key = None;
+                            let mut oldest_age = Duration::ZERO;
+                            for (k, v) in cache.iter() {
+                                let age = v.created_at.elapsed();
+                                if age > oldest_age {
+                                    oldest_age = age;
+                                    oldest_key = Some(k.clone());
+                                }
+                            }
+                            if let Some(k) = oldest_key {
+                                cache.remove(&k);
+                            }
+                        }
+                    }
                     cache.insert(
                         key.clone(),
                         CachedResult {
