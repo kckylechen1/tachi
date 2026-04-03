@@ -10,7 +10,6 @@
   <p>
     <a href="https://www.gnu.org/licenses/agpl-3.0"><img src="https://img.shields.io/badge/License-AGPLv3-blue.svg" alt="License: AGPLv3"></a>
     <img src="https://img.shields.io/badge/Language-Rust_Edition_2021-orange.svg" alt="Language: Rust">
-    <img src="https://img.shields.io/badge/Python-3.10%2B-blue.svg" alt="Python Version">
     <img src="https://img.shields.io/badge/Integration-MCP_Server-purple" alt="Integration: MCP">
     <img src="https://img.shields.io/badge/Integration-OpenClaw-cyan" alt="Integration: OpenClaw">
     <img src="https://img.shields.io/github/v/release/kckylechen1/tachi.svg" alt="Release Version">
@@ -68,49 +67,49 @@
 
 ## 🤖 三、 开宗明义：辅佐灵核 (MCP 协议)
 
-若君以 Claude Desktop, Cursor 亦或 AutoGen 为伴，均可唤 Tachi 依 MCP 之约降世。
+若君以 Claude Desktop, Cursor, OpenCode, Gemini CLI 亦或 AutoGen 为伴，均可唤 Tachi 依 MCP 之约降世。
 
-**以符诏（Prompt）令你的 AI 剑童执行：**
+**【上策】 灵核自渡（将此真经赐予你的 AI 剑童）**
 
-```text
-请协助我配置安装 Tachi (MCP 记忆服务器)：
+> 以此仙链馈入灵核对话，其当自阅安装仙谱，百事自理。
+>
+> ```
+> https://raw.githubusercontent.com/kckylechen1/tachi/main/docs/INSTALL.md
+> ```
 
-1. 克隆仓库: git clone https://github.com/kckylechen1/tachi.git && cd Tachi
+**【中策】 一符召灵（终端法诏）**
 
-【方式一】幻术启灵（Python 运行时）：
-   cd mcp && python3 -m venv .venv && source .venv/bin/activate
-   cd ../crates/memory-python && pip install maturin && maturin develop --release
-   cd ../../mcp && pip install -r requirements.txt
-   配置 mcp_config.json:
-   {
-     "mcpServers": {
-       "memory": {
-         "command": "<绝对路径>/Tachi/mcp/.venv/bin/python3",
-         "args": ["<绝对路径>/Tachi/mcp/server.py"]
-       }
-     }
-   }
-
-【方式二】玄铁炼体（Rust 原生启·最速·推荐）：
-   brew tap kckylechen1/tachi && brew install tachi
-   配置 mcp_config.json:
-   {
-     "mcpServers": {
-       "tachi": {
-         "command": "tachi",
-         "env": {
-           "VOYAGE_API_KEY": "...",
-           "SILICONFLOW_API_KEY": "..."
-         }
-       }
-     }
-   }
-
-程序将依据项目根目录的 `.env` 文件挂载环境变量（参见 `.env.example`）。
-依赖服务清单：
-- Voyage API (向量与重排): https://dash.voyageai.com/
-- SiliconFlow (结构化抽取): https://cloud.siliconflow.cn/
+```bash
+bash -c "$(curl -fsSL https://raw.githubusercontent.com/kckylechen1/tachi/main/scripts/install.sh)"
 ```
+
+此符诏将自行：
+- 以丹鼎（Homebrew）炼成 `tachi` 法器
+- 巡视四方灵核府邸（Claude, Cursor, Gemini, OpenCode 等），将 Tachi 灵枢入口嵌入各家道籍
+
+**【下策】 手动铸器**
+
+```bash
+brew tap kckylechen1/tachi && brew install tachi
+```
+
+再于灵核 MCP 道籍中添此一段：
+```json
+{
+  "mcpServers": {
+    "tachi": {
+      "command": "tachi",
+      "env": {
+        "VOYAGE_API_KEY": "..."
+      }
+    }
+  }
+}
+```
+
+> 程序将依据项目根目录的 `.env` 文件挂载灵气（参见 `.env.example`）。
+>
+> **藏经禁忌**：万万不可将宝库置于云同步之地（iCloud, Dropbox, OneDrive）。SQLite WAL 之术与网络灵境不合。
 
 ---
 
@@ -188,6 +187,10 @@ Tachi 亦化身为 OpenClaw 气海之元婴法宝。
 - **🔮 虚灵法契（Virtual Capability）**：于万宝楼之上再筑一层抽象——虚灵法契（`vc:*`）。可绑定多路实体灵枢，依优先级择优调度，版本锁定，沙盒策略一处设定、各路继承。
 - **🔐 藏经密室（Tachi Vault）**：本地首储之加密宝库，专储 API 密钥与灵核秘籍。以 Argon2id 炼化主密码、AES-256-GCM 逐秘加密（每秘独立随机密钥）。九式法宝齐全（`vault_init`/`vault_unlock`/`vault_lock`/`vault_set`/`vault_get`/`vault_list`/`vault_remove`/`vault_status`/`vault_setup_rotation`）。自锁护体（30 分钟无用即锁）、暴力破解封锁（五次错入五分钟禁足）、逐秘准入名册（`allowed_agents`）、完整审计天网。更有多钥轮换之法——顺轮、乱轮、最少用轮三策可选。
 - **📧 灵核飞鸽（Kanban 全局化）**：跨灵核飞鸽传书，皆存于全局宝库。ACPX 协议扩三式传信（`ack` 确认、`progress` 进展、`result` 交割），令请求与应答有迹可循。上下文令牌（workspace、conversation）随信附带，支持精准筛选。过期飞鸽自动焚毁（30 天 GC）。
+- **👻 幽灵低语（Ghost Whispers）**：灵核之间以暗道传书，主题持久刻于金石之上（SQLite 持久化），重启不失。`ghost_publish` 发信、`ghost_subscribe` 收信、`ghost_ack` 确收、`ghost_reflect` 参悟、`ghost_promote` 升格入永忆。
+- **🏭 神经熔炉（Neural Foundry）**：服务端掌控上下文之生灭——`recall_context` 唤醒旧忆、`capture_session` 封存当局、`compact_context` 炼化冗余、`section_build` 铸造篇章，令灵核无需自理记忆之苦。
+- **📦 技能包管理（Skill Packs）**：安装、投射、管理成套仙诀。`pack_register` 入册、`pack_project` 投射至各派（Claude, Cursor, Codex, Gemini 等）。
+- **🧠 能力推荐**：`recommend_capability`、`recommend_skill`、`recommend_toolchain`、`prepare_capability_bundle`——藏经阁可为任务择选最优法器组合，点石成金。
 
 ---
 
@@ -214,7 +217,7 @@ Tachi 亦化身为 OpenClaw 气海之元婴法宝。
 ```mermaid
 graph TD
     subgraph Clients["四方来客"]
-        MCP["MCP 幻术 (Python 3.10+)"]
+        CLI["Tachi 法符 (npm)"]
         RMCP["玄铁MCP (Rust 5.2MB 独体·推）"]
         OC["OpenClaw 分舵 (Node.js)"]
         NATIVE["玄铁器宗 (Rust Crates)"]
@@ -249,11 +252,9 @@ graph TD
     RMCP ==>|"静态链接·无皮囊"| LIB
     RMCP -->|"reqwest"| VOYAGE
     RMCP -->|"async-openai"| SILICON
-    MCP --> PYO3
+    CLI -->|"MCP stdio"| RMCP
     OC -->|"MCP stdio 优先"| RMCP
     OC -.->|"NAPI 备降"| NAPI
-    MCP -.->|"飞鸽传书"| Operations
-    Operations -.->|"斩金截铁"| PYO3
 
     classDef client fill:#3b2e5a,stroke:#8a5cf5,stroke-width:2px,color:#fff;
     classDef cloud fill:#2e3d5a,stroke:#5a9cf5,stroke-width:2px,color:#fff;
@@ -261,7 +262,7 @@ graph TD
     classDef rust fill:#5a2e2e,stroke:#f55c5c,stroke-width:2px,color:#fff;
     classDef db fill:#2e5a40,stroke:#5cf58a,stroke-width:2px,color:#fff;
 
-    class MCP,RMCP,OC,NATIVE client;
+    class CLI,RMCP,OC,NATIVE client;
     class VOYAGE,SILICON cloud;
     class EXTRACT,DISTILL,CAUSAL,CONSOLIDATE worker;
     class NAPI,PYO3,LIB,SEARCH,GRAPH rust;
@@ -287,11 +288,8 @@ graph TD
 
 愿纳芥子于须弥之匠人，请观此诀：
 
-### ⚙️ Python 幻术 (`mcp/server.py` 范例)
+### ⚙️ MCP 法器调度范例
 ```python
-from mcp.server.stdio import stdio_server
-# ... (通过 MCP 客户端通信的主入口)
-
 # 1. 写入结构化软记忆 (Vector + FTS + Time-衰减，异步摘要)
 save_memory(
     text="前端项目强制使用 React 与 Vite 构建，严禁混入 Webpack 相关生态配置。支持 Tailwind。",

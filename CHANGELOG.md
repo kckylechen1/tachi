@@ -5,6 +5,30 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.14.0] - 2026-04-03
+
+### Added
+- **Agent-first installation guide** (`docs/INSTALL.md`): A standalone document that any AI agent can read to autonomously install and configure Tachi — no human intervention needed. All three READMEs now link to this guide as the primary install path.
+
+### Fixed
+- **CRITICAL: Vault rotation underflow** (`vault_ops.rs`): Unsigned integer underflow in round-robin key rotation when `current_index` was 0 and subtraction wrapped. Now uses checked arithmetic with modular fallback.
+- **HIGH: UTF-8 boundary panic** (`hub_ops/evolve.rs`): Multi-byte character slicing in skill evolution output could panic at byte boundaries. Switched to `char_indices`-based truncation.
+- **Unbounded channel backpressure**: `enrich_tx` and `foundry_tx` were `mpsc::unbounded_channel` with no backpressure. Replaced with bounded channels (512 and 256 respectively) and `try_send` to prevent memory growth under sustained load.
+- **Unbounded rate limiter maps**: `rate_limit_bursts` and `rate_limit_windows` HashMaps grew without bound per unique session. Added stale-entry eviction at 1024 and 4096 caps.
+- **Unbounded tool cache**: `tool_cache` HashMap in `ServerHandler` grew without limit. Added LRU eviction at 256 entries.
+- **DB lock contention on hub register**: Background `tokio::spawn` in `hub_ops/register.rs` held the async runtime while waiting for the DB write lock. Switched to `spawn_blocking` to avoid starving the Tokio thread pool.
+
+### Changed
+- **Python MCP server removed**: The legacy `mcp/` directory (Python 3.10+ MCP server) has been deleted. The native Rust binary is now the only MCP server. All READMEs updated to remove Python references and badges.
+- **READMEs overhauled** (English, 简体中文, 文言文): Added agent-driven install option, updated architecture diagrams (removed Python paths), added Ghost Whispers / Neural Foundry / Skill Packs / Capability Recommendations to feature lists.
+- **OpenClaw compatibility hardened**: Version aligned to `0.14.0`, `compact_context` guard added (checks required parameters before calling), phantom `record_access` field removed from TypeScript types, deprecated `shadowStorePath` removed from `plugin.json`.
+- **Agent MCP configs updated**: Gemini CLI and Antigravity configs had stale `TACHI_EXPOSED_TOOLS` restrictions — removed to expose full tool surface.
+- **All crates and packages bumped to 0.14.0**: `memory-core`, `memory-node`, `memory-python`, `memory-server`, `integrations/openclaw`, and npm optionalDependencies.
+
+### Known Issues
+- **Homebrew tap CI**: The "Update Homebrew Tap" GitHub Actions workflow requires a `HOMEBREW_TAP_GITHUB_TOKEN` secret to be configured in the repository settings. This is a manual step.
+- **Low-severity items deferred**: Various `.unwrap()` calls in non-critical paths, unbounded `proxy_tools` vec, `hub_ops/export.rs` clean mode may delete non-tachi files, and extensive `#[allow(dead_code)]` annotations remain for a future cleanup pass.
+
 ## [0.13.1] - 2026-04-03
 
 ### Changed

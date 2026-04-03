@@ -10,7 +10,6 @@
   <p>
     <a href="https://www.gnu.org/licenses/agpl-3.0"><img src="https://img.shields.io/badge/License-AGPLv3-blue.svg" alt="License: AGPLv3"></a>
     <img src="https://img.shields.io/badge/Language-Rust_Edition_2021-orange.svg" alt="Language: Rust">
-    <img src="https://img.shields.io/badge/Python-3.10%2B-blue.svg" alt="Python Version">
     <img src="https://img.shields.io/badge/Integration-MCP_Server-purple" alt="Integration: MCP">
     <img src="https://img.shields.io/badge/Integration-OpenClaw-cyan" alt="Integration: OpenClaw">
     <img src="https://img.shields.io/github/v/release/kckylechen1/tachi.svg" alt="Release Version">
@@ -68,57 +67,50 @@ Tachi isn't just about routing tools; it's about standardizing complex workflows
 
 ## 🤖 Quick Start: Coding Agents (MCP)
 
-For environments like Claude Desktop, Cursor, or AutoGen, Tachi operates natively as an MCP server.
+For environments like Claude Desktop, Cursor, OpenCode, Gemini CLI, or AutoGen.
 
-**Prompt your Assistant with the following instructions:**
+### Option 1: Agent-Driven Install (paste this into your AI assistant)
 
-```text
-Please configure the Tachi local memory MCP server:
+> Copy the URL below into your AI assistant's chat. It will read the installation guide and configure everything automatically.
+>
+> ```
+> https://raw.githubusercontent.com/kckylechen1/tachi/main/docs/INSTALL.md
+> ```
 
-1. Clone repository: git clone https://github.com/kckylechen1/tachi.git && cd Tachi
+### Option 2: One-Line Install (Terminal)
 
-[Option A] Python Runtime:
-   cd mcp && python3 -m venv .venv && source .venv/bin/activate
-   cd ../crates/memory-python && pip install maturin && maturin develop --release
-   cd ../../mcp && pip install -r requirements.txt
-   Configure mcp_config.json:
-   {
-     "mcpServers": {
-       "memory": {
-         "command": "<absolute-path>/Tachi/mcp/.venv/bin/python3",
-         "args": ["<absolute-path>/Tachi/mcp/server.py"]
-       }
-     }
-   }
-
-[Option B] Native Rust Binary (Fastest — Recommended):
-   brew tap kckylechen1/tachi && brew install tachi
-   Configure mcp_config.json:
-   {
-     "mcpServers": {
-       "tachi": {
-         "command": "tachi",
-         "env": {
-           "VOYAGE_API_KEY": "...",
-           "SILICONFLOW_API_KEY": "..."
-         }
-       }
-     }
-   }
-
-The server loads API keys from the `.env` file in the project root (see `.env.example`).
-Required providers:
-- Voyage API (Embedding + Rerank): https://dash.voyageai.com/
-- At least one OpenAI-compatible chat provider for extraction / reasoning lanes
-  - SiliconFlow is the default extraction path used by the bundled examples
-  - Additional lane-specific providers can be configured via `EXTRACT_*`, `DISTILL_*`, `SUMMARY_*`, and `REASONING_*`
-
-IMPORTANT Database Safety Rules:
-- NEVER place the database file in a cloud-synced folder (iCloud, Dropbox, OneDrive, Google Drive). SQLite WAL mode is incompatible with network filesystems.
-- Ensure only ONE memory-server instance accesses the same database file. The server enforces this via file lock, but do not bypass it.
-- Do NOT use `sqlite3` CLI to write to the database while the server is running. Read-only queries with `PRAGMA busy_timeout = 5000` are acceptable.
-- On unclean shutdown, the server auto-recovers FTS index on next startup.
+```bash
+bash -c "$(curl -fsSL https://raw.githubusercontent.com/kckylechen1/tachi/main/scripts/install.sh)"
 ```
+
+The installer will:
+- Install `tachi` via Homebrew (or download a prebuilt binary)
+- Auto-detect local AI agent configs (Claude, Cursor, Gemini, OpenCode, etc.)
+- Inject the Tachi MCP server entry into each detected config
+
+### Option 3: Manual Homebrew
+
+```bash
+brew tap kckylechen1/tachi && brew install tachi
+```
+
+Then add to your agent's MCP config:
+```json
+{
+  "mcpServers": {
+    "tachi": {
+      "command": "tachi",
+      "env": {
+        "VOYAGE_API_KEY": "your-key-here"
+      }
+    }
+  }
+}
+```
+
+> **Note**: The server loads `.env` from the project root automatically. See `.env.example` for all configuration options.
+>
+> **Database Safety**: Never place the database in a cloud-synced folder (iCloud, Dropbox, OneDrive). SQLite WAL mode is incompatible with network filesystems.
 
 ---
 
@@ -197,6 +189,10 @@ Operational notes:
 - **🔮 Virtual Capabilities**: An abstraction layer above Hub capabilities. Register VCs (`vc:*`), bind to multiple concrete MCP backends with priority ordering, resolve at call time with deterministic priority + version pinning. Sandbox policies inherit from VC to concrete backend.
 - **🔐 Tachi Vault (Encrypted Secret Storage)**: Local-first encrypted vault for API keys and secrets. Argon2id KDF + AES-256-GCM encryption with per-secret nonces. 9 MCP tools for full lifecycle (`vault_init`, `vault_unlock`, `vault_lock`, `vault_set`, `vault_get`, `vault_list`, `vault_remove`, `vault_status`, `vault_setup_rotation`). Auto-lock after 30min inactivity, brute-force protection (5 failed attempts → 5min lockout), per-secret agent ACLs (`allowed_agents`), and full audit logging. Multi-key rotation with round-robin, random, and LRU strategies.
 - **📧 Agent Kanban (Global-Only)**: Cross-agent communication via kanban cards with global-only storage. ACPX protocol extensions (`ack`, `progress`, `result` card types) for structured request/response flows. Workspace and conversation context metadata with filtering support. Kanban card GC for auto-pruning stale resolved/expired cards.
+- **👻 Ghost Whispers (Inter-Agent Pub/Sub)**: Persistent topic-based messaging between agents. `ghost_publish`, `ghost_subscribe`, `ghost_topics`, `ghost_ack`, `ghost_reflect`, and `ghost_promote` tools. Messages survive daemon restarts via SQLite persistence. Reflection-to-rule derivation via LLM.
+- **🏭 Neural Foundry**: Server-owned context lifecycle — `recall_context`, `capture_session`, `compact_context`, `section_build`, `compact_rollup`, and `compact_session_memory`. Memory capture, compaction, and durable session artifacts live in Tachi instead of host adapters.
+- **📦 Skill Packs**: Install, project, and manage curated skill collections. `pack_register`, `pack_list`, `pack_get`, `pack_project`, `pack_remove`. Project skills to multiple agent formats (Claude, Cursor, Codex, Gemini, OpenCode).
+- **🧠 Capability Recommendations**: `recommend_capability`, `recommend_skill`, `recommend_toolchain`, and `prepare_capability_bundle` let Tachi suggest optimal tool combinations for any task.
 
 ---
 
@@ -221,7 +217,7 @@ Both causal derivations and distilled rules are physically isolated within a ded
 ```mermaid
 graph TD
     subgraph Clients["Integrations"]
-        MCP["MCP Server (Python 3.10+)"]
+        CLI["Tachi CLI (npm)"]
         RMCP["MCP Server (Rust 5.2MB binary)"]
         OC["OpenClaw Extension (Node.js)"]
         NATIVE["Native Rust Crates"]
@@ -256,11 +252,9 @@ graph TD
     RMCP ==>|"Static link, no FFI"| LIB
     RMCP -->|"reqwest"| VOYAGE
     RMCP -->|"async-openai"| SILICON
-    MCP --> PYO3
+    CLI -->|"MCP stdio"| RMCP
     OC -->|"MCP stdio preferred"| RMCP
     OC -.->|"NAPI fallback"| NAPI
-    MCP -.->|"Async Queue"| Operations
-    Operations -.->|"Write"| PYO3
 
     classDef client fill:#3b2e5a,stroke:#8a5cf5,stroke-width:2px,color:#fff;
     classDef cloud fill:#2e3d5a,stroke:#5a9cf5,stroke-width:2px,color:#fff;
@@ -268,7 +262,7 @@ graph TD
     classDef rust fill:#5a2e2e,stroke:#f55c5c,stroke-width:2px,color:#fff;
     classDef db fill:#2e5a40,stroke:#5cf58a,stroke-width:2px,color:#fff;
 
-    class MCP,RMCP,OC,NATIVE client;
+    class CLI,RMCP,OC,NATIVE client;
     class VOYAGE,SILICON cloud;
     class EXTRACT,DISTILL,CAUSAL,CONSOLIDATE worker;
     class NAPI,PYO3,LIB,SEARCH,GRAPH rust;
@@ -301,14 +295,13 @@ Implementation note:
 
 ## 💻 Manual Installation & APIs
 
-For direct integration of `memory-core` into custom Python applications:
+For direct integration of `memory-core` into custom applications:
 
-### ⚙️ Python Environment (`mcp/server.py`)
+### ⚙️ MCP Tool Examples (via any MCP-compatible client)
 ```python
-from mcp.server.stdio import stdio_server
-# ... (using MCP client communication)
+# These are MCP tool calls — invoke from any MCP client (Claude, Cursor, etc.)
 
-# 1. Ingest structured soft memory
+# 1. Save structured memory (auto-embedding + summary)
 save_memory(
     text="The user prefers React frontend with Vite, no Webpack. Tailwind is permitted.",
     path="/user/project_preferences",
@@ -316,14 +309,14 @@ save_memory(
     keywords=["react", "vite", "webpack", "tailwind"]
 )
 
-# 2. Execute multi-channel Hybrid Search
+# 2. Hybrid search (semantic + lexical + decay)
 results = search_memory(
     query="What is the preferred bundler?",
     path_prefix="/user",
     top_k=3
 )
 
-# 3. Save Hard State (0 embedding, deterministic KV)
+# 3. Hard state (deterministic KV, no embeddings)
 set_state(
     namespace="trading",
     key="watchlist",
