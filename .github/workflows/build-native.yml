@@ -35,8 +35,8 @@ jobs:
             version="${GITHUB_REF_NAME#v}"
           fi
 
-          server_version=$(python -c 'from pathlib import Path; import re; text = Path("crates/memory-server/Cargo.toml").read_text(); match = re.search(r"^version\\s*=\\s*\"([^\"]+)\"", text, re.MULTILINE); print(match.group(1) if match else "")')
-          node_crate_version=$(python -c 'from pathlib import Path; import re; text = Path("crates/memory-node/Cargo.toml").read_text(); match = re.search(r"^version\\s*=\\s*\"([^\"]+)\"", text, re.MULTILINE); print(match.group(1) if match else "")')
+          server_version=$(python3 -c 'from pathlib import Path; import re; text = Path("crates/memory-server/Cargo.toml").read_text(); match = re.search(r"^version\s*=\s*\"([^\"]+)\"", text, re.MULTILINE); print(match.group(1) if match else "")')
+          node_crate_version=$(python3 -c 'from pathlib import Path; import re; text = Path("crates/memory-node/Cargo.toml").read_text(); match = re.search(r"^version\s*=\s*\"([^\"]+)\"", text, re.MULTILINE); print(match.group(1) if match else "")')
           node_pkg_version=$(node -p "require('./crates/memory-node/package.json').version")
 
           if [ -z "$server_version" ] || [ -z "$node_crate_version" ] || [ -z "$node_pkg_version" ]; then

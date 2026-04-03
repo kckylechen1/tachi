@@ -45,7 +45,7 @@ jobs:
             version="${GITHUB_REF_NAME#v}"
           fi
 
-          cargo_version=$(python -c 'from pathlib import Path; import re; text = Path("crates/memory-server/Cargo.toml").read_text(); match = re.search(r"^version\\s*=\\s*\"([^\"]+)\"", text, re.MULTILINE); print(match.group(1) if match else "")')
+          cargo_version=$(python3 -c 'from pathlib import Path; import re; text = Path("crates/memory-server/Cargo.toml").read_text(); match = re.search(r"^version\s*=\s*\"([^\"]+)\"", text, re.MULTILINE); print(match.group(1) if match else "")')
 
           if [ -z "$cargo_version" ]; then
             echo "Could not find memory-server version in Cargo.toml."
