@@ -184,7 +184,7 @@ jobs:
 
       - name: Publish main package
         working-directory: crates/memory-node
-        run: npm publish --access public
+        run: npm publish --access public --ignore-scripts
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
