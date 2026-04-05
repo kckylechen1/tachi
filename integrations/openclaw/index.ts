@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import path from "node:path";
 import { Type } from "@sinclair/typebox";
 import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
@@ -50,6 +51,138 @@ function messageToText(message: any): string {
       .join("\n");
   }
   return "";
+}
+
+type SelfEvolutionInsight = {
+  note: string;
+  messageIndex: number;
+  anchored: boolean;
+};
+
+function normalizeBracketInsight(text: unknown): string {
+  return String(text || "").replace(/\s+/g, " ").trim();
+}
+
+function stripCoreRuleAnchor(text: string): string {
+  return normalizeBracketInsight(text).replace(/^\[核心法则\]\s*/i, "").trim();
+}
+
+function summarizeInsight(text: string): string {
+  const normalized = stripCoreRuleAnchor(text);
+  return normalized.length <= 28 ? normalized : `${normalized.slice(0, 27)}…`;
+}
+
+function isSelfEvolutionInsight(text: string): boolean {
+  const normalized = normalizeBracketInsight(text);
+  if (!normalized) {
+    return false;
+  }
+  if (normalized.includes("[核心法则]")) {
+    return true;
+  }
+  return /(原来.{0,20}(喜欢|不喜欢)|记住了|下次我要|下次我会|以后我要|以后我会|雷区|更吃这一套|不吃这一套|这样更有效|这种方式有用|策略失败|无效)/i.test(
+    normalized,
+  );
+}
+
+function classifySelfEvolution(text: string): MemoryEntry["category"] {
+  if (/(记住了|下次我要|下次我会|以后我要|以后我会|策略失败|无效)/i.test(text)) {
+    return "decision";
+  }
+  if (/(喜欢|不喜欢|雷区|偏好|讨厌|更吃|不吃)/i.test(text)) {
+    return "preference";
+  }
+  return "other";
+}
+
+function buildSelfEvolutionId(agentId: string, note: string): string {
+  const seed = `${agentId.trim()}:${stripCoreRuleAnchor(note)}`;
+  return `self-evo-${createHash("sha1").update(seed).digest("hex").slice(0, 16)}`;
+}
+
+function extractSelfEvolutionInsights(messages: any[]): SelfEvolutionInsight[] {
+  const insights: SelfEvolutionInsight[] = [];
+  const seen = new Set<string>();
+
+  for (let messageIndex = 0; messageIndex < messages.length; messageIndex++) {
+    const message = messages[messageIndex];
+    if (message?.role !== "assistant") {
+      continue;
+    }
+    const text = messageToText(message);
+    const matches = text.matchAll(/[（(]([^()（）\n]{4,240})[)）]/g);
+    for (const match of matches) {
+      const raw = normalizeBracketInsight(match[1]);
+      const note = stripCoreRuleAnchor(raw);
+      const anchored = raw.includes("[核心法则]");
+      if (!note || note.length < 4 || !isSelfEvolutionInsight(raw)) {
+        continue;
+      }
+      const dedupeKey = note.toLowerCase();
+      if (seen.has(dedupeKey)) {
+        continue;
+      }
+      seen.add(dedupeKey);
+      insights.push({ note, messageIndex, anchored });
+    }
+  }
+
+  return insights;
+}
+
+function buildSelfEvolutionMemory(
+  agentId: string,
+  sessionKey: string,
+  insight: SelfEvolutionInsight,
+  insightIndex: number,
+  timestamp: string,
+): MemoryEntry {
+  const category = classifySelfEvolution(insight.note);
+  const isJayne = agentId === "jayne";
+  return {
+    id: buildSelfEvolutionId(agentId, insight.note),
+    text: insight.note,
+    summary: summarizeInsight(insight.note),
+    keywords: [
+      agentId,
+      "self-evolution",
+      "bracket-note",
+      insight.anchored ? "core-rule" : "",
+      category === "decision" ? "strategy" : "",
+      category === "preference" && isJayne ? "kyle-preference" : "",
+    ].filter(Boolean),
+    timestamp,
+    location: "agent_end",
+    persons: isJayne ? ["Kyle"] : [],
+    entities: category === "preference" && isJayne ? ["Kyle preference"] : [],
+    topic: isJayne ? "jayne_self_evolution" : "agent_self_evolution",
+    scope: "project",
+    path: `/openclaw/agent-${agentId}/self-evolution`,
+    category,
+    importance: insight.anchored ? 0.92 : 0.88,
+    access_count: 0,
+    last_access: null,
+    metadata: {
+      source_refs: [
+        {
+          ref_type: "message",
+          ref_id: `${sessionKey}:assistant:${insight.messageIndex}`,
+        },
+      ],
+      bracket_note: true,
+      self_evolution: true,
+      extracted_by: insight.anchored ? "agent_end_anchor_capture" : "agent_end_bracket_capture",
+      insight_index: insightIndex,
+    },
+  };
+}
+
+function hasCaptureTrigger(messages: Array<{ content: string }>, keywords: string[]): boolean {
+  if (keywords.length === 0) {
+    return false;
+  }
+  const haystack = messages.map((message) => message.content).join("\n").toLowerCase();
+  return keywords.some((keyword) => keyword.trim() && haystack.includes(keyword.toLowerCase()));
 }
 
 // ============================================================================
@@ -384,6 +517,37 @@ export const memoryHybridBridgePlugin = {
         return;
       }
 
+      const agentId = context?.agentId || "main";
+      const conversationId =
+        context?.sessionKey || event?.conversationId || event?.sessionId || `openclaw:${agentId}`;
+      const turnId = event?.turnId || event?.runId || `agent_end:${Date.now()}`;
+
+      const selfEvolutionAgents = new Set(config.selfEvolutionAgents.map((value) => value.toLowerCase()));
+      if (selfEvolutionAgents.has(agentId.toLowerCase())) {
+        const insights = extractSelfEvolutionInsights(event.messages);
+        if (insights.length > 0) {
+          let saved = 0;
+          for (const [insightIndex, insight] of insights.entries()) {
+            const result = await runWithClient(
+              "save_memory",
+              async (client) => {
+                await client.saveMemory(
+                  buildSelfEvolutionMemory(agentId, conversationId, insight, insightIndex, new Date().toISOString()),
+                );
+                return { ok: true };
+              },
+              agentId,
+            );
+            if (result.ok) {
+              saved += 1;
+            }
+          }
+          if (saved > 0) {
+            api.logger.info(`tachi: saved ${saved} self-evolution notes for ${agentId}`);
+          }
+        }
+      }
+
       const recentMessages = event.messages
         .slice(-8)
         .map((message: any) => ({
@@ -396,14 +560,10 @@ export const memoryHybridBridgePlugin = {
         (total, message) => total + message.content.length,
         0,
       );
-      if (recentMessages.length === 0 || combinedChars < config.captureMinChars) {
+      const hasKeywordTrigger = hasCaptureTrigger(recentMessages, config.captureTriggerKeywords);
+      if (recentMessages.length === 0 || (combinedChars < config.captureMinChars && !hasKeywordTrigger)) {
         return;
       }
-
-      const agentId = context?.agentId || "main";
-      const conversationId =
-        context?.sessionKey || event?.conversationId || event?.sessionId || `openclaw:${agentId}`;
-      const turnId = event?.turnId || event?.runId || `agent_end:${Date.now()}`;
 
       const result = await runWithClient(
         "capture_session",

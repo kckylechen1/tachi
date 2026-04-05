@@ -51,6 +51,7 @@ export type BridgeConfig = {
   topK: number;
   captureMinChars: number;
   captureTriggerKeywords: string[];
+  selfEvolutionAgents: string[];
   weights: { semantic: number; fts: number; symbolic: number; decay: number };
 };
 
@@ -76,6 +77,7 @@ export const defaultConfig: BridgeConfig = {
     .split(",")
     .map((s) => s.trim())
     .filter(Boolean),
+  selfEvolutionAgents: ["jayne"],
   weights: {
     semantic: 0.4,
     fts: 0.3,
@@ -91,6 +93,12 @@ export const bridgeConfigSchema = {
     return {
       ...defaultConfig,
       ...overrides,
+      selfEvolutionAgents: Array.isArray(overrides.selfEvolutionAgents)
+        ? overrides.selfEvolutionAgents
+            .filter((value): value is string => typeof value === "string")
+            .map((value) => value.trim())
+            .filter(Boolean)
+        : defaultConfig.selfEvolutionAgents,
       weights: {
         ...defaultConfig.weights,
         ...(overrides.weights || {}),

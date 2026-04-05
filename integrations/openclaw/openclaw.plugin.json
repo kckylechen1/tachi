@@ -26,6 +26,12 @@
         "items": {
           "type": "string"
         }
+      },
+      "selfEvolutionAgents": {
+        "type": "array",
+        "items": {
+          "type": "string"
+        }
       }
     }
   }

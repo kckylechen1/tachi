@@ -35,6 +35,7 @@ export type BridgeConfig = {
     topK: number;
     captureMinChars: number;
     captureTriggerKeywords: string[];
+    selfEvolutionAgents: string[];
     weights: {
         semantic: number;
         fts: number;

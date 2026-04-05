@@ -17,6 +17,7 @@ export const defaultConfig = {
         .split(",")
         .map((s) => s.trim())
         .filter(Boolean),
+    selfEvolutionAgents: ["jayne"],
     weights: {
         semantic: 0.4,
         fts: 0.3,
@@ -31,6 +32,12 @@ export const bridgeConfigSchema = {
         return {
             ...defaultConfig,
             ...overrides,
+            selfEvolutionAgents: Array.isArray(overrides.selfEvolutionAgents)
+                ? overrides.selfEvolutionAgents
+                    .filter((value) => typeof value === "string")
+                    .map((value) => value.trim())
+                    .filter(Boolean)
+                : defaultConfig.selfEvolutionAgents,
             weights: {
                 ...defaultConfig.weights,
                 ...(overrides.weights || {}),
