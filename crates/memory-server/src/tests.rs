@@ -367,6 +367,58 @@ fn tidy_report_scans_memory_dbs_and_suggests_scope() {
     let _ = std::fs::remove_dir_all(&root);
 }
 
+#[test]
+fn tidy_apply_writes_report_and_only_confirms_safe_actions() {
+    let root = std::env::temp_dir().join(format!("tachi-tidy-apply-{}", uuid::Uuid::new_v4()));
+    let git_root = root.join("repo");
+    let app_home = root.join(".tachi-home");
+    let global_db = root.join(".tachi").join("global").join("memory.db");
+    let project_db = git_root.join(".tachi").join("memory.db");
+    let openclaw_backup_db = root
+        .join(".openclaw")
+        .join("backups")
+        .join("snapshot-1")
+        .join("local-plugin-memory-hybrid-bridge")
+        .join("data")
+        .join("agents")
+        .join("ops")
+        .join("memory.db");
+
+    for db in [&global_db, &project_db, &openclaw_backup_db] {
+        std::fs::create_dir_all(db.parent().unwrap()).expect("create db parent");
+        let mut store =
+            MemoryStore::open(db.to_str().expect("db path must be valid utf8")).expect("open db");
+        let id = format!("entry-{}", db.display());
+        store.upsert(&make_entry(&id)).expect("seed db");
+    }
+
+    let report = crate::bootstrap::build_tidy_report(std::slice::from_ref(&root), Some(&git_root))
+        .expect("tidy report should build");
+    let summary = crate::bootstrap::execute_tidy_apply(&app_home, &report)
+        .expect("apply summary should build");
+
+    assert_eq!(summary.applied_count, 2);
+    assert_eq!(summary.skipped_count, 1);
+    assert!(summary
+        .applied_steps
+        .iter()
+        .any(|step| step.scope == "project" && step.outcome == "confirmed"));
+    assert!(summary
+        .applied_steps
+        .iter()
+        .any(|step| step.scope == "global" && step.outcome == "confirmed"));
+    assert!(summary
+        .applied_steps
+        .iter()
+        .any(|step| step.scope == "openclaw-backup-agent:ops" && step.outcome == "skipped"));
+    assert!(
+        std::path::Path::new(&summary.report_path).exists(),
+        "expected apply report artifact"
+    );
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
 #[tokio::test]
 async fn proxy_call_blocks_disabled_capability_even_directly() {
     let server = make_server();

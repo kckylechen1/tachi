@@ -55,6 +55,23 @@ pub(crate) struct TidyPlanStep {
 }
 
 #[derive(Debug, Clone, Serialize)]
+pub(crate) struct TidyAppliedStep {
+    pub order: usize,
+    pub scope: String,
+    pub action: String,
+    pub outcome: String,
+    pub note: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct TidyApplySummary {
+    pub report_path: String,
+    pub applied_steps: Vec<TidyAppliedStep>,
+    pub applied_count: usize,
+    pub skipped_count: usize,
+}
+
+#[derive(Debug, Clone, Serialize)]
 pub(crate) struct TidyReport {
     pub scanned_roots: Vec<String>,
     pub databases: Vec<TidyFinding>,
@@ -788,6 +805,105 @@ fn render_tidy_report(report: &TidyReport) -> String {
     lines.join("\n")
 }
 
+fn render_tidy_apply_summary(summary: &TidyApplySummary) -> String {
+    let mut lines = vec![
+        "Apply summary:".to_string(),
+        format!("  report: {}", summary.report_path),
+        format!(
+            "  applied: {} | skipped: {}",
+            summary.applied_count, summary.skipped_count
+        ),
+    ];
+
+    for step in &summary.applied_steps {
+        lines.push(format!(
+            "  {}. [{}] {} -> {}",
+            step.order, step.outcome, step.scope, step.action
+        ));
+        lines.push(format!("     {}", step.note));
+    }
+
+    lines.join("\n")
+}
+
+pub(crate) fn execute_tidy_apply(
+    app_home: &std::path::Path,
+    report: &TidyReport,
+) -> Result<TidyApplySummary, Box<dyn std::error::Error>> {
+    let tidy_dir = app_home.join("tidy");
+    std::fs::create_dir_all(&tidy_dir)?;
+    let report_path = tidy_dir.join("last-apply.json");
+
+    let mut applied_steps = Vec::new();
+    let mut applied_count = 0usize;
+    let mut skipped_count = 0usize;
+
+    for step in &report.dry_run_plan {
+        let (outcome, note) = match step.action.as_str() {
+            "keep_separate_agent_db" => (
+                "confirmed".to_string(),
+                "No file move required; keeping the agent-scoped DB in place.".to_string(),
+            ),
+            "keep_project_db" => (
+                "confirmed".to_string(),
+                "No file move required; project DB already matches the intended layout."
+                    .to_string(),
+            ),
+            "keep_global_db" => (
+                "confirmed".to_string(),
+                "No file move required; global DB already matches the intended layout.".to_string(),
+            ),
+            "archive_or_delete_after_review" => (
+                "skipped".to_string(),
+                "Backup/legacy DBs still require explicit review before any delete/archive action."
+                    .to_string(),
+            ),
+            "review_for_legacy_migration" => (
+                "skipped".to_string(),
+                "Legacy DBs require provenance-aware migration rules before apply.".to_string(),
+            ),
+            "repair_before_any_move" => (
+                "skipped".to_string(),
+                "DB must be repaired and re-scanned before apply.".to_string(),
+            ),
+            _ => (
+                "skipped".to_string(),
+                "This action remains manual-review only in the conservative apply path."
+                    .to_string(),
+            ),
+        };
+
+        if outcome == "confirmed" {
+            applied_count += 1;
+        } else {
+            skipped_count += 1;
+        }
+
+        applied_steps.push(TidyAppliedStep {
+            order: step.order,
+            scope: step.scope.clone(),
+            action: step.action.clone(),
+            outcome,
+            note,
+        });
+    }
+
+    let summary = TidyApplySummary {
+        report_path: report_path.display().to_string(),
+        applied_steps,
+        applied_count,
+        skipped_count,
+    };
+
+    let payload = json!({
+        "report": report,
+        "apply_summary": &summary,
+    });
+    std::fs::write(&report_path, serde_json::to_string_pretty(&payload)?)?;
+
+    Ok(summary)
+}
+
 async fn run_setup_command(
     json_output: bool,
     home: &std::path::Path,
@@ -816,15 +932,33 @@ async fn run_setup_command(
 
 async fn run_tidy_command(
     json_output: bool,
+    apply: bool,
+    app_home: &std::path::Path,
     roots: Vec<PathBuf>,
     git_root: Option<&PathBuf>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let report = build_tidy_report(&roots, git_root)?;
+    let apply_summary = if apply {
+        Some(execute_tidy_apply(app_home, &report)?)
+    } else {
+        None
+    };
 
     if json_output {
-        print_pretty_json(&serde_json::to_value(&report)?)
+        if let Some(summary) = apply_summary.as_ref() {
+            print_pretty_json(&json!({
+                "report": report,
+                "apply_summary": summary,
+            }))
+        } else {
+            print_pretty_json(&serde_json::to_value(&report)?)
+        }
     } else {
         println!("{}", render_tidy_report(&report));
+        if let Some(summary) = apply_summary.as_ref() {
+            println!();
+            println!("{}", render_tidy_apply_summary(summary));
+        }
         Ok(())
     }
 }
@@ -1225,7 +1359,7 @@ async fn tokio_main(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         .await;
     }
 
-    if let Commands::Tidy { json } = &command {
+    if let Commands::Tidy { json, apply } = &command {
         let mut roots = vec![
             app_home.clone(),
             home.join(".sigil"),
@@ -1235,7 +1369,7 @@ async fn tokio_main(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         if let Some(root) = git_root.as_ref() {
             roots.push(root.clone());
         }
-        return run_tidy_command(*json, roots, git_root.as_ref()).await;
+        return run_tidy_command(*json, *apply, &app_home, roots, git_root.as_ref()).await;
     }
 
     if !matches!(command, Commands::Serve) {

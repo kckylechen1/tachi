@@ -99,6 +99,9 @@ pub(crate) enum Commands {
         /// Emit machine-readable JSON instead of the human summary
         #[arg(long)]
         json: bool,
+        /// Execute the conservative apply path for clearly safe actions
+        #[arg(long)]
+        apply: bool,
     },
     /// Run garbage collection
     Gc,
