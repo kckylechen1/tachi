@@ -1,4 +1,69 @@
 use super::*;
+use serde::Serialize;
+
+const SETUP_API_KEYS: [(&str, &str); 4] = [
+    ("VOYAGE_API_KEY", "Voyage embeddings"),
+    ("SILICONFLOW_API_KEY", "SiliconFlow extraction"),
+    ("MINIMAX_API_KEY", "MiniMax distill/summary"),
+    ("REASONING_API_KEY", "GLM-5.1 reasoning lane"),
+];
+
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct SetupItem {
+    pub id: String,
+    pub label: String,
+    pub status: String,
+    pub details: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct SetupReport {
+    pub app_home: String,
+    pub config_env_path: String,
+    pub global_db_path: String,
+    pub project_db_path: Option<String>,
+    pub git_root: Option<String>,
+    pub items: Vec<SetupItem>,
+    pub next_steps: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct TidyFinding {
+    pub path: String,
+    pub entry_count: Option<usize>,
+    pub vec_available: bool,
+    pub scope_suggestion: String,
+    pub status: String,
+    pub recommended_action: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct TidyGroupSummary {
+    pub group: String,
+    pub database_count: usize,
+    pub memory_count: usize,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct TidyPlanStep {
+    pub order: usize,
+    pub scope: String,
+    pub action: String,
+    pub source_paths: Vec<String>,
+    pub target_label: String,
+    pub rationale: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct TidyReport {
+    pub scanned_roots: Vec<String>,
+    pub databases: Vec<TidyFinding>,
+    pub groups: Vec<TidyGroupSummary>,
+    pub dry_run_plan: Vec<TidyPlanStep>,
+    pub total_databases: usize,
+    pub total_memories: usize,
+    pub next_steps: Vec<String>,
+}
 
 fn open_cli_store(db_path: &PathBuf) -> Result<MemoryStore, Box<dyn std::error::Error>> {
     let db_str = db_path.to_str().ok_or_else(|| {
@@ -76,6 +141,691 @@ fn evaluate_cli_capability_enabled(
                     .to_string(),
             ),
         )),
+    }
+}
+
+fn count_matching_entries(
+    root: &std::path::Path,
+    matcher: &dyn Fn(&std::path::Path) -> bool,
+) -> usize {
+    std::fs::read_dir(root)
+        .ok()
+        .into_iter()
+        .flat_map(|entries| entries.filter_map(Result::ok))
+        .filter(|entry| matcher(&entry.path()))
+        .count()
+}
+
+fn collect_memory_db_files(root: &std::path::Path, out: &mut Vec<PathBuf>, max_depth: usize) {
+    if !root.exists() {
+        return;
+    }
+
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return;
+    };
+
+    for entry in entries.filter_map(Result::ok) {
+        let path = entry.path();
+        if path.is_file() {
+            if path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .map(|name| name == "memory.db")
+                .unwrap_or(false)
+            {
+                out.push(path);
+            }
+            continue;
+        }
+
+        if path.is_dir() {
+            if max_depth > 0 {
+                collect_memory_db_files(&path, out, max_depth.saturating_sub(1));
+            }
+        }
+    }
+}
+
+fn classify_tidy_scope(path: &std::path::Path, git_root: Option<&PathBuf>) -> String {
+    if let Some(root) = git_root {
+        if path.starts_with(root) {
+            return "project".to_string();
+        }
+    }
+
+    let normalized = path.to_string_lossy().replace('\\', "/");
+    let extract_agent = |marker: &str| -> Option<String> {
+        let (_, rest) = normalized.split_once(marker)?;
+        Some(rest.split('/').next().unwrap_or("unknown").to_string())
+    };
+    let extract_backup_agent = || -> Option<String> {
+        let (_, rest) = normalized.split_once("/.openclaw/backups/")?;
+        let (_, rest) = rest.split_once("/data/agents/")?;
+        Some(rest.split('/').next().unwrap_or("unknown").to_string())
+    };
+
+    if normalized.contains("/.tachi/global/")
+        || normalized.ends_with("/.tachi/global/memory.db")
+        || normalized.contains("/.sigil/global/")
+        || normalized.ends_with("/.sigil/global/memory.db")
+    {
+        "global".to_string()
+    } else if let Some(agent) = extract_agent("/.openclaw/extensions/tachi/data/agents/") {
+        format!("openclaw-plugin-agent:{agent}")
+    } else if let Some(agent) = extract_agent("/.openclaw/core/extensions/tachi/data/agents/") {
+        format!("openclaw-core-agent:{agent}")
+    } else if let Some(agent) =
+        extract_agent("/.openclaw/core/extensions/memory-hybrid-bridge/data/agents/")
+    {
+        format!("openclaw-legacy-agent:{agent}")
+    } else if let Some(agent) = extract_backup_agent() {
+        format!("openclaw-backup-agent:{agent}")
+    } else if normalized.contains("/.openclaw/backups/") {
+        "openclaw-backup".to_string()
+    } else if let Some(agent) = extract_agent("/.openclaw/agents/") {
+        format!("openclaw-agent-local:{agent}")
+    } else if normalized.contains("/.openclaw/") {
+        "openclaw-review".to_string()
+    } else if let Some((_, rest)) = normalized.split_once("/.tachi/projects/") {
+        let project_name = rest.split('/').next().unwrap_or("unknown");
+        format!("project:{project_name}")
+    } else if normalized.contains("/.gemini/") {
+        "global".to_string()
+    } else if normalized.contains("/.sigil/") || normalized.contains("/.tachi/") {
+        "review".to_string()
+    } else {
+        "archive".to_string()
+    }
+}
+
+fn tidy_group_key(scope_suggestion: &str) -> String {
+    scope_suggestion
+        .split(':')
+        .next()
+        .unwrap_or(scope_suggestion)
+        .to_string()
+}
+
+fn tidy_group_priority(group: &str) -> usize {
+    match group {
+        "openclaw-plugin-agent" => 0,
+        "project" => 1,
+        "global" => 2,
+        "openclaw-agent-local" => 3,
+        "openclaw-core-agent" => 4,
+        "openclaw-legacy-agent" => 5,
+        "openclaw-backup-agent" => 6,
+        "openclaw-backup" => 7,
+        "openclaw-review" => 8,
+        "review" => 9,
+        "archive" => 10,
+        _ => 99,
+    }
+}
+
+fn tidy_recommended_action(scope_suggestion: &str, status: &str) -> String {
+    if status != "ok" {
+        return "repair_before_any_move".to_string();
+    }
+
+    match tidy_group_key(scope_suggestion).as_str() {
+        "openclaw-plugin-agent" | "openclaw-agent-local" => "keep_separate_agent_db".to_string(),
+        "project" => "keep_project_db".to_string(),
+        "global" => "keep_global_db".to_string(),
+        "openclaw-core-agent" | "openclaw-legacy-agent" => {
+            "review_for_legacy_migration".to_string()
+        }
+        "openclaw-backup-agent" | "openclaw-backup" => "archive_or_delete_after_review".to_string(),
+        "openclaw-review" | "review" | "archive" => "manual_review".to_string(),
+        _ => "manual_review".to_string(),
+    }
+}
+
+fn tidy_target_label(scope_suggestion: &str, action: &str) -> String {
+    match action {
+        "keep_separate_agent_db" | "keep_project_db" | "keep_global_db" => {
+            scope_suggestion.to_string()
+        }
+        "review_for_legacy_migration" => format!("review->{scope_suggestion}"),
+        "archive_or_delete_after_review" => "archive".to_string(),
+        "repair_before_any_move" => "repair".to_string(),
+        _ => "manual-review".to_string(),
+    }
+}
+
+fn tidy_rationale(scope_suggestion: &str, action: &str) -> String {
+    match action {
+        "keep_separate_agent_db" => format!(
+            "{scope_suggestion} looks like an active agent-local OpenClaw database and should stay separate."
+        ),
+        "keep_project_db" => "This database already matches the current project-scoped layout.".to_string(),
+        "keep_global_db" => "This database already matches the global/shared layout.".to_string(),
+        "review_for_legacy_migration" => format!(
+            "{scope_suggestion} appears to be legacy OpenClaw state and needs manual migration review."
+        ),
+        "archive_or_delete_after_review" => format!(
+            "{scope_suggestion} appears to be backup state that should not be merged blindly."
+        ),
+        "repair_before_any_move" => "The DB could not be opened/read cleanly; repair it before planning migration.".to_string(),
+        _ => format!("{scope_suggestion} needs manual review before deciding a destination."),
+    }
+}
+
+pub(crate) fn build_setup_report(
+    home: &std::path::Path,
+    app_home: &std::path::Path,
+    global_db_path: &PathBuf,
+    project_db_path: Option<&PathBuf>,
+    git_root: Option<&PathBuf>,
+    env_vars: &HashMap<String, String>,
+) -> Result<SetupReport, Box<dyn std::error::Error>> {
+    let config_env_path = app_home.join("config.env");
+
+    let api_key_details = SETUP_API_KEYS
+        .iter()
+        .map(|(key, label)| {
+            let status = if env_vars
+                .get(*key)
+                .map(|value| !value.trim().is_empty())
+                .unwrap_or(false)
+            {
+                "configured"
+            } else {
+                "missing"
+            };
+            format!("{key}: {status} ({label})")
+        })
+        .collect::<Vec<_>>();
+    let configured_api_keys = api_key_details
+        .iter()
+        .filter(|detail| detail.contains(": configured "))
+        .count();
+
+    let skill_roots = vec![
+        ("tachi", app_home.join("skills"), "SKILL.md"),
+        ("claude", home.join(".claude").join("skills"), "SKILL.md"),
+        ("codex", home.join(".codex").join("skills"), "SKILL.md"),
+        ("gemini", home.join(".gemini").join("skills"), "SKILL.md"),
+        ("cursor", home.join(".cursor").join("rules"), ".mdc"),
+        (
+            "openclaw",
+            home.join(".openclaw").join("plugins"),
+            "tachi-projection.json",
+        ),
+        (
+            "opencode",
+            home.join(".opencode").join("skills"),
+            "SKILL.md",
+        ),
+    ];
+    let mut discovered_skill_entries = 0usize;
+    let skill_details = skill_roots
+        .into_iter()
+        .map(|(label, root, marker)| {
+            let count = if marker.starts_with('.') {
+                count_matching_entries(&root, &|path| {
+                    path.is_file()
+                        && path
+                            .extension()
+                            .and_then(|ext| ext.to_str())
+                            .map(|ext| format!(".{ext}") == marker)
+                            .unwrap_or(false)
+                })
+            } else {
+                count_matching_entries(&root, &|path| {
+                    (path.is_dir() && path.join(marker).exists())
+                        || path
+                            .file_name()
+                            .and_then(|name| name.to_str())
+                            .map(|name| name == marker)
+                            .unwrap_or(false)
+                })
+            };
+            discovered_skill_entries += count;
+            format!("{label}: {count} entries at {}", root.display())
+        })
+        .collect::<Vec<_>>();
+
+    let agent_configs = vec![
+        (
+            "amp",
+            home.join("Library/Application Support/Amp/settings.json"),
+        ),
+        ("claude", home.join(".claude").join("mcp.json")),
+        ("cursor", home.join(".cursor").join("mcp.json")),
+        ("gemini", home.join(".gemini").join("mcp.json")),
+        ("codex", home.join(".codex")),
+        ("openclaw", home.join(".openclaw").join("openclaw.json")),
+        ("opencode", home.join(".opencode")),
+    ];
+    let detected_agents = agent_configs
+        .iter()
+        .filter(|(_, path)| path.exists())
+        .count();
+    let agent_details = agent_configs
+        .iter()
+        .map(|(label, path)| {
+            format!(
+                "{label}: {} ({})",
+                if path.exists() { "detected" } else { "missing" },
+                path.display()
+            )
+        })
+        .collect::<Vec<_>>();
+
+    let pipeline_enabled = env_vars
+        .get("ENABLE_PIPELINE")
+        .map(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
+        .unwrap_or(false);
+    let pipeline_details = vec![format!(
+        "ENABLE_PIPELINE={} (config: {})",
+        if pipeline_enabled { "true" } else { "false" },
+        config_env_path.display()
+    )];
+
+    let (vault_status, mut vault_details) = if global_db_path.exists() {
+        let store = open_cli_store(global_db_path)?;
+        let initialized = store.vault_get_config()?.is_some();
+        let entry_count = if initialized {
+            Some(store.vault_count_entries()?)
+        } else {
+            None
+        };
+        (
+            if initialized { "configured" } else { "missing" }.to_string(),
+            vec![
+                format!("global db: {}", global_db_path.display()),
+                format!(
+                    "vault: {}",
+                    if initialized {
+                        format!("initialized ({} secrets)", entry_count.unwrap_or(0))
+                    } else {
+                        "not initialized".to_string()
+                    }
+                ),
+            ],
+        )
+    } else {
+        (
+            "missing".to_string(),
+            vec![
+                format!("global db: {} (not created yet)", global_db_path.display()),
+                "vault: not initialized".to_string(),
+            ],
+        )
+    };
+    if let Some(project_db_path) = project_db_path {
+        vault_details.push(format!("project db: {}", project_db_path.display()));
+    }
+
+    let items = vec![
+        SetupItem {
+            id: "api_keys".to_string(),
+            label: "1/5 API Keys".to_string(),
+            status: if configured_api_keys >= 2 {
+                "ready".to_string()
+            } else {
+                "needs_attention".to_string()
+            },
+            details: api_key_details,
+        },
+        SetupItem {
+            id: "skills".to_string(),
+            label: "2/5 Skills".to_string(),
+            status: if discovered_skill_entries > 0 {
+                "ready".to_string()
+            } else {
+                "needs_attention".to_string()
+            },
+            details: skill_details,
+        },
+        SetupItem {
+            id: "agents".to_string(),
+            label: "3/5 Agents".to_string(),
+            status: if detected_agents > 0 {
+                "ready".to_string()
+            } else {
+                "needs_attention".to_string()
+            },
+            details: agent_details,
+        },
+        SetupItem {
+            id: "pipeline".to_string(),
+            label: "4/5 Pipeline".to_string(),
+            status: if pipeline_enabled {
+                "ready".to_string()
+            } else {
+                "needs_attention".to_string()
+            },
+            details: pipeline_details,
+        },
+        SetupItem {
+            id: "vault".to_string(),
+            label: "5/5 Vault".to_string(),
+            status: vault_status,
+            details: vault_details,
+        },
+    ];
+
+    let mut next_steps = Vec::new();
+    if configured_api_keys < 2 {
+        next_steps.push(format!(
+            "Add missing API keys to {}",
+            config_env_path.display()
+        ));
+    }
+    if discovered_skill_entries == 0 {
+        next_steps.push(
+            "Scan or project skills into ~/.tachi/skills or a supported agent directory"
+                .to_string(),
+        );
+    }
+    if detected_agents == 0 {
+        next_steps.push(
+            "Configure at least one MCP client (Claude, Cursor, Gemini, Codex, OpenClaw, or Amp)"
+                .to_string(),
+        );
+    }
+    if !pipeline_enabled {
+        next_steps.push(format!(
+            "Enable the extraction pipeline with ENABLE_PIPELINE=true in {}",
+            config_env_path.display()
+        ));
+    }
+    if items
+        .iter()
+        .find(|item| item.id == "vault")
+        .map(|item| item.status != "configured")
+        .unwrap_or(true)
+    {
+        next_steps.push(
+            "Initialize the vault after the daemon is running with the vault_init tool".to_string(),
+        );
+    }
+
+    Ok(SetupReport {
+        app_home: app_home.display().to_string(),
+        config_env_path: config_env_path.display().to_string(),
+        global_db_path: global_db_path.display().to_string(),
+        project_db_path: project_db_path.map(|path| path.display().to_string()),
+        git_root: git_root.map(|path| path.display().to_string()),
+        items,
+        next_steps,
+    })
+}
+
+pub(crate) fn build_tidy_report(
+    roots: &[PathBuf],
+    git_root: Option<&PathBuf>,
+) -> Result<TidyReport, Box<dyn std::error::Error>> {
+    let mut discovered = Vec::new();
+    for root in roots {
+        collect_memory_db_files(root, &mut discovered, 10);
+    }
+
+    discovered.sort();
+    discovered.dedup();
+
+    let mut databases = Vec::new();
+    let mut total_memories = 0usize;
+
+    for path in discovered {
+        let scope_suggestion = classify_tidy_scope(&path, git_root);
+        let mut status = "ok".to_string();
+        let mut entry_count = None;
+        let mut vec_available = false;
+
+        match open_cli_store(&path) {
+            Ok(store) => {
+                vec_available = store.vec_available;
+                match store.stats(false) {
+                    Ok(stats) => {
+                        entry_count = Some(stats.total as usize);
+                        total_memories += stats.total as usize;
+                    }
+                    Err(_) => {
+                        status = "stats_error".to_string();
+                    }
+                }
+            }
+            Err(_) => {
+                status = "open_error".to_string();
+            }
+        }
+
+        databases.push(TidyFinding {
+            path: path.display().to_string(),
+            entry_count,
+            vec_available,
+            recommended_action: tidy_recommended_action(&scope_suggestion, &status),
+            scope_suggestion,
+            status,
+        });
+    }
+
+    databases.sort_by(|a, b| {
+        tidy_group_priority(&tidy_group_key(&a.scope_suggestion))
+            .cmp(&tidy_group_priority(&tidy_group_key(&b.scope_suggestion)))
+            .then_with(|| a.path.cmp(&b.path))
+    });
+
+    let mut groups_map = std::collections::BTreeMap::<String, (usize, usize)>::new();
+    for db in &databases {
+        let key = tidy_group_key(&db.scope_suggestion);
+        let entry = groups_map.entry(key).or_insert((0, 0));
+        entry.0 += 1;
+        entry.1 += db.entry_count.unwrap_or(0);
+    }
+    let groups = groups_map
+        .into_iter()
+        .map(|(group, (database_count, memory_count))| TidyGroupSummary {
+            group,
+            database_count,
+            memory_count,
+        })
+        .collect::<Vec<_>>();
+    let mut groups = groups;
+    groups.sort_by(|a, b| {
+        tidy_group_priority(&a.group)
+            .cmp(&tidy_group_priority(&b.group))
+            .then_with(|| a.group.cmp(&b.group))
+    });
+
+    let mut plan_map = std::collections::BTreeMap::<(usize, String, String), Vec<String>>::new();
+    for db in &databases {
+        let key = (
+            tidy_group_priority(&tidy_group_key(&db.scope_suggestion)),
+            db.scope_suggestion.clone(),
+            db.recommended_action.clone(),
+        );
+        plan_map.entry(key).or_default().push(db.path.clone());
+    }
+    let dry_run_plan = plan_map
+        .into_iter()
+        .enumerate()
+        .map(|(index, ((_, scope, action), source_paths))| TidyPlanStep {
+            order: index + 1,
+            target_label: tidy_target_label(&scope, &action),
+            rationale: tidy_rationale(&scope, &action),
+            scope,
+            action,
+            source_paths,
+        })
+        .collect::<Vec<_>>();
+
+    let mut next_steps = Vec::new();
+    if databases.len() > 1 {
+        next_steps.push(
+            "Review scope_suggestion for each DB before adding any migration step".to_string(),
+        );
+    }
+    if databases.iter().any(|db| db.status != "ok") {
+        next_steps.push(
+            "Repair or inspect DBs with open_error/stats_error before consolidation".to_string(),
+        );
+    }
+    if databases.is_empty() {
+        next_steps.push(
+            "No memory.db files found in scanned roots; add more roots or initialize a project DB"
+                .to_string(),
+        );
+    }
+
+    Ok(TidyReport {
+        scanned_roots: roots
+            .iter()
+            .map(|root| root.display().to_string())
+            .collect(),
+        groups,
+        dry_run_plan,
+        total_databases: databases.len(),
+        total_memories,
+        databases,
+        next_steps,
+    })
+}
+
+fn render_setup_report(report: &SetupReport) -> String {
+    let mut lines = vec![
+        "tachi setup".to_string(),
+        format!("app home: {}", report.app_home),
+        format!("config env: {}", report.config_env_path),
+        format!("global db: {}", report.global_db_path),
+    ];
+    if let Some(project_db) = report.project_db_path.as_ref() {
+        lines.push(format!("project db: {project_db}"));
+    }
+    if let Some(git_root) = report.git_root.as_ref() {
+        lines.push(format!("git root: {git_root}"));
+    }
+    lines.push(String::new());
+
+    for item in &report.items {
+        let emoji = match item.status.as_str() {
+            "ready" | "configured" => "✅",
+            _ => "⚠️",
+        };
+        lines.push(format!("{emoji} {}", item.label));
+        for detail in &item.details {
+            lines.push(format!("  - {detail}"));
+        }
+        lines.push(String::new());
+    }
+
+    if !report.next_steps.is_empty() {
+        lines.push("Next steps:".to_string());
+        for step in &report.next_steps {
+            lines.push(format!("  - {step}"));
+        }
+    }
+
+    lines.join("\n")
+}
+
+fn render_tidy_report(report: &TidyReport) -> String {
+    let mut lines = vec![
+        "tachi tidy".to_string(),
+        format!("scanned roots: {}", report.scanned_roots.join(", ")),
+        format!(
+            "found {} databases, {} memories",
+            report.total_databases, report.total_memories
+        ),
+        String::new(),
+    ];
+
+    for db in &report.databases {
+        let emoji = if db.status == "ok" { "✅" } else { "⚠️" };
+        let count = db
+            .entry_count
+            .map(|count| count.to_string())
+            .unwrap_or_else(|| "?".to_string());
+        lines.push(format!(
+            "{emoji} {} — entries: {count}, suggest: {}, action: {}, vectors: {}, status: {}",
+            db.path, db.scope_suggestion, db.recommended_action, db.vec_available, db.status
+        ));
+    }
+
+    if !report.groups.is_empty() {
+        lines.push(String::new());
+        lines.push("Groups:".to_string());
+        for group in &report.groups {
+            lines.push(format!(
+                "  - {}: {} DBs, {} memories",
+                group.group, group.database_count, group.memory_count
+            ));
+        }
+    }
+
+    if !report.dry_run_plan.is_empty() {
+        lines.push(String::new());
+        lines.push("Dry-run plan:".to_string());
+        for step in &report.dry_run_plan {
+            lines.push(format!(
+                "  {}. [{}] {} -> {}",
+                step.order, step.action, step.scope, step.target_label
+            ));
+            lines.push(format!("     rationale: {}", step.rationale));
+            for source in &step.source_paths {
+                lines.push(format!("     source: {source}"));
+            }
+        }
+    }
+
+    if !report.next_steps.is_empty() {
+        lines.push(String::new());
+        lines.push("Next steps:".to_string());
+        for step in &report.next_steps {
+            lines.push(format!("  - {step}"));
+        }
+    }
+
+    lines.join("\n")
+}
+
+async fn run_setup_command(
+    json_output: bool,
+    home: &std::path::Path,
+    app_home: &std::path::Path,
+    global_db_path: &PathBuf,
+    project_db_path: Option<&PathBuf>,
+    git_root: Option<&PathBuf>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let env_vars = std::env::vars().collect::<HashMap<_, _>>();
+    let report = build_setup_report(
+        home,
+        app_home,
+        global_db_path,
+        project_db_path,
+        git_root,
+        &env_vars,
+    )?;
+
+    if json_output {
+        print_pretty_json(&serde_json::to_value(&report)?)
+    } else {
+        println!("{}", render_setup_report(&report));
+        Ok(())
+    }
+}
+
+async fn run_tidy_command(
+    json_output: bool,
+    roots: Vec<PathBuf>,
+    git_root: Option<&PathBuf>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let report = build_tidy_report(&roots, git_root)?;
+
+    if json_output {
+        print_pretty_json(&serde_json::to_value(&report)?)
+    } else {
+        println!("{}", render_tidy_report(&report));
+        Ok(())
     }
 }
 
@@ -184,6 +934,12 @@ async fn run_cli_command(
         }
         Commands::BackfillSummaries { .. } => {
             unreachable!("BackfillSummaries is handled in async context before this point")
+        }
+        Commands::Setup { .. } => {
+            unreachable!("Setup is handled in async context before generic CLI dispatch")
+        }
+        Commands::Tidy { .. } => {
+            unreachable!("Tidy is handled in async context before generic CLI dispatch")
         }
         Commands::Hub { action } => {
             let store = open_cli_store(db_path)?;
@@ -393,10 +1149,6 @@ async fn tokio_main(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         return run_backfill_summaries(&target_path, *dry_run).await;
     }
 
-    if !matches!(command, Commands::Serve) {
-        return run_cli_command(command, &global_db_path).await;
-    }
-
     let gc_enabled = cli
         .gc_enabled
         .or_else(|| parse_env_bool("MEMORY_GC_ENABLED"))
@@ -459,6 +1211,35 @@ async fn tokio_main(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             );
             project_db_path = None;
         }
+    }
+
+    if let Commands::Setup { json } = &command {
+        return run_setup_command(
+            *json,
+            &home,
+            &app_home,
+            &global_db_path,
+            project_db_path.as_ref(),
+            git_root.as_ref(),
+        )
+        .await;
+    }
+
+    if let Commands::Tidy { json } = &command {
+        let mut roots = vec![
+            app_home.clone(),
+            home.join(".sigil"),
+            home.join(".gemini"),
+            home.join(".openclaw"),
+        ];
+        if let Some(root) = git_root.as_ref() {
+            roots.push(root.clone());
+        }
+        return run_tidy_command(*json, roots, git_root.as_ref()).await;
+    }
+
+    if !matches!(command, Commands::Serve) {
+        return run_cli_command(command, &global_db_path).await;
     }
 
     // Ensure parent dirs exist

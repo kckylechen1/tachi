@@ -88,6 +88,18 @@ pub(crate) enum Commands {
     },
     /// Show database statistics
     Stats,
+    /// Inspect onboarding readiness and current local Tachi setup
+    Setup {
+        /// Emit machine-readable JSON instead of the human summary
+        #[arg(long)]
+        json: bool,
+    },
+    /// Scan for fragmented memory databases and report consolidation candidates
+    Tidy {
+        /// Emit machine-readable JSON instead of the human summary
+        #[arg(long)]
+        json: bool,
+    },
     /// Run garbage collection
     Gc,
     /// Hub management

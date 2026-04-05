@@ -103,7 +103,7 @@ fn tokenize_query(query: &str) -> Vec<String> {
     let mut tokens = Vec::new();
     let mut current = String::new();
     for ch in query.chars() {
-        if ch.is_ascii_alphanumeric() || ch == '_' || ch == '-' {
+        if ch.is_ascii_alphanumeric() {
             current.push(ch.to_ascii_lowercase());
         } else if !current.is_empty() {
             if current.len() >= 2 {
@@ -119,6 +119,30 @@ fn tokenize_query(query: &str) -> Vec<String> {
     tokens.sort();
     tokens.dedup();
     tokens
+}
+
+fn token_overlap_ratio(query_tokens: &[String], candidate_tokens: &[String]) -> f64 {
+    if query_tokens.is_empty() || candidate_tokens.is_empty() {
+        return 0.0;
+    }
+
+    let query = query_tokens
+        .iter()
+        .map(String::as_str)
+        .collect::<HashSet<_>>();
+    let candidate = candidate_tokens
+        .iter()
+        .map(String::as_str)
+        .collect::<HashSet<_>>();
+    let intersection = query.intersection(&candidate).count();
+    if intersection == 0 {
+        return 0.0;
+    }
+    let union = query.union(&candidate).count();
+    if union == 0 {
+        return 0.0;
+    }
+    intersection as f64 / union as f64
 }
 
 fn telemetry_bonus(cap: &HubCapability, reasons: &mut Vec<String>) -> f64 {
@@ -152,46 +176,76 @@ fn capability_score(
     if query.is_empty() {
         return None;
     }
-    let tokens = tokenize_query(&query);
+    let query_tokens = tokenize_query(&query);
+    if query_tokens.is_empty() {
+        return None;
+    }
     let id = cap.id.to_ascii_lowercase();
     let name = cap.name.to_ascii_lowercase();
     let desc = cap.description.to_ascii_lowercase();
     let definition = cap.definition.to_ascii_lowercase();
+    let id_tokens = tokenize_query(&id);
+    let name_tokens = tokenize_query(&name);
+    let desc_tokens = tokenize_query(&desc);
+    let definition_tokens = tokenize_query(&definition);
 
     let mut score = 0.0;
+    let mut matched = false;
     let mut reasons = Vec::new();
 
     if id == query || name == query {
         score += 10.0;
+        matched = true;
         reasons.push("exact id/name match".to_string());
     } else {
         if name.contains(&query) {
-            score += 7.0;
+            score += 4.0;
+            matched = true;
             reasons.push("name matches query".to_string());
         }
         if id.contains(&query) {
-            score += 6.0;
+            score += 3.5;
+            matched = true;
             reasons.push("id matches query".to_string());
         }
         if desc.contains(&query) {
-            score += 5.0;
+            score += 3.0;
+            matched = true;
             reasons.push("description matches query".to_string());
         }
     }
 
-    for token in &tokens {
-        if name.contains(token) {
-            score += 2.2;
-        }
-        if id.contains(token) {
-            score += 2.0;
-        }
-        if desc.contains(token) {
-            score += 1.4;
-        }
-        if definition.contains(token) {
-            score += 0.8;
-        }
+    let name_overlap = token_overlap_ratio(&query_tokens, &name_tokens);
+    let id_overlap = token_overlap_ratio(&query_tokens, &id_tokens);
+    let desc_overlap = token_overlap_ratio(&query_tokens, &desc_tokens);
+    let definition_overlap = token_overlap_ratio(&query_tokens, &definition_tokens);
+
+    if name_overlap > 0.0 {
+        score += name_overlap * 10.0;
+        matched = true;
+        reasons.push(format!("name token overlap {:.3}", name_overlap));
+    }
+    if id_overlap > 0.0 {
+        score += id_overlap * 8.0;
+        matched = true;
+        reasons.push(format!("id token overlap {:.3}", id_overlap));
+    }
+    if desc_overlap > 0.0 {
+        score += desc_overlap * 12.0;
+        matched = true;
+        reasons.push(format!("description token overlap {:.3}", desc_overlap));
+    }
+    if definition_overlap > 0.0 {
+        score += definition_overlap * 2.5;
+        matched = true;
+        reasons.push(format!(
+            "definition token overlap {:.3}",
+            definition_overlap
+        ));
+    }
+
+    if !matched {
+        return None;
     }
 
     if let Some(host) = host {
