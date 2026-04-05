@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import fs from "node:fs/promises";
 import path from "node:path";
 import { Type } from "@sinclair/typebox";
 import { bridgeConfigSchema } from "./config.js";
@@ -148,6 +149,58 @@ function hasCaptureTrigger(messages, keywords) {
 function formatJsonTextResult(value) {
     return textResult(JSON.stringify(value, null, 2));
 }
+function sanitizeScopeKey(value) {
+    return value.replace(/[^a-zA-Z0-9._-]+/g, "_").slice(0, 120) || "default";
+}
+async function ensureParentDir(filePath) {
+    await fs.mkdir(path.dirname(filePath), { recursive: true });
+}
+async function appendJsonLine(filePath, payload) {
+    await ensureParentDir(filePath);
+    await fs.appendFile(filePath, `${JSON.stringify({ ts: new Date().toISOString(), ...payload })}\n`, "utf8");
+}
+async function readJsonFile(filePath, fallback) {
+    try {
+        return JSON.parse(await fs.readFile(filePath, "utf8"));
+    }
+    catch {
+        return fallback;
+    }
+}
+async function writeJsonFile(filePath, payload) {
+    await ensureParentDir(filePath);
+    await fs.writeFile(filePath, JSON.stringify(payload, null, 2), "utf8");
+}
+function normalizeTodoItem(item) {
+    const content = String(item.content || "").trim();
+    if (!content) {
+        return null;
+    }
+    const status = item.status === "in_progress" || item.status === "completed" || item.status === "cancelled"
+        ? item.status
+        : "pending";
+    const priority = item.priority === "high" || item.priority === "low" ? item.priority : "medium";
+    return { content, status, priority };
+}
+function formatTodoItems(items) {
+    if (items.length === 0) {
+        return "No todo items.";
+    }
+    const icons = {
+        pending: "[ ]",
+        in_progress: "[•]",
+        completed: "[x]",
+        cancelled: "[-]",
+    };
+    const priorities = {
+        high: "🔴",
+        medium: "🟡",
+        low: "🟢",
+    };
+    return items
+        .map((item) => `${icons[item.status]} ${priorities[item.priority]} ${item.content}`)
+        .join("\n");
+}
 // ============================================================================
 // Plugin Definition
 // ============================================================================
@@ -157,9 +210,54 @@ export const memoryHybridBridgePlugin = {
     kind: "memory",
     description: "Advanced structured memory with LLM extraction and hybrid retrieval (vector/lexical/symbolic)",
     register(api) {
+        const runtimeApi = api;
         const config = bridgeConfigSchema.parse(api.pluginConfig);
         const configuredDbPath = resolveConfigPath(api, config.dbPath);
+        const pluginDataDir = path.dirname(configuredDbPath);
         const clientCache = new Map();
+        const agentRuns = new Map();
+        const subagentRuns = new Map();
+        const spawnCounts = new Map();
+        function resolveScope(context, event) {
+            return (context?.sessionKey ||
+                context?.sessionId ||
+                event?.conversationId ||
+                event?.sessionId ||
+                event?.runId ||
+                "default");
+        }
+        function auditPaths(scope) {
+            const safeScope = sanitizeScopeKey(scope);
+            return {
+                audit: config.auditLogPath,
+                runAudit: path.resolve(pluginDataDir, "run-audit.jsonl"),
+                usage: path.resolve(pluginDataDir, "usage-log.jsonl"),
+                tooluse: path.resolve(pluginDataDir, "tooluse-log.jsonl"),
+                compaction: path.resolve(pluginDataDir, "compaction-log.jsonl"),
+                todo: path.resolve(pluginDataDir, "todos", `${safeScope}.json`),
+            };
+        }
+        async function appendAudit(scope, payload) {
+            await appendJsonLine(auditPaths(scope).audit, payload);
+        }
+        async function appendRunAudit(scope, payload) {
+            await appendJsonLine(auditPaths(scope).runAudit, payload);
+        }
+        async function appendUsage(scope, payload) {
+            await appendJsonLine(auditPaths(scope).usage, payload);
+        }
+        async function appendTooluse(scope, payload) {
+            await appendJsonLine(auditPaths(scope).tooluse, payload);
+        }
+        async function appendCompaction(scope, payload) {
+            await appendJsonLine(auditPaths(scope).compaction, payload);
+        }
+        async function readTodos(scope) {
+            return await readJsonFile(auditPaths(scope).todo, []);
+        }
+        async function writeTodos(scope, todos) {
+            await writeJsonFile(auditPaths(scope).todo, todos);
+        }
         function resolveAgentDbPath(agentId) {
             const normalizedAgentId = (agentId || "main").trim() || "main";
             const baseDir = path.dirname(configuredDbPath);
@@ -475,22 +573,182 @@ export const memoryHybridBridgePlugin = {
         registerTachiPassthrough("tachi_run_skill", "run_skill", "Run a Tachi skill.");
         registerTachiPassthrough("tachi_hub_discover", "hub_discover", "Discover available Tachi hub capabilities.");
         registerTachiPassthrough("tachi_recommend_toolchain", "recommend_toolchain", "Recommend a Tachi toolchain for the current task.");
+        api.registerTool({
+            name: "todo_write",
+            label: "Todo Write",
+            description: "Write or replace the current session todo list.",
+            parameters: Type.Object({
+                todos: Type.Array(Type.Object({
+                    content: Type.String(),
+                    status: Type.Optional(Type.Union([
+                        Type.Literal("pending"),
+                        Type.Literal("in_progress"),
+                        Type.Literal("completed"),
+                        Type.Literal("cancelled"),
+                    ])),
+                    priority: Type.Optional(Type.Union([Type.Literal("low"), Type.Literal("medium"), Type.Literal("high")])),
+                })),
+            }),
+            async execute(_toolCallId, params, _signal, context) {
+                const scope = resolveScope(context);
+                const todos = (params.todos || [])
+                    .map(normalizeTodoItem)
+                    .filter((item) => Boolean(item));
+                await writeTodos(scope, todos);
+                return formatJsonTextResult({ scope, count: todos.length });
+            },
+        });
+        api.registerTool({
+            name: "todo_read",
+            label: "Todo Read",
+            description: "Read the current session todo list.",
+            parameters: Type.Object({}),
+            async execute(_toolCallId, _params, _signal, context) {
+                const scope = resolveScope(context);
+                const todos = await readTodos(scope);
+                return textResult(formatTodoItems(todos), { scope, count: todos.length, todos });
+            },
+        });
+        api.registerTool({
+            name: "todo_spawn_summary",
+            label: "Todo Spawn Summary",
+            description: "Show how many subagent spawns were recorded for the current session.",
+            parameters: Type.Object({}),
+            async execute(_toolCallId, _params, _signal, context) {
+                const scope = resolveScope(context);
+                return formatJsonTextResult({
+                    scope,
+                    spawnCount: spawnCounts.get(scope) || 0,
+                });
+            },
+        });
         api.on("before_agent_start", async (event, context) => {
             const query = event.prompt;
+            const scope = resolveScope(context, event);
+            const agentId = context?.agentId || "main";
+            const key = `${agentId}:${scope}`;
+            agentRuns.set(key, { startedAt: Date.now(), prompt: query });
+            await appendRunAudit(scope, {
+                type: "agent_start",
+                agentId,
+                sessionKey: context?.sessionKey || null,
+                sessionId: context?.sessionId || null,
+                prompt: typeof query === "string" ? query.slice(0, 400) : null,
+            });
             if (!query || query.length < 5) {
                 return;
             }
-            const agentId = context?.agentId || "main";
             const recall = await performRecall(query, agentId);
             if (recall?.prependContext.trim()) {
                 return { prependContext: recall.prependContext };
             }
+        });
+        runtimeApi.on("llm_input", async (event, context) => {
+            const scope = resolveScope(context, event);
+            await appendUsage(scope, {
+                type: "llm_input",
+                agentId: context?.agentId || "main",
+                sessionKey: context?.sessionKey || null,
+                runId: event?.runId || null,
+                model: event?.model || null,
+                provider: event?.provider || null,
+            });
+        });
+        runtimeApi.on("llm_output", async (event, context) => {
+            const scope = resolveScope(context, event);
+            await appendUsage(scope, {
+                type: "llm_output",
+                agentId: context?.agentId || "main",
+                sessionKey: context?.sessionKey || null,
+                runId: event?.runId || null,
+                model: event?.model || null,
+                provider: event?.provider || null,
+                usage: event?.usage || null,
+            });
+        });
+        runtimeApi.on("after_tool_call", async (event, context) => {
+            const scope = resolveScope(context, event);
+            const toolName = event?.toolName || event?.name || "unknown";
+            await appendTooluse(scope, {
+                type: "after_tool_call",
+                agentId: context?.agentId || "main",
+                sessionKey: context?.sessionKey || null,
+                toolName,
+                success: event?.success ?? null,
+            });
+            if (toolName === "sessions_spawn" || toolName === "subagents") {
+                spawnCounts.set(scope, (spawnCounts.get(scope) || 0) + 1);
+            }
+        });
+        runtimeApi.on("before_compaction", async (event, context) => {
+            const scope = resolveScope(context, event);
+            await appendCompaction(scope, {
+                type: "before_compaction",
+                agentId: context?.agentId || "main",
+                sessionKey: context?.sessionKey || null,
+                windowId: event?.window_id || event?.windowId || null,
+                messageCount: Array.isArray(event?.messages) ? event.messages.length : null,
+            });
+        });
+        runtimeApi.on("after_compaction", async (event, context) => {
+            const scope = resolveScope(context, event);
+            await appendCompaction(scope, {
+                type: "after_compaction",
+                agentId: context?.agentId || "main",
+                sessionKey: context?.sessionKey || null,
+                windowId: event?.window_id || event?.windowId || null,
+                compactedTextLength: typeof event?.compacted_text === "string" ? event.compacted_text.length : null,
+                estimatedTokens: event?.estimated_tokens ?? null,
+            });
+        });
+        runtimeApi.on("tool_result_persist", async (event, context) => {
+            if (event?.toolName !== "compact_context") {
+                return;
+            }
+            const scope = resolveScope(context, event);
+            await appendCompaction(scope, {
+                type: "tool_result_persist",
+                agentId: context?.agentId || "main",
+                sessionKey: context?.sessionKey || null,
+                toolName: event?.toolName,
+                message: event?.message || null,
+            });
+        });
+        runtimeApi.on("subagent_spawned", async (event, context) => {
+            const scope = resolveScope(context, event);
+            const childKey = String(event?.childSessionKey || event?.sessionKey || event?.id || Date.now());
+            subagentRuns.set(childKey, { startedAt: Date.now() });
+            spawnCounts.set(scope, (spawnCounts.get(scope) || 0) + 1);
+            await appendRunAudit(scope, {
+                type: "subagent_spawned",
+                agentId: context?.agentId || "main",
+                childSessionKey: childKey,
+                label: event?.label || null,
+                sessionKey: context?.sessionKey || null,
+            });
+        });
+        runtimeApi.on("subagent_ended", async (event, context) => {
+            const scope = resolveScope(context, event);
+            const childKey = String(event?.childSessionKey || event?.sessionKey || event?.id || "");
+            const started = childKey ? subagentRuns.get(childKey) : undefined;
+            if (childKey) {
+                subagentRuns.delete(childKey);
+            }
+            await appendRunAudit(scope, {
+                type: "subagent_ended",
+                agentId: context?.agentId || "main",
+                childSessionKey: childKey || null,
+                durationMs: started ? Math.max(0, Date.now() - started.startedAt) : null,
+                outcome: event?.outcome || null,
+                sessionKey: context?.sessionKey || null,
+            });
         });
         api.on("agent_end", async (event, context) => {
             if (!event?.success || !Array.isArray(event?.messages) || event.messages.length === 0) {
                 return;
             }
             const agentId = context?.agentId || "main";
+            const scope = resolveScope(context, event);
             const conversationId = context?.sessionKey || event?.conversationId || event?.sessionId || `openclaw:${agentId}`;
             const turnId = event?.turnId || event?.runId || `agent_end:${Date.now()}`;
             const selfEvolutionAgents = new Set(config.selfEvolutionAgents.map((value) => value.toLowerCase()));
@@ -508,6 +766,12 @@ export const memoryHybridBridgePlugin = {
                         }
                     }
                     if (saved > 0) {
+                        await appendAudit(scope, {
+                            type: "self_evolution_capture",
+                            agentId,
+                            saved,
+                            conversationId,
+                        });
                         api.logger.info(`tachi: saved ${saved} self-evolution notes for ${agentId}`);
                     }
                 }
@@ -535,6 +799,26 @@ export const memoryHybridBridgePlugin = {
             if (!result.ok) {
                 api.logger.warn("tachi: capture_session skipped in degraded mode");
             }
+            const key = `${agentId}:${scope}`;
+            const started = agentRuns.get(key);
+            agentRuns.delete(key);
+            await appendRunAudit(scope, {
+                type: "agent_end",
+                agentId,
+                sessionKey: context?.sessionKey || null,
+                success: Boolean(event?.success),
+                durationMs: started ? Math.max(0, Date.now() - started.startedAt) : null,
+                captured: result.ok ? result.value : null,
+            });
+        });
+        runtimeApi.on("session_end", async (event, context) => {
+            const scope = resolveScope(context, event);
+            await appendRunAudit(scope, {
+                type: "session_end",
+                agentId: context?.agentId || "main",
+                sessionKey: context?.sessionKey || null,
+                sessionId: context?.sessionId || null,
+            });
         });
         api.registerService({
             id: "tachi",
