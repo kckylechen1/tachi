@@ -390,6 +390,8 @@ mod tests {
             revision: 1,
             metadata: serde_json::Value::Object(Default::default()),
             vector: None,
+            retention_policy: None,
+            domain: None,
         };
         let s = decay_score(&entry);
         // 60-day old, no access → recency ~ exp(-0.693*2) ≈ 0.25, floor=0.7*0.3=0.21 → ~0.25

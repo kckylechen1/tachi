@@ -3,7 +3,7 @@ use chrono::Utc;
 use rusqlite::{params, Connection};
 use serde_json::json;
 
-use crate::types::{MemoryEdge, MemoryEntry};
+use crate::types::{GcConfig, MemoryEdge, MemoryEntry};
 
 fn make_conn() -> Connection {
     libsimple::enable_auto_extension().unwrap();
@@ -36,6 +36,8 @@ fn make_entry(id: &str, text: &str) -> MemoryEntry {
         revision: 1,
         metadata: json!({ "keywords": ["test"], "entities": [] }),
         vector: None,
+        retention_policy: None,
+        domain: None,
     }
 }
 
@@ -429,7 +431,7 @@ fn gc_tables_prunes_retention_and_orphans() {
         )
         .unwrap();
 
-    let summary = gc_tables(&mut conn).unwrap();
+    let summary = gc_tables(&mut conn, &GcConfig::default()).unwrap();
 
     let kept_access: i64 = conn
         .query_row(

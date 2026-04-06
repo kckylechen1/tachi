@@ -154,6 +154,16 @@ pub(crate) struct SaveMemoryParams {
     /// If omitted, uses the default project DB configured at startup.
     #[serde(default)]
     pub project: Option<String>,
+
+    /// Retention policy: "ephemeral" | "durable" | "permanent" | "pinned".
+    /// NULL/omitted = durable (default).
+    #[serde(default)]
+    pub retention_policy: Option<String>,
+
+    /// Domain this memory belongs to (e.g. "finance", "code-review").
+    /// NULL means no domain scoping.
+    #[serde(default)]
+    pub domain: Option<String>,
 }
 
 // ─── Search ─────────────────────────────────────────────────────────────────
@@ -225,6 +235,11 @@ pub(crate) struct SearchMemoryParams {
     /// If omitted, searches the default project DB configured at startup.
     #[serde(default)]
     pub project: Option<String>,
+
+    /// Domain filter — only return memories belonging to this domain.
+    /// NULL means no domain filtering.
+    #[serde(default)]
+    pub domain: Option<String>,
 }
 
 impl SearchMemoryParams {
@@ -252,6 +267,7 @@ impl SearchMemoryParams {
             weights,
             // Keep search path read-only so multiple search requests can run concurrently.
             record_access: false,
+            domain: self.domain.clone(),
             ..Default::default()
         }
     }
@@ -432,6 +448,53 @@ pub(crate) struct IngestEventParams {
     pub messages: Vec<Message>,
 }
 
+// ─── Domain Management ──────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub(crate) struct RegisterDomainParams {
+    /// Unique domain name (e.g. "finance", "code-review")
+    pub name: String,
+
+    /// Human-readable description of this domain
+    #[serde(default)]
+    pub description: Option<String>,
+
+    /// GC stale-days threshold for memories in this domain (default: 90)
+    #[serde(default)]
+    pub gc_threshold_days: Option<u32>,
+
+    /// Default retention policy for memories saved to this domain
+    #[serde(default)]
+    pub default_retention: Option<String>,
+
+    /// Default path prefix for memories saved to this domain
+    #[serde(default)]
+    pub default_path_prefix: Option<String>,
+
+    /// Arbitrary JSON metadata
+    #[serde(default)]
+    pub metadata: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub(crate) struct GetDomainParams {
+    /// Domain name to retrieve
+    pub name: String,
+}
+
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub(crate) struct ListDomainsParams {
+    /// Placeholder (no filters currently needed)
+    #[serde(default)]
+    pub _placeholder: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub(crate) struct DeleteDomainParams {
+    /// Domain name to delete
+    pub name: String,
+}
+
 /// Build a MemoryEntry from a JSON fact value (shared by extract_facts and ingest_event).
 pub(crate) fn fact_to_entry(
     fact: &serde_json::Value,
@@ -479,5 +542,7 @@ pub(crate) fn fact_to_entry(
         revision: 1,
         metadata,
         vector: None,
+        retention_policy: None,
+        domain: None,
     })
 }

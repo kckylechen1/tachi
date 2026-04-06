@@ -107,6 +107,8 @@ fn memory_claim_signature_changes_on_revision() {
         revision: 1,
         metadata: json!({}),
         vector: None,
+        retention_policy: None,
+        domain: None,
     };
 
     let before = memory_claim_signature(&entry);
@@ -139,6 +141,8 @@ fn memory_claim_signature_changes_on_vector() {
         revision: 1,
         metadata: json!({}),
         vector: None,
+        retention_policy: None,
+        domain: None,
     };
 
     let before = memory_claim_signature(&entry);
@@ -171,6 +175,8 @@ fn forget_sweep_keeps_newest_distill_entries() {
             revision: 1,
             metadata: json!({}),
             vector: None,
+            retention_policy: None,
+            domain: None,
         },
         MemoryEntry {
             id: "new".to_string(),
@@ -193,6 +199,8 @@ fn forget_sweep_keeps_newest_distill_entries() {
             revision: 1,
             metadata: json!({}),
             vector: None,
+            retention_policy: None,
+            domain: None,
         },
     ];
     entries.sort_by(|a, b| {

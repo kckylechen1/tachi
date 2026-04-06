@@ -24,6 +24,8 @@ pub struct SearchOptions {
     pub weights: HybridWeights,
     /// Optionally restrict results to a path prefix (e.g. "/openclaw")
     pub path_prefix: Option<String>,
+    /// Optionally restrict results to a specific domain (e.g. "finance")
+    pub domain: Option<String>,
     /// Pre-computed query embedding; if None, skip vector channel.
     pub query_vec: Option<Vec<f32>>,
     /// Whether the sqlite-vec extension is available for vector search.
@@ -50,6 +52,7 @@ impl Default for SearchOptions {
             top_k: 6,
             weights: HybridWeights::default(),
             path_prefix: None,
+            domain: None,
             query_vec: None,
             vec_available: false,
             record_access: true,
@@ -172,15 +175,26 @@ pub fn hybrid_search(
         .collect();
 
     // ── Optional path-prefix filter ───────────────────────────────────────────
-    let entries_ref: HashMap<String, &MemoryEntry> = if let Some(prefix) = &opts.path_prefix {
-        entries_map
-            .iter()
-            .filter(|(_, e)| e.path.starts_with(prefix.as_str()))
-            .map(|(k, v)| (k.clone(), v))
-            .collect()
-    } else {
-        entries_map.iter().map(|(k, v)| (k.clone(), v)).collect()
-    };
+    let entries_ref: HashMap<String, &MemoryEntry> = entries_map
+        .iter()
+        .filter(|(_, e)| {
+            // Path prefix filter
+            if let Some(prefix) = &opts.path_prefix {
+                if !e.path.starts_with(prefix.as_str()) {
+                    return false;
+                }
+            }
+            // Domain filter
+            if let Some(domain) = &opts.domain {
+                match &e.domain {
+                    Some(d) if d == domain => {}
+                    _ => return false,
+                }
+            }
+            true
+        })
+        .map(|(k, v)| (k.clone(), v))
+        .collect();
 
     if entries_ref.is_empty() {
         return Ok(vec![]);
@@ -324,6 +338,8 @@ mod tests {
             revision: 1,
             metadata: json!({ "keywords": keywords, "entities": [] }),
             vector: None,
+            retention_policy: None,
+            domain: None,
         };
         upsert(conn, &e, false).unwrap();
     }

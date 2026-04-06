@@ -520,6 +520,8 @@ pub(super) async fn handle_post_card(
         revision: 1,
         vector: None,
         metadata: metadata.clone(),
+        retention_policy: None,
+        domain: None,
     };
 
     server.with_global_store(|store| {

@@ -125,6 +125,8 @@ fn build_cli_memory_entry(
         revision: 1,
         metadata: json!({}),
         vector: None,
+        retention_policy: None,
+        domain: None,
     }
 }
 
@@ -1055,7 +1057,7 @@ async fn run_cli_command(
         }
         Commands::Gc => {
             let mut store = open_cli_store(db_path)?;
-            let mut gc = store.gc_tables()?;
+            let mut gc = store.gc_tables(&memory_core::GcConfig::default())?;
             let kanban_deleted =
                 gc_expired_kanban_cards(&mut store, DEFAULT_KANBAN_GC_MAX_AGE_DAYS)?;
             if let Some(object) = gc.as_object_mut() {
@@ -1440,14 +1442,18 @@ async fn tokio_main(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 interval.tick().await;
                 eprintln!("[gc] Running scheduled garbage collection...");
                 match gc_server.with_global_store(|store: &mut MemoryStore| {
-                    let mut gc = store.gc_tables().map_err(|e| format!("{e}"))?;
+                    let mut gc = store.gc_tables(&memory_core::GcConfig::default()).map_err(|e| format!("{e}"))?;
                     let kanban_deleted =
                         gc_expired_kanban_cards(store, DEFAULT_KANBAN_GC_MAX_AGE_DAYS)?;
                     if let Some(object) = gc.as_object_mut() {
                         object.insert("kanban_cards_pruned".into(), json!(kanban_deleted));
                     }
-                    // Auto-archive stale memories (90 days, low importance)
-                    match store.archive_stale_memories(90) {
+                    // Auto-archive stale memories (configurable via MEMORY_GC_STALE_DAYS env var)
+                    let stale_days: u32 = std::env::var("MEMORY_GC_STALE_DAYS")
+                        .ok()
+                        .and_then(|v| v.parse().ok())
+                        .unwrap_or(90);
+                    match store.archive_stale_memories(stale_days) {
                         Ok(archived) => {
                             if archived > 0 {
                                 eprintln!("[gc] Archived {} stale memories", archived);
@@ -1465,14 +1471,18 @@ async fn tokio_main(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 }
                 if gc_server.has_project_db() {
                     match gc_server.with_project_store(|store: &mut MemoryStore| {
-                        let mut gc = store.gc_tables().map_err(|e| format!("{e}"))?;
+                        let mut gc = store.gc_tables(&memory_core::GcConfig::default()).map_err(|e| format!("{e}"))?;
                         let kanban_deleted =
                             gc_expired_kanban_cards(store, DEFAULT_KANBAN_GC_MAX_AGE_DAYS)?;
                         if let Some(object) = gc.as_object_mut() {
                             object.insert("kanban_cards_pruned".into(), json!(kanban_deleted));
                         }
-                        // Auto-archive stale memories (90 days, low importance)
-                        match store.archive_stale_memories(90) {
+                        // Auto-archive stale memories (configurable via MEMORY_GC_STALE_DAYS env var)
+                        let stale_days: u32 = std::env::var("MEMORY_GC_STALE_DAYS")
+                            .ok()
+                            .and_then(|v| v.parse().ok())
+                            .unwrap_or(90);
+                        match store.archive_stale_memories(stale_days) {
                             Ok(archived) => {
                                 if archived > 0 {
                                     eprintln!(

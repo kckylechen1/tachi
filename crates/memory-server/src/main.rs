@@ -83,8 +83,9 @@ use crate::mcp_proxy::{
     McpToolExposureMode,
 };
 use crate::memory_ops::{
-    handle_archive_memory, handle_delete_memory, handle_get_memory, handle_list_memories,
-    handle_memory_gc, handle_memory_stats,
+    handle_archive_memory, handle_delete_domain, handle_delete_memory, handle_get_domain,
+    handle_get_memory, handle_list_domains, handle_list_memories, handle_memory_gc,
+    handle_memory_stats, handle_register_domain,
 };
 use crate::memory_search_ops::{
     handle_find_similar_memory, handle_save_memory, handle_search_memory, search_memory_rows,
@@ -213,6 +214,8 @@ const CACHEABLE_TOOLS: &[&str] = &[
     "vc_list",
     "vc_resolve",
     "get_pipeline_status",
+    "list_domains",
+    "get_domain",
 ];
 
 /// Tools that invalidate the cache (write operations)
@@ -247,6 +250,8 @@ const CACHE_INVALIDATING_TOOLS: &[&str] = &[
     "pack_register",
     "pack_remove",
     "pack_project",
+    "register_domain",
+    "delete_domain",
 ];
 
 struct CachedResult {
@@ -1209,6 +1214,8 @@ impl MemoryServer {
             revision: 1,
             vector: None,
             metadata,
+            retention_policy: None,
+            domain: None,
         };
         self.with_global_store(|store| store.upsert(&entry).map_err(|e| format!("{e}")))?;
 
@@ -1551,6 +1558,42 @@ impl MemoryServer {
         Parameters(params): Parameters<ProjectionListParams>,
     ) -> Result<String, String> {
         handle_projection_list(self, params).await
+    }
+
+    // ─── Domain Management ─────────────────────────────────────────────────
+
+    #[tool(
+        description = "Register a domain configuration for memory routing, GC thresholds, and default retention policies."
+    )]
+    async fn register_domain(
+        &self,
+        Parameters(params): Parameters<RegisterDomainParams>,
+    ) -> Result<String, String> {
+        handle_register_domain(self, params).await
+    }
+
+    #[tool(description = "Get a domain configuration by name.")]
+    async fn get_domain(
+        &self,
+        Parameters(params): Parameters<GetDomainParams>,
+    ) -> Result<String, String> {
+        handle_get_domain(self, params).await
+    }
+
+    #[tool(description = "List all registered domain configurations.")]
+    async fn list_domains(
+        &self,
+        Parameters(_params): Parameters<ListDomainsParams>,
+    ) -> Result<String, String> {
+        handle_list_domains(self).await
+    }
+
+    #[tool(description = "Delete a domain configuration by name.")]
+    async fn delete_domain(
+        &self,
+        Parameters(params): Parameters<DeleteDomainParams>,
+    ) -> Result<String, String> {
+        handle_delete_domain(self, params).await
     }
 
     // ─── Vault (Encrypted Secret Storage) ────────────────────────────────────

@@ -251,6 +251,8 @@ async fn save_incident_memory(server: &MemoryServer, text: &str) {
         revision: 1,
         metadata: json!({}),
         vector: None,
+        retention_policy: None,
+        domain: None,
     };
 
     let result =

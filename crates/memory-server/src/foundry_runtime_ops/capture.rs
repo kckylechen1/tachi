@@ -168,6 +168,8 @@ pub(super) fn merge_capture_entries(
             similarity,
         ),
         vector: None,
+        retention_policy: None,
+        domain: None,
     }
 }
 
@@ -194,6 +196,7 @@ pub(super) fn capture_search_options(
             decay: 0.0,
         },
         record_access: false,
+        domain: None,
     }
 }
 
