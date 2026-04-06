@@ -67,6 +67,8 @@ pub(super) async fn handle_save_memory(
         revision: 1,
         metadata,
         vector: params.vector,
+        retention_policy: params.retention_policy,
+        domain: params.domain,
     };
 
     if let Some(ref project_name) = named_project {
@@ -374,6 +376,7 @@ pub(super) async fn handle_find_similar_memory(
         mmr_threshold: None,
         graph_expand_hops: 0,
         graph_relation_filter: None,
+        domain: None,
     };
 
     let global_results = server.with_global_store_read(|store| {
@@ -396,6 +399,7 @@ pub(super) async fn handle_find_similar_memory(
             mmr_threshold: None,
             graph_expand_hops: 0,
             graph_relation_filter: None,
+            domain: None,
         };
 
         let project_results = server.with_project_store_read(|store| {

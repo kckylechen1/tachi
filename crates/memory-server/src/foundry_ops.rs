@@ -215,6 +215,7 @@ async fn build_evidence(
                 weights: None,
                 agent_role: None,
                 project: query.project.clone(),
+                domain: None,
             },
         )
         .await?;

@@ -352,6 +352,8 @@ pub(super) async fn handle_ghost_promote(
             revision: 1,
             metadata,
             vector: None,
+            retention_policy: None,
+            domain: None,
         };
 
         store

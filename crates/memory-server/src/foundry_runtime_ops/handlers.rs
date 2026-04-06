@@ -7,7 +7,7 @@ use regex::Regex;
 use std::collections::HashSet;
 use std::sync::OnceLock;
 
-pub(in crate) async fn handle_section_build(
+pub(crate) async fn handle_section_build(
     _server: &MemoryServer,
     params: SectionBuildParams,
 ) -> Result<String, String> {
@@ -39,7 +39,7 @@ pub(in crate) async fn handle_section_build(
     .map_err(|e| format!("Failed to serialize section_build response: {e}"))
 }
 
-pub(in crate) async fn handle_compact_rollup(
+pub(crate) async fn handle_compact_rollup(
     server: &MemoryServer,
     params: CompactRollupParams,
 ) -> Result<String, String> {
@@ -124,7 +124,7 @@ pub(in crate) async fn handle_compact_rollup(
     .map_err(|e| format!("Failed to serialize compact_rollup response: {e}"))
 }
 
-pub(in crate) async fn handle_compact_session_memory(
+pub(crate) async fn handle_compact_session_memory(
     server: &MemoryServer,
     params: CompactSessionMemoryParams,
 ) -> Result<String, String> {
@@ -214,6 +214,8 @@ pub(in crate) async fn handle_compact_session_memory(
             revision: 1,
             metadata,
             vector: None,
+            retention_policy: None,
+            domain: None,
         });
     }
 
@@ -282,6 +284,8 @@ pub(in crate) async fn handle_compact_session_memory(
             revision: 1,
             metadata,
             vector: None,
+            retention_policy: None,
+            domain: None,
         });
     }
 
@@ -367,7 +371,7 @@ pub(in crate) async fn handle_compact_session_memory(
         .map_err(|e| format!("Failed to serialize compact_session_memory response: {e}"))
 }
 
-pub(in crate) async fn handle_compact_context(
+pub(crate) async fn handle_compact_context(
     server: &MemoryServer,
     params: CompactContextParams,
 ) -> Result<String, String> {
@@ -441,7 +445,7 @@ pub(in crate) async fn handle_compact_context(
         .map_err(|e| format!("Failed to serialize compact_context response: {e}"))
 }
 
-pub(in crate) async fn handle_recall_context(
+pub(crate) async fn handle_recall_context(
     server: &MemoryServer,
     params: RecallContextParams,
 ) -> Result<String, String> {
@@ -478,6 +482,7 @@ pub(in crate) async fn handle_recall_context(
                 weights: None,
                 agent_role: params.agent_role.clone(),
                 project: params.project.clone(),
+                domain: None,
             },
         )
         .await?;
@@ -645,7 +650,7 @@ pub(super) fn extract_bracket_self_evolution_notes(
     notes
 }
 
-pub(in crate) async fn handle_capture_session(
+pub(crate) async fn handle_capture_session(
     server: &MemoryServer,
     params: CaptureSessionParams,
 ) -> Result<String, String> {
@@ -753,6 +758,8 @@ pub(in crate) async fn handle_capture_session(
             revision: 1,
             metadata,
             vector: None,
+            retention_policy: None,
+            domain: None,
         });
     }
 
@@ -843,6 +850,8 @@ pub(in crate) async fn handle_capture_session(
             revision: 1,
             metadata,
             vector: None,
+            retention_policy: None,
+            domain: None,
         });
     }
 

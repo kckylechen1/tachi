@@ -44,8 +44,9 @@ pub fn upsert(
               (id, path, summary, text, importance,
                timestamp, category, topic, keywords, persons, entities,
                location, source, scope, archived, created_at, updated_at,
-               access_count, last_access, revision, metadata)
-           VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21)
+               access_count, last_access, revision, metadata,
+               retention_policy, domain)
+           VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23)
            ON CONFLICT(id) DO UPDATE SET
                path         = excluded.path,
                summary      = excluded.summary,
@@ -66,7 +67,9 @@ pub fn upsert(
                access_count = excluded.access_count,
                last_access  = excluded.last_access,
                revision     = memories.revision + 1,
-               metadata     = excluded.metadata"#,
+               metadata     = excluded.metadata,
+               retention_policy = excluded.retention_policy,
+               domain       = excluded.domain"#,
         params![
             entry.id,
             entry.path,
@@ -89,6 +92,8 @@ pub fn upsert(
             last_access_utc,
             entry.revision.max(1),
             metadata_json,
+            entry.retention_policy,
+            entry.domain,
         ],
     )?;
 
@@ -431,7 +436,7 @@ pub fn fetch_by_ids(
         .collect::<Vec<_>>()
         .join(",");
     let mut sql = format!(
-        "SELECT id,path,summary,text,importance,timestamp,category,topic,keywords,persons,entities,location,source,scope,archived,access_count,last_access,revision,metadata
+        "SELECT id,path,summary,text,importance,timestamp,category,topic,keywords,persons,entities,location,source,scope,archived,access_count,last_access,revision,metadata,retention_policy,domain
          FROM memories WHERE id IN ({})",
         placeholders
     );
@@ -485,10 +490,10 @@ pub fn get_all(
     include_archived: bool,
 ) -> Result<Vec<MemoryEntry>, MemoryError> {
     let sql = if include_archived {
-        "SELECT id,path,summary,text,importance,timestamp,category,topic,keywords,persons,entities,location,source,scope,archived,access_count,last_access,revision,metadata
+        "SELECT id,path,summary,text,importance,timestamp,category,topic,keywords,persons,entities,location,source,scope,archived,access_count,last_access,revision,metadata,retention_policy,domain
          FROM memories ORDER BY timestamp DESC LIMIT ?"
     } else {
-        "SELECT id,path,summary,text,importance,timestamp,category,topic,keywords,persons,entities,location,source,scope,archived,access_count,last_access,revision,metadata
+        "SELECT id,path,summary,text,importance,timestamp,category,topic,keywords,persons,entities,location,source,scope,archived,access_count,last_access,revision,metadata,retention_policy,domain
          FROM memories WHERE archived = 0 ORDER BY timestamp DESC LIMIT ?"
     };
     let mut stmt = conn.prepare(sql)?;
@@ -525,13 +530,13 @@ pub fn list_by_path(
     };
 
     let sql = if include_archived {
-        "SELECT id,path,summary,text,importance,timestamp,category,topic,keywords,persons,entities,location,source,scope,archived,access_count,last_access,revision,metadata
+        "SELECT id,path,summary,text,importance,timestamp,category,topic,keywords,persons,entities,location,source,scope,archived,access_count,last_access,revision,metadata,retention_policy,domain
          FROM memories
          WHERE path = ?1 OR path LIKE ?2
          ORDER BY path ASC, timestamp DESC
          LIMIT ?3"
     } else {
-        "SELECT id,path,summary,text,importance,timestamp,category,topic,keywords,persons,entities,location,source,scope,archived,access_count,last_access,revision,metadata
+        "SELECT id,path,summary,text,importance,timestamp,category,topic,keywords,persons,entities,location,source,scope,archived,access_count,last_access,revision,metadata,retention_policy,domain
          FROM memories
          WHERE (path = ?1 OR path LIKE ?2) AND archived = 0
          ORDER BY path ASC, timestamp DESC

@@ -166,6 +166,7 @@ pub(super) async fn handle_memory_graph(
                 weights: None,
                 agent_role: None,
                 project: params.project.clone(),
+                domain: None,
             },
         )
         .await?;

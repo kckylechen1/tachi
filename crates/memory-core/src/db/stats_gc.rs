@@ -2,16 +2,18 @@ use rusqlite::{params, Connection};
 use std::collections::HashMap;
 
 use crate::error::MemoryError;
+use crate::types::GcConfig;
 
 // ─── GC (Garbage Collection) ──────────────────────────────────────────────────
 
 /// Retention-based cleanup of growing tables.
+/// Thresholds are driven by `GcConfig` (replaces previously hardcoded literals).
 /// Returns a summary of how many rows were deleted from each table.
-pub fn gc_tables(conn: &mut Connection) -> Result<serde_json::Value, MemoryError> {
+pub fn gc_tables(conn: &mut Connection, cfg: &GcConfig) -> Result<serde_json::Value, MemoryError> {
     let tx = conn.transaction()?;
 
-    // 1. access_history: retain latest 256 entries per memory_id, delete rest
-    let ah_deleted: usize = tx.execute(
+    // 1. access_history: retain latest N entries per memory_id, delete rest
+    let ah_sql = format!(
         "DELETE FROM access_history
          WHERE rowid IN (
              SELECT rowid FROM (
@@ -22,38 +24,43 @@ pub fn gc_tables(conn: &mut Connection) -> Result<serde_json::Value, MemoryError
                         ) AS rn
                  FROM access_history
              ) ranked
-             WHERE rn > 256
+             WHERE rn > {}
          )",
-        [],
-    )?;
+        cfg.access_history_keep_per_memory
+    );
+    let ah_deleted: usize = tx.execute(&ah_sql, [])?;
 
-    // 2. processed_events: delete older than 30 days
-    let pe_deleted: usize = tx.execute(
+    // 2. processed_events: delete older than N days
+    let pe_sql = format!(
         "DELETE FROM processed_events
-         WHERE created_at < STRFTIME('%Y-%m-%dT%H:%M:%fZ', 'now', '-30 days')",
-        [],
-    )?;
+         WHERE created_at < STRFTIME('%Y-%m-%dT%H:%M:%fZ', 'now', '-{} days')",
+        cfg.processed_events_max_days
+    );
+    let pe_deleted: usize = tx.execute(&pe_sql, [])?;
 
-    // 3. audit_log: delete older than 30 days OR keep only latest 100k
-    let al_deleted: usize = tx.execute(
+    // 3. audit_log: delete older than N days OR keep only latest M rows
+    let al_sql = format!(
         "DELETE FROM audit_log
-         WHERE created_at < STRFTIME('%Y-%m-%dT%H:%M:%fZ', 'now', '-30 days')",
-        [],
-    )?;
-    // Also cap at 100k total
-    let al_cap_deleted: usize = tx.execute(
+         WHERE created_at < STRFTIME('%Y-%m-%dT%H:%M:%fZ', 'now', '-{} days')",
+        cfg.audit_log_max_days
+    );
+    let al_deleted: usize = tx.execute(&al_sql, [])?;
+    // Also cap at max_rows total
+    let al_cap_sql = format!(
         "DELETE FROM audit_log WHERE id NOT IN (
-            SELECT id FROM audit_log ORDER BY id DESC LIMIT 100000
+            SELECT id FROM audit_log ORDER BY id DESC LIMIT {}
         )",
-        [],
-    )?;
+        cfg.audit_log_max_rows
+    );
+    let al_cap_deleted: usize = tx.execute(&al_cap_sql, [])?;
 
-    // 4. agent_known_state: delete older than 90 days
-    let aks_deleted: usize = tx.execute(
+    // 4. agent_known_state: delete older than N days
+    let aks_sql = format!(
         "DELETE FROM agent_known_state
-         WHERE synced_at < STRFTIME('%Y-%m-%dT%H:%M:%fZ', 'now', '-90 days')",
-        [],
-    )?;
+         WHERE synced_at < STRFTIME('%Y-%m-%dT%H:%M:%fZ', 'now', '-{} days')",
+        cfg.agent_known_state_max_days
+    );
+    let aks_deleted: usize = tx.execute(&aks_sql, [])?;
 
     // 5. Orphaned access_history (memory was deleted but history remained)
     let orphan_deleted: usize = tx.execute(
@@ -82,29 +89,68 @@ pub fn gc_tables(conn: &mut Connection) -> Result<serde_json::Value, MemoryError
 // ─── AUTO-ARCHIVE STALE MEMORIES ──────────────────────────────────────────────
 
 /// Archive low-importance memories that haven't been accessed in `stale_days`.
+/// Respects `retention_policy`:
+///   - permanent / pinned → never auto-archived (GC-exempt)
+///   - ephemeral → more aggressive threshold (importance < 0.7 / < 0.5)
+///   - durable (or NULL) → standard thresholds (importance < 0.5 / < 0.3)
 /// Returns the number of memories archived.
 pub fn archive_stale_memories(conn: &Connection, stale_days: u32) -> Result<u64, MemoryError> {
-    // Archive low-importance memories not accessed in N days
-    let affected1 = conn.execute(
+    // Skip permanent and pinned memories entirely
+    let exempt_clause =
+        "AND (retention_policy IS NULL OR retention_policy NOT IN ('permanent', 'pinned'))";
+
+    // Durable (NULL or 'durable'): standard thresholds
+    let affected_durable_1 = conn.execute(
+        &format!(
+            "UPDATE memories SET archived = 1
+             WHERE archived = 0
+               AND last_access IS NOT NULL
+               AND last_access < datetime('now', '-' || ?1 || ' days')
+               AND importance < 0.5
+               AND (retention_policy IS NULL OR retention_policy = 'durable')
+               {exempt_clause}"
+        ),
+        params![stale_days],
+    )?;
+
+    let affected_durable_2 = conn.execute(
+        &format!(
+            "UPDATE memories SET archived = 1
+             WHERE archived = 0
+               AND last_access IS NULL
+               AND timestamp < datetime('now', '-' || ?1 || ' days')
+               AND importance < 0.3
+               AND (retention_policy IS NULL OR retention_policy = 'durable')
+               {exempt_clause}"
+        ),
+        params![stale_days],
+    )?;
+
+    // Ephemeral: more aggressive thresholds (importance < 0.7 / < 0.5)
+    let affected_ephemeral_1 = conn.execute(
         "UPDATE memories SET archived = 1
          WHERE archived = 0
            AND last_access IS NOT NULL
            AND last_access < datetime('now', '-' || ?1 || ' days')
-           AND importance < 0.5",
+           AND importance < 0.7
+           AND retention_policy = 'ephemeral'",
         params![stale_days],
     )?;
 
-    // Archive very low importance memories never accessed and older than N days
-    let affected2 = conn.execute(
+    let affected_ephemeral_2 = conn.execute(
         "UPDATE memories SET archived = 1
          WHERE archived = 0
            AND last_access IS NULL
            AND timestamp < datetime('now', '-' || ?1 || ' days')
-           AND importance < 0.3",
+           AND importance < 0.5
+           AND retention_policy = 'ephemeral'",
         params![stale_days],
     )?;
 
-    Ok((affected1 + affected2) as u64)
+    Ok(
+        (affected_durable_1 + affected_durable_2 + affected_ephemeral_1 + affected_ephemeral_2)
+            as u64,
+    )
 }
 
 // ─── STATS ────────────────────────────────────────────────────────────────────

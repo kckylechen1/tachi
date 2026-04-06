@@ -371,6 +371,18 @@ pub fn init_schema(conn: &Connection) -> Result<(), MemoryError> {
             created_at          TEXT NOT NULL DEFAULT '',
             updated_at          TEXT NOT NULL DEFAULT ''
         );
+
+        -- Domain configuration for memory routing and per-domain GC
+        CREATE TABLE IF NOT EXISTS domains (
+            name              TEXT PRIMARY KEY,
+            description       TEXT NOT NULL DEFAULT '',
+            gc_threshold_days INTEGER,
+            default_retention TEXT,
+            default_path_prefix TEXT,
+            metadata          TEXT NOT NULL DEFAULT '{}',
+            created_at        TEXT NOT NULL DEFAULT '',
+            updated_at        TEXT NOT NULL DEFAULT ''
+        );
     "#)?;
 
     // Forward-compatible migrations for existing DB files created before
@@ -379,6 +391,10 @@ pub fn init_schema(conn: &Connection) -> Result<(), MemoryError> {
     ensure_column(conn, "memories", "created_at", "TEXT NOT NULL DEFAULT ''")?;
     ensure_column(conn, "memories", "updated_at", "TEXT NOT NULL DEFAULT ''")?;
     ensure_column(conn, "memories", "revision", "INTEGER NOT NULL DEFAULT 1")?;
+
+    // Retention policy and domain columns for Issue #38 and #32
+    ensure_column(conn, "memories", "retention_policy", "TEXT")?;
+    ensure_column(conn, "memories", "domain", "TEXT")?;
 
     // Temporal edge columns for memory_edges
     ensure_column(
@@ -451,6 +467,8 @@ pub fn init_schema(conn: &Connection) -> Result<(), MemoryError> {
         CREATE INDEX IF NOT EXISTS idx_derived_created_at   ON derived_items(created_at DESC);
         CREATE INDEX IF NOT EXISTS idx_hub_cap_review_status ON hub_capabilities(review_status);
         CREATE INDEX IF NOT EXISTS idx_hub_cap_health_status ON hub_capabilities(health_status);
+        CREATE INDEX IF NOT EXISTS idx_memories_retention_policy ON memories(retention_policy);
+        CREATE INDEX IF NOT EXISTS idx_memories_domain ON memories(domain);
     "#,
     )?;
 

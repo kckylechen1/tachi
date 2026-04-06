@@ -80,6 +80,8 @@ fn make_entry(id: &str) -> MemoryEntry {
         revision: 1,
         metadata: json!({}),
         vector: None,
+        retention_policy: None,
+        domain: None,
     }
 }
 
@@ -1508,6 +1510,8 @@ async fn save_memory_includes_provenance_for_registered_agent() {
             force: true,
             auto_link: false,
             project: None,
+            retention_policy: None,
+            domain: None,
         }))
         .await
         .expect("save_memory should succeed");

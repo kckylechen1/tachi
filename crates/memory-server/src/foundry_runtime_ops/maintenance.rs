@@ -457,6 +457,8 @@ async fn process_memory_distill_job(
         revision: 1,
         metadata,
         vector: None,
+        retention_policy: None,
+        domain: None,
     };
 
     with_foundry_store(server, item, |store| {

@@ -65,6 +65,8 @@ pub(crate) fn row_to_entry(row: &rusqlite::Row<'_>) -> SqlResult<MemoryEntry> {
         access_count: row.get("access_count")?,
         last_access,
         revision: row.get("revision").unwrap_or(1),
+        retention_policy: row.get("retention_policy").unwrap_or(None),
+        domain: row.get("domain").unwrap_or(None),
         metadata,
         vector: None,
     })
