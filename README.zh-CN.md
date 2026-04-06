@@ -176,10 +176,11 @@ Tachi 支持以外部扩展插件的形式桥接运行于 OpenClaw 内核。
 - **🔌 双库架构**：全局记忆 (`~/.Tachi/global/memory.db`) 跨项目共享（用户偏好、通用知识），每个项目独立数据库 (`.Tachi/memory.db` 位于 git 仓库根目录) 存储项目级上下文。自动检测 git 根目录，自动迁移旧版数据库。无需任何外部独立数据库依赖。
 - **🎯 Tachi Hub 能力中心**：统一的 Skill / Plugin / MCP Server 注册与发现中心。注册一次，所有 Agent 均可发现并使用。内置使用追踪、反馈评分、双库继承（项目级覆盖全局）。预置 Skill 数量取决于当前安装的技能包与注册结果。
 - **🔀 MCP 代理**：在 Tachi 中注册子 MCP Server，可通过 `tool_exposure=flatten` 展开为 `server__tool`，也可通过 `tool_exposure=gateway` 收敛为 `hub_call` 单入口透传。共享连接池，按需连接，空闲自动清理，熔断器保护，并发控制。环境变量清洗保留 21 个系统关键变量。传输协议别名 (`http`、`streamable-http` → `sse`)。告别僵尸进程。
-- **🗑️ 记忆生命周期管理**：完整的生命周期控制——`delete_memory`（永久删除，CASCADE 清理关联数据）、`archive_memory`（软删除，可恢复）、`memory_gc`（清理过期访问历史、事件日志、审计记录）。
+- **🗑️ 记忆生命周期管理**：完整的生命周期控制——`delete_memory`（永久删除，CASCADE 清理关联数据）、`archive_memory`（软删除，可恢复）、`memory_gc`（清理过期访问历史、事件日志、审计记录）。每条记忆支持 `retention_policy` 字段（`Ephemeral` / `Durable` / `Permanent` / `Pinned`），其中 `Permanent` 和 `Pinned` 条目免受垃圾回收。
+- **🏷️ 域感知路由（Domain-Aware Routing）**：通过 `register_domain` 注册域，每域可配独立回收期限（`gc_threshold_days`）、默认保留策略和路径前缀。`get_domain` / `list_domains` / `delete_domain` 管理域。`save_memory` 写入时标注域，`search_memory` 检索时按域过滤，实现业务领域逻辑隔离。
 - **🧹 噎声过滤**：保存时自动拦截无价值内容 (`is_noise_text`)，检索时自动跳过无意义查询 (`should_skip_query`)。节省 Embedding API 调用成本，保持记忆库清洁。可通过 `force=true` 绕过。
 - **🩺 向量回填维护**：新增 `tachi backfill-vectors --db <path> [--dry-run]`，可扫描任意库缺失的 embedding 并批量补齐，适合迁移后或 agent 本地库向量缺口修复。
-- **⏰ 后台自动垃圾回收**：周期性后台 GC 定时器（默认每 6 小时，通过 `MEMORY_GC_INTERVAL_SECS` 可配置）。无需手动干预即可保持增长表有界。
+- **⏰ 后台自动垃圾回收**：周期性后台 GC 定时器（默认每 6 小时，通过 `MEMORY_GC_INTERVAL_SECS` 可配置）。过期记忆归档窗口通过 `MEMORY_GC_STALE_DAYS` 控制（默认 90 天）。所有 GC 阈值通过 `GcConfig` 全面外部化。保留策略感知归档，尊重每域覆盖与 GC 豁免策略。
 - **🕸️ 知识图谱操作**：通过 `add_edge` 和 `get_edges` MCP 工具直接操作记忆图谱。支持创建因果、时序和实体关联边，可附带元数据和权重。
 - **🔗 保存时自动链接**：`save_memory` 自动发现共享相同实体的已有记忆，并在它们之间创建图谱边（异步、非阻塞）。默认开启，通过 `auto_link=false` 可禁用。
 - **🧾 写入血缘标记**：主要写入链路现在会自动携带 `metadata.provenance`，记录调用工具、最终落库 scope/path、当前注册 agent 身份，以及可选的 `TACHI_PROFILE` / `TACHI_DOMAIN` 标签，便于后续排查冲突与过期事实。

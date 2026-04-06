@@ -7,14 +7,10 @@
 
 #![deny(clippy::all)]
 
-use napi_derive::napi;
 use memory_core::{
-    is_noise_text,
-    should_skip_query,
-    MemoryEntry,
-    MemoryStore as RustStore,
-    SearchOptions,
+    is_noise_text, should_skip_query, MemoryEntry, MemoryStore as RustStore, SearchOptions,
 };
+use napi_derive::napi;
 use std::sync::{Arc, Mutex};
 
 /// Thread-safe wrapper around the Rust MemoryStore.
@@ -28,9 +24,11 @@ impl JsMemoryStore {
     /// Open a store at `db_path`. Creates the file & schema if needed.
     #[napi(constructor)]
     pub fn new(db_path: String) -> napi::Result<Self> {
-        let store = RustStore::open(&db_path)
-            .map_err(|e| napi::Error::from_reason(e.to_string()))?;
-        Ok(Self { inner: Arc::new(Mutex::new(store)) })
+        let store =
+            RustStore::open(&db_path).map_err(|e| napi::Error::from_reason(e.to_string()))?;
+        Ok(Self {
+            inner: Arc::new(Mutex::new(store)),
+        })
     }
 
     /// Upsert a memory entry. `entry_json` is a JSON string of MemoryEntry.
@@ -39,7 +37,8 @@ impl JsMemoryStore {
         let e: MemoryEntry = serde_json::from_str(&entry_json)
             .map_err(|e| napi::Error::from_reason(format!("invalid entry JSON: {e}")))?;
         let mut store = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-        store.upsert(&e)
+        store
+            .upsert(&e)
             .map_err(|e| napi::Error::from_reason(e.to_string()))
     }
 
@@ -47,11 +46,7 @@ impl JsMemoryStore {
     ///     "path_prefix": "/some/path"
     /// }
     #[napi]
-    pub fn search(
-        &self,
-        query: String,
-        options_json: Option<String>,
-    ) -> napi::Result<String> {
+    pub fn search(&self, query: String, options_json: Option<String>) -> napi::Result<String> {
         let mut opts = SearchOptions::default();
         if let Some(json_str) = options_json {
             if let Ok(val) = serde_json::from_str::<serde_json::Value>(&json_str) {
@@ -62,7 +57,9 @@ impl JsMemoryStore {
                     opts.candidates_per_channel = c as usize;
                 }
                 if let Some(p) = val.get("path_prefix").and_then(|v| v.as_str()) {
-                    if !p.is_empty() { opts.path_prefix = Some(p.to_string()); }
+                    if !p.is_empty() {
+                        opts.path_prefix = Some(p.to_string());
+                    }
                 }
                 if let Some(ra) = val.get("record_access").and_then(|v| v.as_bool()) {
                     opts.record_access = ra;
@@ -98,22 +95,20 @@ impl JsMemoryStore {
             }
         }
 
-        let mut store = self
-            .inner
-            .lock().unwrap_or_else(|e| e.into_inner());
+        let mut store = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         let results = store
             .search(&query, Some(opts))
             .map_err(|e| napi::Error::from_reason(e.to_string()))?;
 
-        serde_json::to_string(&results)
-            .map_err(|e| napi::Error::from_reason(e.to_string()))
+        serde_json::to_string(&results).map_err(|e| napi::Error::from_reason(e.to_string()))
     }
 
     /// Delete a memory by ID.
     #[napi]
     pub fn delete(&self, id: String) -> napi::Result<bool> {
         let mut store = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-        store.delete(&id)
+        store
+            .delete(&id)
             .map_err(|e| napi::Error::from_reason(e.to_string()))
     }
 
@@ -122,12 +117,12 @@ impl JsMemoryStore {
     pub fn stats(&self, include_archived: Option<bool>) -> napi::Result<String> {
         let stats = self
             .inner
-            .lock().unwrap_or_else(|e| e.into_inner())
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
             .stats(include_archived.unwrap_or(false))
             .map_err(|e| napi::Error::from_reason(e.to_string()))?;
 
-        serde_json::to_string(&stats)
-            .map_err(|e| napi::Error::from_reason(e.to_string()))
+        serde_json::to_string(&stats).map_err(|e| napi::Error::from_reason(e.to_string()))
     }
 
     /// Fetch a single memory by ID. Returns JSON string or null.
@@ -135,7 +130,8 @@ impl JsMemoryStore {
     pub fn get(&self, id: String) -> napi::Result<Option<String>> {
         let entry = self
             .inner
-            .lock().unwrap_or_else(|e| e.into_inner())
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
             .get(&id)
             .map_err(|e| napi::Error::from_reason(e.to_string()))?;
 
@@ -153,18 +149,21 @@ impl JsMemoryStore {
         let lim = limit.unwrap_or(200) as usize;
         let entries = self
             .inner
-            .lock().unwrap_or_else(|e| e.into_inner())
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
             .get_all(lim)
             .map_err(|e| napi::Error::from_reason(e.to_string()))?;
 
-        serde_json::to_string(&entries)
-            .map_err(|e| napi::Error::from_reason(e.to_string()))
+        serde_json::to_string(&entries).map_err(|e| napi::Error::from_reason(e.to_string()))
     }
 
     /// Returns true if the sqlite-vec extension was loaded successfully.
     #[napi(getter)]
     pub fn vec_available(&self) -> bool {
-        self.inner.lock().unwrap_or_else(|e| e.into_inner()).vec_available
+        self.inner
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .vec_available
     }
 
     // ─── Graph Operations ────────────────────────────────────────────────────
@@ -175,7 +174,8 @@ impl JsMemoryStore {
         let edge: memory_core::MemoryEdge = serde_json::from_str(&edge_json)
             .map_err(|e| napi::Error::from_reason(format!("invalid edge JSON: {e}")))?;
         self.inner
-            .lock().unwrap_or_else(|e| e.into_inner())
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
             .add_edge(&edge)
             .map_err(|e| napi::Error::from_reason(e.to_string()))
     }
@@ -189,7 +189,8 @@ impl JsMemoryStore {
         relation: String,
     ) -> napi::Result<bool> {
         self.inner
-            .lock().unwrap_or_else(|e| e.into_inner())
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
             .remove_edge(&source_id, &target_id, &relation)
             .map_err(|e| napi::Error::from_reason(e.to_string()))
     }
@@ -205,13 +206,14 @@ impl JsMemoryStore {
     ) -> napi::Result<String> {
         let dir = direction.as_deref().unwrap_or("both");
         let rel = relation_filter.as_deref();
-        let edges = self.inner
-            .lock().unwrap_or_else(|e| e.into_inner())
+        let edges = self
+            .inner
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
             .get_edges(&memory_id, dir, rel)
             .map_err(|e| napi::Error::from_reason(e.to_string()))?;
 
-        serde_json::to_string(&edges)
-            .map_err(|e| napi::Error::from_reason(e.to_string()))
+        serde_json::to_string(&edges).map_err(|e| napi::Error::from_reason(e.to_string()))
     }
 
     /// BFS graph expansion from seed IDs. Returns JSON string of GraphExpandResult.
@@ -227,13 +229,14 @@ impl JsMemoryStore {
         let hops = max_hops.unwrap_or(2);
         let rel = relation_filter.as_deref();
 
-        let result = self.inner
-            .lock().unwrap_or_else(|e| e.into_inner())
+        let result = self
+            .inner
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
             .graph_expand(&seeds, hops, rel)
             .map_err(|e| napi::Error::from_reason(e.to_string()))?;
 
-        serde_json::to_string(&result)
-            .map_err(|e| napi::Error::from_reason(e.to_string()))
+        serde_json::to_string(&result).map_err(|e| napi::Error::from_reason(e.to_string()))
     }
 
     // ─── Hub Operations ──────────────────────────────────────────────────────
@@ -244,7 +247,8 @@ impl JsMemoryStore {
         let cap: memory_core::HubCapability = serde_json::from_str(&cap_json)
             .map_err(|e| napi::Error::from_reason(format!("invalid capability JSON: {e}")))?;
         self.inner
-            .lock().unwrap_or_else(|e| e.into_inner())
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
             .hub_register(&cap)
             .map_err(|e| napi::Error::from_reason(e.to_string()))
     }
@@ -252,24 +256,31 @@ impl JsMemoryStore {
     /// Discover hub capabilities. Returns JSON string of HubCapability[].
     /// Optional query for search, optional cap_type filter.
     #[napi]
-    pub fn hub_discover(&self, query: Option<String>, cap_type: Option<String>) -> napi::Result<String> {
+    pub fn hub_discover(
+        &self,
+        query: Option<String>,
+        cap_type: Option<String>,
+    ) -> napi::Result<String> {
         let store = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         let caps = if let Some(ref q) = query {
-            store.hub_search(q, cap_type.as_deref())
+            store
+                .hub_search(q, cap_type.as_deref())
                 .map_err(|e| napi::Error::from_reason(e.to_string()))?
         } else {
-            store.hub_list(cap_type.as_deref(), true)
+            store
+                .hub_list(cap_type.as_deref(), true)
                 .map_err(|e| napi::Error::from_reason(e.to_string()))?
         };
-        serde_json::to_string(&caps)
-            .map_err(|e| napi::Error::from_reason(e.to_string()))
+        serde_json::to_string(&caps).map_err(|e| napi::Error::from_reason(e.to_string()))
     }
 
     /// Get a single hub capability by ID. Returns JSON string or null.
     #[napi]
     pub fn hub_get(&self, id: String) -> napi::Result<Option<String>> {
-        let cap = self.inner
-            .lock().unwrap_or_else(|e| e.into_inner())
+        let cap = self
+            .inner
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
             .hub_get(&id)
             .map_err(|e| napi::Error::from_reason(e.to_string()))?;
         match cap {
@@ -284,7 +295,8 @@ impl JsMemoryStore {
     #[napi]
     pub fn hub_feedback(&self, id: String, success: bool, rating: Option<f64>) -> napi::Result<()> {
         self.inner
-            .lock().unwrap_or_else(|e| e.into_inner())
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
             .hub_record_feedback(&id, success, rating)
             .map_err(|e| napi::Error::from_reason(e.to_string()))
     }

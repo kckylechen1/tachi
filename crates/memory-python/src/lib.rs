@@ -8,14 +8,10 @@
 //!     store = MemoryStore("/path/to/memory.db")
 //!     store.upsert({"id": "...", "text": "...", ...})
 //!     results = store.search("query text", {"top_k": 6})
-use pyo3::prelude::*;
 use memory_core::{
-    is_noise_text,
-    should_skip_query,
-    MemoryEntry,
-    MemoryStore as RustStore,
-    SearchOptions,
+    is_noise_text, should_skip_query, MemoryEntry, MemoryStore as RustStore, SearchOptions,
 };
+use pyo3::prelude::*;
 
 use std::sync::{Arc, Mutex};
 
@@ -33,7 +29,9 @@ impl PyMemoryStore {
     fn new(db_path: &str) -> PyResult<Self> {
         let store = RustStore::open(db_path)
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
-        Ok(Self { inner: Arc::new(Mutex::new(store)) })
+        Ok(Self {
+            inner: Arc::new(Mutex::new(store)),
+        })
     }
 
     /// Upsert a memory entry. `entry_json` is a JSON string.
@@ -41,17 +39,14 @@ impl PyMemoryStore {
         let me: MemoryEntry = serde_json::from_str(entry_json)
             .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
         let mut store = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-        store.upsert(&me)
+        store
+            .upsert(&me)
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
     }
 
     /// Hybrid search. Returns a JSON string of results.
     #[pyo3(signature = (query, options_json=None))]
-    fn search(
-        &self,
-        query: &str,
-        options_json: Option<&str>,
-    ) -> PyResult<String> {
+    fn search(&self, query: &str, options_json: Option<&str>) -> PyResult<String> {
         let mut opts = SearchOptions::default();
         if let Some(json_str) = options_json {
             if let Ok(val) = serde_json::from_str::<serde_json::Value>(json_str) {
@@ -114,7 +109,8 @@ impl PyMemoryStore {
     #[pyo3(signature = (id,))]
     fn delete(&self, id: &str) -> PyResult<bool> {
         let mut store = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-        store.delete(id)
+        store
+            .delete(id)
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
     }
 
@@ -194,7 +190,10 @@ impl PyMemoryStore {
     /// Whether sqlite-vec extension is available for vector search.
     #[getter]
     fn vec_available(&self) -> bool {
-        self.inner.lock().unwrap_or_else(|e| e.into_inner()).vec_available
+        self.inner
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .vec_available
     }
 
     // ─── Graph Operations ────────────────────────────────────────────────────
@@ -204,7 +203,8 @@ impl PyMemoryStore {
         let edge: memory_core::MemoryEdge = serde_json::from_str(edge_json)
             .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
         self.inner
-            .lock().unwrap_or_else(|e| e.into_inner())
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
             .add_edge(&edge)
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
     }
@@ -213,7 +213,8 @@ impl PyMemoryStore {
     #[pyo3(signature = (source_id, target_id, relation))]
     fn remove_edge(&self, source_id: &str, target_id: &str, relation: &str) -> PyResult<bool> {
         self.inner
-            .lock().unwrap_or_else(|e| e.into_inner())
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
             .remove_edge(source_id, target_id, relation)
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
     }

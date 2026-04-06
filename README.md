@@ -172,10 +172,11 @@ Tachi 亦化身为 OpenClaw 气海之元婴法宝。
 - **🔌 两界分治（双库阵法）**：天外之识存于全局藏经阁 (`~/.Tachi/global/memory.db`)，门内之学纳于各宗项目密库 (`.Tachi/memory.db`)。以 git 根脉自动辨识，且可将旧阁无痕迁徙。外物数据库概所不需。
 - **🎯 万宝楼（Tachi Hub）**：天下法器、仙诀、灵枢尽纳此中。只需登录一次，各路灵核均可按图索骥。内设功行考核、投名评鉴、双库传承（宗门可覆天下通制）。仙诀与法器总数依本机安装与注册结果动态增减。
 - **🔀 灵枢转运（MCP 代理）**：只需于万宝楼登入一次子灵枢。若设 `tool_exposure=flatten`，则诸般法器展开为 `server__tool`；若设 `tool_exposure=gateway`，则收束于 `hub_call` 一门透传。共享灵脉连接，闲时自断，熔断护体，并发可控。派发灵气时保殄二十一根系统命脉，输送符箓三别名 (`http`、`streamable-http` 皆可通 `sse`)。僵尸进程，就此绝迹。
-- **🗑️ 轮回生灭（记忆生命周期）**：`delete_memory` 可将一段尘缘彻底贫灭，关联遗孤尽皆归尘；`archive_memory` 可封印封存，他日可解；`memory_gc` 可清扫陈年旧事、发霉记录。
+- **🗑️ 轮回生灭（记忆生命周期）**：`delete_memory` 可将一段尘缘彻底贫灭，关联遗孤尽皆归尘；`archive_memory` 可封印封存，他日可解；`memory_gc` 可清扫陈年旧事、发霉记录。每条记忆可附 `retention_policy`（`Ephemeral` / `Durable` / `Permanent` / `Pinned`），其中 `Permanent` 与 `Pinned` 永不为天劫（GC）所灭。
+- **🏷️ 道域路引（Domain-Aware Routing）**：以 `register_domain` 开宗立派，`get_domain` / `list_domains` / `delete_domain` 管辖门户。每域可设独立回收期限（`gc_threshold_days`）、默认保留策略与路径前缀。`save_memory` 落笔时可标注所属道域，`search_memory` 检索时可按域过滤，各域互不侵扰。
 - **🧹 搭脉过滤（降噪）**：录入时静观材料，若为废料则送客，不开炉炼丹 (`is_noise_text`)；检索时先审问口诀，若为废话则不取经文 (`should_skip_query`)。节省灵石（Embedding API），保藏经阁清明。确需强录者，置 `force=true` 可破例。
 - **🩺 补脉回元（向量回填）**：新添 `tachi backfill-vectors --db <path> [--dry-run]` 之术，可巡检任一藏库缺失 embedding 之条目，并分批补齐，尤宜迁徙后或灵核本地库失配之时。
-- **⏰ 自动扫尘（后台垃圾回收）**：每隔六个时辰，暗卫司自行巡视各大卯册，将过期日志、陈年旧事清却。可置 `MEMORY_GC_INTERVAL_SECS` 调节时辰，完全无需掌师亲临。
+- **⏰ 自动扫尘（后台垃圾回收）**：每隔六个时辰，暗卫司自行巡视各大卯册，将过期日志、陈年旧事清却。可置 `MEMORY_GC_INTERVAL_SECS` 调节时辰、`MEMORY_GC_STALE_DAYS` 调节过期天数（默认 90 日），完全无需掌师亲临。回收阈值经 `GcConfig` 全面外部化，不再死锁于铁律之中。
 - **🕸️ 因果网结（图谱操作）**：可用 `add_edge` 新结因果缘线，以 `get_edges` 查探千丝网络。支持因果、时序、实体三种羁绊，各带元数据与权重。
 - **🔗 缘线自织（自动链接）**：`save_memory` 每录新识，便自行侦查天下哪家与之共享同一实体，暗中编织因果线（异步无阻）。默认开启，置 `auto_link=false` 可禁。
 - **🧾 血缘留痕（写入 provenance）**：诸般主要入库之术，今皆自带 `metadata.provenance`，记其所由法器、所归库域、所落路径、当前灵核身令，以及可选之 `TACHI_PROFILE` / `TACHI_DOMAIN` 印记，便于他日审狱纠谬。

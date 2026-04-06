@@ -5,6 +5,25 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.15.0] - 2026-04-06
+
+### Added
+- **Memory Retention Policy** (#38): New `RetentionPolicy` enum with four variants — `Ephemeral`, `Durable` (default), `Permanent`, and `Pinned`. Stored as TEXT in the `memories` table (`NULL` = durable). `Permanent` and `Pinned` entries are exempt from garbage collection. The `retention_policy` field is accepted on `save_memory` and returned on all read paths.
+- **Domain-Aware Routing** (#32): New `DomainConfig` entity with `domains` table and full CRUD lifecycle. Four new MCP tools: `register_domain`, `get_domain`, `list_domains`, `delete_domain`. Each domain carries `name`, `description`, optional `gc_threshold_days`, `default_retention`, `default_path_prefix`, and arbitrary `metadata`. The `domain` field is available on `save_memory` and `search_memory` for write tagging and read filtering.
+- **Externalized GC Configuration**: New `GcConfig` struct replaces all hardcoded GC thresholds (`access_history_keep_per_memory`, `processed_events_max_days`, `audit_log_max_days`, `audit_log_max_rows`, `agent_known_state_max_days`). Passed into `gc_tables()` for full configurability.
+- **`MEMORY_GC_STALE_DAYS` Environment Variable**: Controls the stale-memory archival window (default: 90 days). Retention-aware archival logic now applies differentiated importance thresholds and respects GC-exempt retention policies.
+
+### Changed
+- **`MemoryEntry` struct**: Added `retention_policy: Option<String>` and `domain: Option<String>` fields. All 26 construction sites across `memory-core` and `memory-server` updated.
+- **`SearchOptions` / `SearchMemoryParams`**: Added `domain: Option<String>` field for domain-scoped search filtering.
+- **`gc_tables()` signature**: Now accepts `&GcConfig` instead of using hardcoded constants.
+- **`archive_stale_memories()`**: Retention-aware — skips `Permanent`/`Pinned` entries, applies tiered importance thresholds, respects per-domain GC overrides.
+- **Schema migrations**: Forward-compatible `ensure_column()` additions for `retention_policy` and `domain` on the `memories` table. New `domains` table with indexes.
+- **All crates and packages bumped to 0.15.0**: `memory-core`, `memory-node`, `memory-python`, `memory-server`.
+
+### Tests
+- **147 tests passing** (up from ~134): New coverage for retention policy variants, domain CRUD operations, GC config externalization, and retention-aware archival logic.
+
 ## [0.14.0] - 2026-04-03
 
 ### Added
