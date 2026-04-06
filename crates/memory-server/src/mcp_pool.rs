@@ -276,6 +276,22 @@ impl MemoryServer {
         }
         let cap_def: serde_json::Value = serde_json::from_str(&cap.definition)
             .map_err(|e| rmcp::ErrorData::internal_error(format!("bad definition: {e}"), None))?;
+        if crate::mcp_connection::is_bigmodel_remote_mcp(&cap_def) {
+            let result = self
+                .proxy_call_bigmodel_mcp(&server_id, &cap_def, tool_name, arguments.clone())
+                .await?;
+            if !result.is_error.unwrap_or(false) {
+                crate::pipeline_ops::schedule_auto_ingest_from_mcp(
+                    self,
+                    &server_id,
+                    tool_name,
+                    &cap_def,
+                    arguments.as_ref(),
+                    &result,
+                );
+            }
+            return Ok(result);
+        }
         let (sandbox_policy, policy_source) =
             self.get_effective_sandbox_policy(requested_capability_id, &server_id);
         if sandbox_policy.is_none() {
@@ -491,6 +507,16 @@ impl MemoryServer {
         // 6. Process result, update circuit breaker, log audit
         let (final_result, sandbox_decision, sandbox_error_kind) = match result {
             Ok(Ok(r)) => {
+                if !r.is_error.unwrap_or(false) {
+                    crate::pipeline_ops::schedule_auto_ingest_from_mcp(
+                        self,
+                        &server_id,
+                        tool_name,
+                        &cap_def,
+                        arguments.as_ref(),
+                        &r,
+                    );
+                }
                 // Tool returned successfully (even if r.is_error — that's a tool-level error, not transport)
                 let mut circuits = lock_or_recover(&self.pool.circuits, "mcp_pool.circuits");
                 circuits.insert(server_name.to_string(), (CircuitState::Closed, 0));

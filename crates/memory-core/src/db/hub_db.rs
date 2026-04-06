@@ -11,9 +11,11 @@ pub fn hub_upsert(conn: &Connection, cap: &HubCapability) -> Result<(), MemoryEr
         "INSERT INTO hub_capabilities (
             id, type, name, version, description, definition, enabled,
             review_status, health_status, last_error, last_success_at, last_failure_at,
-            fail_streak, active_version, exposure_mode, created_at, updated_at
+            fail_streak, active_version, exposure_mode,
+            uses, successes, failures, avg_rating, last_used,
+            created_at, updated_at
          )
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?16)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22)
          ON CONFLICT(id) DO UPDATE SET
            type = excluded.type,
            name = excluded.name,
@@ -29,6 +31,11 @@ pub fn hub_upsert(conn: &Connection, cap: &HubCapability) -> Result<(), MemoryEr
            fail_streak = excluded.fail_streak,
            active_version = excluded.active_version,
            exposure_mode = excluded.exposure_mode,
+           uses = excluded.uses,
+           successes = excluded.successes,
+           failures = excluded.failures,
+           avg_rating = excluded.avg_rating,
+           last_used = excluded.last_used,
            updated_at = excluded.updated_at",
         params![
             &cap.id,
@@ -46,6 +53,12 @@ pub fn hub_upsert(conn: &Connection, cap: &HubCapability) -> Result<(), MemoryEr
             cap.fail_streak as i64,
             cap.active_version.as_deref(),
             &cap.exposure_mode,
+            cap.uses as i64,
+            cap.successes as i64,
+            cap.failures as i64,
+            cap.avg_rating,
+            cap.last_used.as_deref(),
+            &now,
             &now,
         ],
     )?;

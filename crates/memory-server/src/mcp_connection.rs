@@ -1,4 +1,6 @@
 use super::*;
+use reqwest::header::{HeaderName, HeaderValue};
+use serde_json::Map as JsonMap;
 
 const MCP_PRESERVED_ENV_VARS: &[&str] = &[
     "PATH",
@@ -98,17 +100,7 @@ fn resolve_env_map(def: &serde_json::Value) -> Result<HashMap<String, String>, S
     if let Some(obj) = def.get("env").and_then(|v| v.as_object()) {
         for (k, v) in obj {
             if let Some(val) = v.as_str() {
-                let resolved = if val.starts_with("${") && val.ends_with('}') {
-                    let var_name = &val[2..val.len() - 1];
-                    std::env::var(var_name).map_err(|_| {
-                        format!(
-                            "Environment variable '{}' not set (required by MCP server)",
-                            var_name
-                        )
-                    })?
-                } else {
-                    val.to_string()
-                };
+                let resolved = expand_env_placeholders(val)?;
                 result.insert(k.clone(), resolved);
             } else {
                 return Err(format!(
@@ -123,7 +115,324 @@ fn resolve_env_map(def: &serde_json::Value) -> Result<HashMap<String, String>, S
     Ok(result)
 }
 
+fn expand_env_placeholders(value: &str) -> Result<String, String> {
+    let mut output = String::new();
+    let mut cursor = 0usize;
+
+    while let Some(rel_start) = value[cursor..].find("${") {
+        let start = cursor + rel_start;
+        output.push_str(&value[cursor..start]);
+        let rest = &value[start + 2..];
+        let end_rel = rest
+            .find('}')
+            .ok_or_else(|| format!("Unclosed environment placeholder in '{value}'"))?;
+        let end = start + 2 + end_rel;
+        let key = &value[start + 2..end];
+        let env_value = resolve_env_fallback_chain(key)?;
+        output.push_str(&env_value);
+        cursor = end + 1;
+    }
+
+    output.push_str(&value[cursor..]);
+    Ok(output)
+}
+
+fn resolve_env_fallback_chain(spec: &str) -> Result<String, String> {
+    let candidates: Vec<&str> = spec
+        .split('|')
+        .map(str::trim)
+        .filter(|key| !key.is_empty())
+        .collect();
+    if candidates.is_empty() {
+        return Err("Empty environment placeholder".to_string());
+    }
+
+    for key in &candidates {
+        validate_env_key_name(key)?;
+        if let Ok(value) = std::env::var(key) {
+            let trimmed = value.trim();
+            if !trimmed.is_empty() {
+                return Ok(trimmed.to_string());
+            }
+        }
+    }
+
+    if candidates.len() == 1 {
+        Err(format!(
+            "Environment variable '{}' not set (required by MCP server)",
+            candidates[0]
+        ))
+    } else {
+        Err(format!(
+            "None of the environment variables [{}] are set (required by MCP server)",
+            candidates.join(", ")
+        ))
+    }
+}
+
+fn validate_env_key_name(key: &str) -> Result<(), String> {
+    let mut chars = key.chars();
+    let Some(first) = chars.next() else {
+        return Err("Environment variable name cannot be empty".to_string());
+    };
+    if !(first.is_ascii_alphabetic() || first == '_') {
+        return Err(format!(
+            "Invalid environment variable name '{}': must start with a letter or underscore",
+            key
+        ));
+    }
+    if !chars.all(|ch| ch.is_ascii_alphanumeric() || ch == '_') {
+        return Err(format!(
+            "Invalid environment variable name '{}': only letters, digits, and underscores are allowed",
+            key
+        ));
+    }
+    Ok(())
+}
+
+fn resolve_header_map(def: &serde_json::Value) -> Result<HashMap<HeaderName, HeaderValue>, String> {
+    let mut headers = HashMap::new();
+    let Some(obj) = def.get("headers").and_then(|value| value.as_object()) else {
+        return Ok(headers);
+    };
+
+    for (name, value) in obj {
+        let raw_value = value
+            .as_str()
+            .ok_or_else(|| format!("Invalid header value type for '{name}': expected string"))?;
+        let resolved = expand_env_placeholders(raw_value)?;
+        let header_name = HeaderName::from_bytes(name.as_bytes())
+            .map_err(|e| format!("Invalid header name '{name}': {e}"))?;
+        let header_value = HeaderValue::from_str(&resolved)
+            .map_err(|e| format!("Invalid header value for '{name}': {e}"))?;
+        headers.insert(header_name, header_value);
+    }
+
+    Ok(headers)
+}
+
+pub(crate) fn is_bigmodel_remote_mcp(def: &serde_json::Value) -> bool {
+    def.get("url")
+        .and_then(|value| value.as_str())
+        .map(|url| url.contains("open.bigmodel.cn/api/mcp/"))
+        .unwrap_or(false)
+}
+
+fn parse_sse_payload(body: &str) -> Result<serde_json::Value, String> {
+    let mut data_lines = Vec::new();
+    for line in body.lines() {
+        if let Some(payload) = line.strip_prefix("data:") {
+            let trimmed = payload.trim();
+            if !trimmed.is_empty() {
+                data_lines.push(trimmed.to_string());
+            }
+        }
+    }
+
+    for payload in data_lines.iter().rev() {
+        if let Ok(json) = serde_json::from_str::<serde_json::Value>(payload) {
+            return Ok(json);
+        }
+    }
+
+    serde_json::from_str(body)
+        .map_err(|_| format!("No JSON payload found in response body: {body}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn expand_env_placeholders_supports_fallback_chain() {
+        std::env::remove_var("BIGMODEL_API_KEY");
+        std::env::set_var("REASONING_API_KEY", "glm-key");
+
+        let expanded = expand_env_placeholders("Bearer ${BIGMODEL_API_KEY|REASONING_API_KEY}")
+            .expect("fallback expansion should work");
+        assert_eq!(expanded, "Bearer glm-key");
+    }
+
+    #[test]
+    fn resolve_header_map_expands_fallback_headers() {
+        std::env::remove_var("BIGMODEL_API_KEY");
+        std::env::set_var("REASONING_API_KEY", "glm-key");
+
+        let headers = resolve_header_map(&json!({
+            "headers": {
+                "Authorization": "Bearer ${BIGMODEL_API_KEY|REASONING_API_KEY}"
+            }
+        }))
+        .expect("header map should resolve");
+
+        let auth = headers
+            .get(&HeaderName::from_static("authorization"))
+            .expect("authorization header should exist");
+        assert_eq!(auth, "Bearer glm-key");
+    }
+
+    #[test]
+    fn resolve_env_fallback_chain_rejects_invalid_key_names() {
+        let err = resolve_env_fallback_chain("BIGMODEL_API_KEY|BAD-KEY")
+            .expect_err("invalid key names should be rejected");
+        assert!(err.contains("Invalid environment variable name"));
+    }
+}
+
 impl MemoryServer {
+    pub(super) async fn proxy_call_bigmodel_mcp(
+        &self,
+        _capability_id: &str,
+        def: &serde_json::Value,
+        tool_name: &str,
+        arguments: Option<JsonMap<String, serde_json::Value>>,
+    ) -> Result<rmcp::model::CallToolResult, rmcp::ErrorData> {
+        let url = def
+            .get("url")
+            .and_then(|value| value.as_str())
+            .ok_or_else(|| rmcp::ErrorData::invalid_params("missing url for remote MCP", None))?;
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(90))
+            .build()
+            .map_err(|e| {
+                rmcp::ErrorData::internal_error(format!("build http client: {e}"), None)
+            })?;
+
+        let mut headers = reqwest::header::HeaderMap::new();
+        for (name, value) in resolve_header_map(def)
+            .map_err(|e| rmcp::ErrorData::internal_error(format!("resolve headers: {e}"), None))?
+        {
+            headers.insert(name, value);
+        }
+        if let Some(token) = def
+            .get("auth_header")
+            .and_then(|value| value.as_str())
+            .map(expand_env_placeholders)
+            .transpose()
+            .map_err(|e| {
+                rmcp::ErrorData::internal_error(format!("resolve auth header: {e}"), None)
+            })?
+        {
+            let bearer = format!("Bearer {token}");
+            let header_value = HeaderValue::from_str(&bearer).map_err(|e| {
+                rmcp::ErrorData::internal_error(format!("invalid authorization header: {e}"), None)
+            })?;
+            headers.insert(reqwest::header::AUTHORIZATION, header_value);
+        }
+        headers.insert(
+            reqwest::header::CONTENT_TYPE,
+            HeaderValue::from_static("application/json"),
+        );
+        headers.insert(
+            reqwest::header::ACCEPT,
+            HeaderValue::from_static("application/json, text/event-stream"),
+        );
+
+        let initialize_payload = json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2024-11-05",
+                "capabilities": {},
+                "clientInfo": {"name": "tachi-hub", "version": env!("CARGO_PKG_VERSION")},
+            }
+        });
+        let init_response = client
+            .post(url)
+            .headers(headers.clone())
+            .json(&initialize_payload)
+            .send()
+            .await
+            .map_err(|e| {
+                rmcp::ErrorData::internal_error(format!("initialize request failed: {e}"), None)
+            })?;
+        let init_headers = init_response.headers().clone();
+        let init_body = init_response
+            .text()
+            .await
+            .map_err(|e| rmcp::ErrorData::internal_error(format!("initialize body: {e}"), None))?;
+        let init_json = parse_sse_payload(&init_body).map_err(|e| {
+            rmcp::ErrorData::internal_error(format!("parse initialize response: {e}"), None)
+        })?;
+        if init_json.get("error").is_some() {
+            return Err(rmcp::ErrorData::internal_error(
+                format!("remote MCP initialize failed: {}", init_json),
+                None,
+            ));
+        }
+
+        let session_id = init_headers
+            .get("mcp-session-id")
+            .and_then(|value| value.to_str().ok())
+            .ok_or_else(|| {
+                rmcp::ErrorData::internal_error("remote MCP missing mcp-session-id", None)
+            })?;
+
+        let mut session_headers = headers.clone();
+        let session_header = HeaderValue::from_str(session_id).map_err(|e| {
+            rmcp::ErrorData::internal_error(format!("invalid session header: {e}"), None)
+        })?;
+        session_headers.insert(HeaderName::from_static("mcp-session-id"), session_header);
+
+        client
+            .post(url)
+            .headers(session_headers.clone())
+            .json(&json!({
+                "jsonrpc": "2.0",
+                "method": "notifications/initialized",
+                "params": {}
+            }))
+            .send()
+            .await
+            .map_err(|e| {
+                rmcp::ErrorData::internal_error(
+                    format!("initialized notification failed: {e}"),
+                    None,
+                )
+            })?;
+
+        let call_payload = json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "tools/call",
+            "params": {
+                "name": tool_name,
+                "arguments": arguments.unwrap_or_default(),
+            }
+        });
+        let call_response = client
+            .post(url)
+            .headers(session_headers)
+            .json(&call_payload)
+            .send()
+            .await
+            .map_err(|e| {
+                rmcp::ErrorData::internal_error(format!("remote tool call failed: {e}"), None)
+            })?;
+        let call_body = call_response
+            .text()
+            .await
+            .map_err(|e| rmcp::ErrorData::internal_error(format!("remote tool body: {e}"), None))?;
+        let call_json = parse_sse_payload(&call_body).map_err(|e| {
+            rmcp::ErrorData::internal_error(format!("parse tool response: {e}"), None)
+        })?;
+
+        if let Some(error) = call_json.get("error") {
+            return Err(rmcp::ErrorData::internal_error(
+                format!("remote MCP tool error: {error}"),
+                None,
+            ));
+        }
+
+        let result_json = call_json.get("result").cloned().ok_or_else(|| {
+            rmcp::ErrorData::internal_error(format!("remote MCP missing result: {call_json}"), None)
+        })?;
+        serde_json::from_value(result_json).map_err(|e| {
+            rmcp::ErrorData::internal_error(format!("decode remote tool result failed: {e}"), None)
+        })
+    }
+
     pub(super) fn clear_proxy_tools(&self, server_name: &str) {
         let mut tools = lock_or_recover(&self.proxy_tools, "proxy_tools");
         tools.remove(server_name);
@@ -460,7 +769,21 @@ impl MemoryServer {
                 let url = def["url"]
                     .as_str()
                     .ok_or_else(|| "missing url for SSE".to_string())?;
-                let transport = StreamableHttpClientTransport::from_uri(url);
+                let mut transport_config =
+                    rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig::with_uri(url);
+                if let Some(token) = def
+                    .get("auth_header")
+                    .and_then(|value| value.as_str())
+                    .map(expand_env_placeholders)
+                    .transpose()?
+                {
+                    transport_config = transport_config.auth_header(token);
+                }
+                let headers = resolve_header_map(def)?;
+                if !headers.is_empty() {
+                    transport_config = transport_config.custom_headers(headers);
+                }
+                let transport = StreamableHttpClientTransport::from_config(transport_config);
                 match tokio::time::timeout(
                     effective_timeout,
                     rmcp::ServiceExt::serve((), transport),

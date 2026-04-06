@@ -139,6 +139,7 @@ pub(crate) async fn handle_hub_feedback(
                     .hub_record_feedback(&params.id, params.success, params.rating)
                     .map_err(|e| format!("feedback: {e}"))
             })?;
+            let _ = crate::wiki_ops::refresh_skill_quality_guards(server);
             return serde_json::to_string(
                 &json!({"id": params.id, "recorded": true, "db": "project"}),
             )
@@ -150,6 +151,7 @@ pub(crate) async fn handle_hub_feedback(
             .hub_record_feedback(&params.id, params.success, params.rating)
             .map_err(|e| format!("feedback: {e}"))
     })?;
+    let _ = crate::wiki_ops::refresh_skill_quality_guards(server);
     serde_json::to_string(&json!({"id": params.id, "recorded": true, "db": "global"}))
         .map_err(|e| format!("serialize: {e}"))
 }
