@@ -81,9 +81,49 @@ fn default_weight_decay() -> f64 {
     0.10
 }
 
+fn default_ingest_type() -> String {
+    "source".to_string()
+}
+
+fn default_auto_chunk() -> bool {
+    true
+}
+
+fn default_true() -> bool {
+    true
+}
+
+fn default_chunk_size_chars() -> usize {
+    1200
+}
+
+fn default_chunk_overlap_chars() -> usize {
+    120
+}
+
 #[allow(dead_code)]
 fn default_sync_limit() -> usize {
     100
+}
+
+fn default_wiki_path_prefix() -> String {
+    "/wiki".to_string()
+}
+
+fn default_wiki_path_prefix_opt() -> Option<String> {
+    Some(default_wiki_path_prefix())
+}
+
+fn default_wiki_stale_days() -> u32 {
+    90
+}
+
+fn default_missing_edge_threshold() -> f64 {
+    0.85
+}
+
+fn default_contradiction_threshold() -> f64 {
+    0.85
 }
 
 // ─── Save / Update ──────────────────────────────────────────────────────────
@@ -439,13 +479,187 @@ pub(crate) struct Message {
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub(crate) struct IngestEventParams {
     /// Conversation identifier
+    #[serde(default)]
     pub conversation_id: String,
 
     /// Turn identifier
+    #[serde(default)]
     pub turn_id: String,
 
+    /// Optional event type label for structured events
+    #[serde(default)]
+    pub event_type: Option<String>,
+
+    /// Optional structured event payload
+    #[serde(default)]
+    pub content: Option<serde_json::Value>,
+
     /// Messages in the conversation turn
+    #[serde(default)]
     pub messages: Vec<Message>,
+
+    /// Optional path prefix override for structured event writes
+    #[serde(default)]
+    pub path_prefix: Option<String>,
+
+    /// Optional write importance for structured event writes
+    #[serde(default)]
+    pub importance: Option<f64>,
+
+    /// Target scope for writes
+    #[serde(default = "default_scope")]
+    pub scope: String,
+
+    /// Optional named project target
+    #[serde(default)]
+    pub project: Option<String>,
+
+    /// Optional domain tag
+    #[serde(default)]
+    pub domain: Option<String>,
+
+    /// Optional extra metadata
+    #[serde(default)]
+    pub metadata: Option<serde_json::Value>,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub(crate) struct IngestSourceParams {
+    /// Raw source content to ingest
+    pub content: String,
+
+    /// Optional source URL or canonical reference
+    #[serde(default)]
+    pub source_url: Option<String>,
+
+    /// Optional logical source identifier
+    #[serde(default)]
+    pub source: Option<String>,
+
+    /// Optional path prefix used for chunk paths
+    #[serde(default)]
+    pub path_prefix: Option<String>,
+
+    /// Whether to chunk long content before storage
+    #[serde(default = "default_auto_chunk")]
+    pub auto_chunk: bool,
+
+    /// Whether to generate summaries for stored chunks
+    #[serde(default = "default_true")]
+    pub auto_summarize: bool,
+
+    /// Whether to build graph edges against similar memories
+    #[serde(default = "default_true")]
+    pub auto_link: bool,
+
+    /// Base importance for stored chunks
+    #[serde(default = "default_importance")]
+    pub importance: f64,
+
+    /// Target scope for writes
+    #[serde(default = "default_scope")]
+    pub scope: String,
+
+    /// Optional named project target
+    #[serde(default)]
+    pub project: Option<String>,
+
+    /// Optional domain tag
+    #[serde(default)]
+    pub domain: Option<String>,
+
+    /// Chunk size in characters
+    #[serde(default = "default_chunk_size_chars")]
+    pub chunk_size_chars: usize,
+
+    /// Overlap between adjacent chunks in characters
+    #[serde(default = "default_chunk_overlap_chars")]
+    pub chunk_overlap_chars: usize,
+
+    /// Optional extra metadata
+    #[serde(default)]
+    pub metadata: Option<serde_json::Value>,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub(crate) struct IngestParams {
+    /// Ingest mode: "event" or "source"
+    #[serde(default = "default_ingest_type")]
+    pub ingest_type: String,
+
+    /// Raw source content or structured event payload
+    #[serde(default)]
+    pub content: Option<serde_json::Value>,
+
+    /// Optional source URL or canonical reference
+    #[serde(default)]
+    pub source_url: Option<String>,
+
+    /// Optional logical source identifier
+    #[serde(default)]
+    pub source: Option<String>,
+
+    /// Optional path prefix used for chunk paths
+    #[serde(default)]
+    pub path_prefix: Option<String>,
+
+    /// Whether to chunk long content before storage
+    #[serde(default = "default_auto_chunk")]
+    pub auto_chunk: bool,
+
+    /// Whether to generate summaries for stored chunks
+    #[serde(default = "default_true")]
+    pub auto_summarize: bool,
+
+    /// Whether to build graph edges against similar memories
+    #[serde(default = "default_true")]
+    pub auto_link: bool,
+
+    /// Base importance for stored chunks
+    #[serde(default = "default_importance")]
+    pub importance: f64,
+
+    /// Target scope for writes
+    #[serde(default = "default_scope")]
+    pub scope: String,
+
+    /// Optional named project target
+    #[serde(default)]
+    pub project: Option<String>,
+
+    /// Optional domain tag
+    #[serde(default)]
+    pub domain: Option<String>,
+
+    /// Chunk size in characters
+    #[serde(default = "default_chunk_size_chars")]
+    pub chunk_size_chars: usize,
+
+    /// Overlap between adjacent chunks in characters
+    #[serde(default = "default_chunk_overlap_chars")]
+    pub chunk_overlap_chars: usize,
+
+    /// Conversation identifier for event ingestion
+    #[serde(default)]
+    pub conversation_id: Option<String>,
+
+    /// Turn identifier for event ingestion
+    #[serde(default)]
+    pub turn_id: Option<String>,
+
+    /// Event type label for event ingestion
+    #[serde(default)]
+    pub event_type: Option<String>,
+
+    /// Messages in the conversation turn
+    #[serde(default)]
+    pub messages: Vec<Message>,
+
+    /// Optional extra metadata
+    #[serde(default)]
+    pub metadata: Option<serde_json::Value>,
 }
 
 // ─── Domain Management ──────────────────────────────────────────────────────
@@ -493,6 +707,33 @@ pub(crate) struct ListDomainsParams {
 pub(crate) struct DeleteDomainParams {
     /// Domain name to delete
     pub name: String,
+}
+
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub(crate) struct WikiLintParams {
+    /// Path prefix to lint (default: /wiki)
+    #[serde(default = "default_wiki_path_prefix_opt")]
+    pub path_prefix: Option<String>,
+
+    /// Checks to run: orphans, contradictions, stale, missing_edges
+    #[serde(default)]
+    pub checks: Vec<String>,
+
+    /// Maximum memories to inspect per scope
+    #[serde(default = "default_limit")]
+    pub limit: usize,
+
+    /// Days before a wiki memory is considered stale
+    #[serde(default = "default_wiki_stale_days")]
+    pub stale_days: u32,
+
+    /// Similarity threshold for missing edge hints
+    #[serde(default = "default_missing_edge_threshold")]
+    pub missing_edge_threshold: f64,
+
+    /// Similarity threshold for contradiction candidates
+    #[serde(default = "default_contradiction_threshold")]
+    pub contradiction_threshold: f64,
 }
 
 /// Build a MemoryEntry from a JSON fact value (shared by extract_facts and ingest_event).

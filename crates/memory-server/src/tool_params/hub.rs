@@ -51,6 +51,45 @@ pub(crate) struct RunSkillParams {
 
 #[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub(crate) struct DistillTrajectoryParams {
+    /// Natural-language task description
+    pub task_description: String,
+
+    /// Key execution steps, failures, and recoveries
+    pub execution_trace: Vec<serde_json::Value>,
+
+    /// Final outcome payload, e.g. success flag, score, notes
+    pub final_outcome: serde_json::Value,
+
+    /// Source agent identifier
+    pub agent_id: String,
+
+    /// Memory / skill path, e.g. /skills/hyperion/factor-evolution
+    pub skill_path: String,
+
+    /// Optional distilled skill capability id. Defaults to one derived from skill_path.
+    #[serde(default)]
+    pub skill_id: Option<String>,
+
+    /// Optional base importance for the permanent snapshot memory
+    #[serde(default)]
+    pub importance: Option<f64>,
+
+    /// Optional domain. Defaults to TACHI_DOMAIN when present.
+    #[serde(default)]
+    pub domain: Option<String>,
+
+    /// Optional named project DB target
+    #[serde(default)]
+    pub project: Option<String>,
+
+    /// Target database scope for snapshot writes
+    #[serde(default = "default_scope")]
+    pub scope: String,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub(crate) struct HubRegisterParams {
     /// Unique capability ID, e.g. "skill:code-review", "mcp:github"
     pub id: String,

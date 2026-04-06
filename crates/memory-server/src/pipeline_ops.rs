@@ -1,5 +1,611 @@
 use super::*;
 
+fn merge_optional_metadata(metadata: Option<serde_json::Value>) -> serde_json::Value {
+    match metadata {
+        Some(serde_json::Value::Object(map)) => serde_json::Value::Object(map),
+        Some(other) => json!({ "payload": other }),
+        None => json!({}),
+    }
+}
+
+fn summary_from_text(text: &str) -> String {
+    text.chars().take(100).collect()
+}
+
+fn default_ingest_chunk_size() -> usize {
+    1200
+}
+
+fn default_ingest_chunk_overlap() -> usize {
+    120
+}
+
+fn topic_from_path(path: &str) -> String {
+    path.trim_matches('/')
+        .rsplit('/')
+        .find(|segment| !segment.is_empty())
+        .unwrap_or("ingest")
+        .replace('-', "_")
+}
+
+fn resolve_domain(domain: Option<String>) -> Option<String> {
+    domain.filter(|value| !value.trim().is_empty()).or_else(|| {
+        std::env::var("TACHI_DOMAIN")
+            .ok()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+    })
+}
+
+fn default_source_path_prefix(
+    source_url: Option<&str>,
+    source: Option<&str>,
+    domain: Option<&str>,
+) -> String {
+    let domain_part = domain.unwrap_or("general");
+    let source_hint = source
+        .filter(|value| !value.trim().is_empty())
+        .or(source_url)
+        .unwrap_or("source");
+    format!(
+        "/wiki/{}/{}",
+        sanitize_safe_path_name(domain_part),
+        sanitize_safe_path_name(source_hint)
+    )
+}
+
+fn default_event_path_prefix(
+    domain: Option<&str>,
+    event_type: Option<&str>,
+    payload: Option<&serde_json::Value>,
+    conversation_id: &str,
+) -> String {
+    if matches!(domain, Some("trading")) {
+        if let Some(ticker) = payload
+            .and_then(|value| value.get("ticker"))
+            .and_then(|value| value.as_str())
+            .filter(|value| !value.trim().is_empty())
+        {
+            return format!("/trading/journal/{}", sanitize_safe_path_name(ticker));
+        }
+        return "/trading/journal".to_string();
+    }
+
+    if !conversation_id.trim().is_empty() {
+        return format!(
+            "/events/{}",
+            sanitize_safe_path_name(conversation_id.trim())
+        );
+    }
+
+    format!(
+        "/events/{}",
+        sanitize_safe_path_name(event_type.unwrap_or("event"))
+    )
+}
+
+fn chunk_text(content: &str, chunk_size_chars: usize, chunk_overlap_chars: usize) -> Vec<String> {
+    let chars: Vec<char> = content.chars().collect();
+    if chars.is_empty() {
+        return Vec::new();
+    }
+
+    let chunk_size = chunk_size_chars.max(1);
+    let overlap = chunk_overlap_chars.min(chunk_size.saturating_sub(1));
+    let step = chunk_size.saturating_sub(overlap).max(1);
+
+    let mut chunks = Vec::new();
+    let mut start = 0usize;
+    while start < chars.len() {
+        let end = (start + chunk_size).min(chars.len());
+        let chunk: String = chars[start..end].iter().collect();
+        let trimmed = chunk.trim();
+        if !trimmed.is_empty() {
+            chunks.push(trimmed.to_string());
+        }
+        if end >= chars.len() {
+            break;
+        }
+        start += step;
+    }
+
+    if chunks.is_empty() {
+        chunks.push(content.trim().to_string());
+    }
+    chunks
+}
+
+fn build_ingest_entry(
+    id: String,
+    path: String,
+    text: String,
+    importance: f64,
+    source: String,
+    scope: String,
+    metadata: serde_json::Value,
+    retention_policy: Option<String>,
+    domain: Option<String>,
+    needs_summary: bool,
+) -> MemoryEntry {
+    let summary = if needs_summary {
+        String::new()
+    } else {
+        summary_from_text(&text)
+    };
+
+    MemoryEntry {
+        id,
+        path: path.clone(),
+        summary,
+        text,
+        importance,
+        timestamp: Utc::now().to_rfc3339(),
+        category: "fact".to_string(),
+        topic: topic_from_path(&path),
+        keywords: Vec::new(),
+        persons: Vec::new(),
+        entities: Vec::new(),
+        location: String::new(),
+        source,
+        scope,
+        archived: false,
+        access_count: 0,
+        last_access: None,
+        revision: 1,
+        metadata,
+        vector: None,
+        retention_policy,
+        domain,
+    }
+}
+
+fn enqueue_dead_letter(
+    server: &MemoryServer,
+    tool_name: &str,
+    arguments: Option<serde_json::Map<String, serde_json::Value>>,
+    error: String,
+) {
+    let dl = DeadLetter {
+        id: uuid::Uuid::new_v4().to_string(),
+        tool_name: tool_name.to_string(),
+        arguments,
+        error,
+        error_category: "internal".to_string(),
+        timestamp: Utc::now().to_rfc3339(),
+        retry_count: 0,
+        max_retries: 3,
+        status: "pending".to_string(),
+    };
+    let mut dlq = server
+        .dead_letters
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    dlq.push_back(dl);
+    while dlq.len() > DLQ_MAX_ENTRIES {
+        dlq.pop_front();
+    }
+}
+
+fn insert_ingest_audit(server: &MemoryServer, label: &str, event_hash: &str) {
+    let _ = server.with_global_store(|store| {
+        store
+            .audit_log_insert(
+                &Utc::now().to_rfc3339(),
+                "ingest",
+                label,
+                event_hash,
+                true,
+                0,
+                None,
+            )
+            .map_err(|e| format!("audit insert: {e}"))
+    });
+}
+
+fn insert_ingest_skip_audit(server: &MemoryServer, label: &str, reason: &str, context: &str) {
+    let args_hash = stable_hash(&format!("{label}:{reason}:{context}"));
+    let _ = server.with_global_store(|store| {
+        store
+            .audit_log_insert(
+                &Utc::now().to_rfc3339(),
+                "ingest",
+                label,
+                &args_hash,
+                false,
+                0,
+                Some(reason),
+            )
+            .map_err(|e| format!("audit insert: {e}"))
+    });
+}
+
+fn claim_ingest_event(
+    server: &MemoryServer,
+    target_db: DbScope,
+    project: Option<&str>,
+    worker: &str,
+    event_hash: &str,
+    event_id: &str,
+) -> Result<bool, String> {
+    let action = |store: &mut MemoryStore| {
+        store
+            .try_claim_event(event_hash, event_id, worker)
+            .map_err(|e| format!("Failed to claim event: {e}"))
+    };
+
+    if let Some(project_name) = project {
+        server.with_named_project_store(project_name, action)
+    } else {
+        server.with_store_for_scope(target_db, action)
+    }
+}
+
+fn release_ingest_claim(
+    server: &MemoryServer,
+    target_db: DbScope,
+    project: Option<&str>,
+    worker: &str,
+    event_hash: &str,
+) {
+    let action = |store: &mut MemoryStore| {
+        store
+            .release_event_claim(event_hash, worker)
+            .map_err(|e| format!("{e}"))
+    };
+
+    let _ = if let Some(project_name) = project {
+        server.with_named_project_store(project_name, action)
+    } else {
+        server.with_store_for_scope(target_db, action)
+    };
+}
+
+async fn build_similarity_edges(
+    server: &MemoryServer,
+    target_db: DbScope,
+    project: Option<&str>,
+    domain: Option<&str>,
+    saved_entries: &[MemoryEntry],
+) {
+    for entry in saved_entries {
+        let query = entry.text.chars().take(480).collect::<String>();
+        if query.trim().is_empty() {
+            continue;
+        }
+
+        let search_action = |store: &mut MemoryStore| {
+            store
+                .search(
+                    &query,
+                    Some(SearchOptions {
+                        top_k: 4,
+                        domain: domain.map(|value| value.to_string()),
+                        record_access: false,
+                        ..Default::default()
+                    }),
+                )
+                .map_err(|e| format!("{e}"))
+        };
+
+        let search_results = if let Some(project_name) = project {
+            server.with_named_project_store_read(project_name, search_action)
+        } else {
+            server.with_store_for_scope_read(target_db, search_action)
+        };
+
+        let Ok(results) = search_results else {
+            continue;
+        };
+
+        for result in results {
+            if result.entry.id == entry.id {
+                continue;
+            }
+            let edge = memory_core::MemoryEdge {
+                source_id: entry.id.clone(),
+                target_id: result.entry.id.clone(),
+                relation: "related_to".to_string(),
+                weight: result.score.final_score.clamp(0.15, 1.0),
+                metadata: json!({
+                    "auto_ingest": true,
+                    "score": result.score.final_score,
+                    "path": entry.path,
+                }),
+                created_at: Utc::now().to_rfc3339(),
+                valid_from: String::new(),
+                valid_to: None,
+            };
+            let save_edge =
+                |store: &mut MemoryStore| store.add_edge(&edge).map_err(|e| format!("{e}"));
+            let _ = if let Some(project_name) = project {
+                server.with_named_project_store(project_name, save_edge)
+            } else {
+                server.with_store_for_scope(target_db, save_edge)
+            };
+        }
+    }
+}
+
+pub(super) fn extract_text_from_tool_result(
+    result: &rmcp::model::CallToolResult,
+) -> Option<String> {
+    let texts: Vec<String> = result
+        .content
+        .iter()
+        .filter_map(|item| {
+            serde_json::to_value(item).ok().and_then(|value| {
+                value
+                    .get("text")
+                    .and_then(|text| text.as_str())
+                    .map(String::from)
+            })
+        })
+        .collect();
+
+    if texts.is_empty() {
+        None
+    } else {
+        Some(texts.join("\n\n"))
+    }
+}
+
+pub(super) fn schedule_auto_ingest_from_mcp(
+    server: &MemoryServer,
+    capability_id: &str,
+    tool_name: &str,
+    definition: &serde_json::Value,
+    arguments: Option<&serde_json::Map<String, serde_json::Value>>,
+    result: &rmcp::model::CallToolResult,
+) {
+    let enabled = definition
+        .get("auto_ingest")
+        .and_then(|value| value.as_bool())
+        .unwrap_or(false);
+    if !enabled {
+        return;
+    }
+
+    let Some(content) = extract_text_from_tool_result(result) else {
+        return;
+    };
+
+    let resolved_server = capability_id.strip_prefix("mcp:").unwrap_or(capability_id);
+    let source_url = arguments
+        .and_then(|args| args.get("url"))
+        .and_then(|value| value.as_str())
+        .map(|value| value.to_string())
+        .or_else(|| {
+            arguments
+                .and_then(|args| args.get("source_url"))
+                .and_then(|value| value.as_str())
+                .map(|value| value.to_string())
+        });
+
+    let domain = resolve_domain(
+        definition
+            .get("ingest_domain")
+            .and_then(|value| value.as_str())
+            .map(|value| value.to_string()),
+    );
+    let path_prefix = definition
+        .get("ingest_path_prefix")
+        .and_then(|value| value.as_str())
+        .map(|value| value.to_string())
+        .unwrap_or_else(|| {
+            format!(
+                "/wiki/{}/{}/{}",
+                sanitize_safe_path_name(domain.as_deref().unwrap_or("general")),
+                sanitize_safe_path_name(resolved_server),
+                sanitize_safe_path_name(tool_name),
+            )
+        });
+    let scope = definition
+        .get("ingest_scope")
+        .and_then(|value| value.as_str())
+        .unwrap_or("global")
+        .to_string();
+    let source = format!("{}:{}", resolved_server, tool_name);
+    let metadata = json!({
+        "capability_id": capability_id,
+        "tool_name": tool_name,
+        "arguments": arguments.cloned().unwrap_or_default(),
+        "auto_ingest": true,
+    });
+
+    let params = IngestSourceParams {
+        content,
+        source_url,
+        source: Some(source),
+        path_prefix: Some(path_prefix),
+        auto_chunk: true,
+        auto_summarize: true,
+        auto_link: true,
+        importance: 0.7,
+        scope,
+        project: None,
+        domain,
+        chunk_size_chars: default_ingest_chunk_size(),
+        chunk_overlap_chars: default_ingest_chunk_overlap(),
+        metadata: Some(metadata),
+    };
+
+    let server = server.clone();
+    tokio::spawn(async move {
+        if let Err(error) = handle_ingest_source(&server, params).await {
+            eprintln!("[auto-ingest] MCP result ingest failed: {error}");
+        }
+    });
+}
+
+async fn ingest_structured_event(
+    server: &MemoryServer,
+    params: IngestEventParams,
+) -> Result<String, String> {
+    let domain = resolve_domain(params.domain.clone());
+    let named_project = params.project.clone();
+    let (target_db, warning) = if named_project.is_some() {
+        (DbScope::Project, None)
+    } else {
+        server.resolve_write_scope(&params.scope)
+    };
+
+    let payload = params.content.unwrap_or_else(|| json!({}));
+    let event_type = params
+        .event_type
+        .clone()
+        .unwrap_or_else(|| "event".to_string());
+    let text = if payload.is_null() {
+        params
+            .messages
+            .iter()
+            .map(|message| format!("{}: {}", message.role, message.content))
+            .collect::<Vec<_>>()
+            .join("\n")
+    } else {
+        format!(
+            "event_type: {}\n{}",
+            event_type,
+            serde_json::to_string_pretty(&payload).unwrap_or_else(|_| payload.to_string())
+        )
+    };
+    if text.trim().is_empty() {
+        eprintln!(
+            "[ingest_event] skipped empty structured event (event_type={}, conversation_id={}, turn_id={})",
+            event_type, params.conversation_id, params.turn_id
+        );
+        insert_ingest_skip_audit(
+            server,
+            "ingest_event",
+            "empty_structured_event",
+            &format!("{}:{}", params.conversation_id, params.turn_id),
+        );
+        return Ok(serde_json::to_string(&json!({
+            "status": "skipped",
+            "reason": "No structured event content to persist"
+        }))
+        .unwrap());
+    }
+
+    let event_hash = stable_hash(&format!(
+        "structured-event:{}:{}:{}",
+        event_type, params.conversation_id, text,
+    ));
+    let event_id = format!(
+        "{}:{}",
+        if params.conversation_id.trim().is_empty() {
+            "event"
+        } else {
+            params.conversation_id.as_str()
+        },
+        if params.turn_id.trim().is_empty() {
+            event_hash.as_str()
+        } else {
+            params.turn_id.as_str()
+        }
+    );
+
+    let claimed = claim_ingest_event(
+        server,
+        target_db,
+        named_project.as_deref(),
+        "ingest_event",
+        &event_hash,
+        &event_id,
+    )?;
+    if !claimed {
+        return Ok(serde_json::to_string(&json!({
+            "status": "skipped",
+            "reason": "Event already processed",
+            "hash": event_hash
+        }))
+        .unwrap());
+    }
+
+    let path_prefix = params.path_prefix.clone().unwrap_or_else(|| {
+        default_event_path_prefix(
+            domain.as_deref(),
+            Some(event_type.as_str()),
+            Some(&payload),
+            &params.conversation_id,
+        )
+    });
+    let entry_id = uuid::Uuid::new_v4().to_string();
+    let metadata = crate::provenance::inject_provenance(
+        server,
+        merge_optional_metadata(params.metadata.clone()),
+        "ingest_event",
+        "event_ingest",
+        Some(params.scope.as_str()),
+        target_db,
+        json!({
+            "conversation_id": params.conversation_id,
+            "turn_id": params.turn_id,
+            "event_type": event_type,
+            "event_hash": event_hash,
+        }),
+    );
+    let entry = build_ingest_entry(
+        entry_id.clone(),
+        path_prefix,
+        text,
+        params.importance.unwrap_or(0.75).clamp(0.0, 1.0),
+        "ingest_event".to_string(),
+        params.scope.clone(),
+        metadata,
+        None,
+        domain.clone(),
+        true,
+    );
+
+    let save_action = |store: &mut MemoryStore| {
+        store
+            .upsert(&entry)
+            .map_err(|e| format!("Failed to save structured event: {e}"))
+    };
+    let save_result = if let Some(project_name) = named_project.as_deref() {
+        server.with_named_project_store(project_name, save_action)
+    } else {
+        server.with_store_for_scope(target_db, save_action)
+    };
+
+    if let Err(error) = save_result {
+        release_ingest_claim(
+            server,
+            target_db,
+            named_project.as_deref(),
+            "ingest_event",
+            &event_hash,
+        );
+        return Err(error);
+    }
+
+    let _ = server.enrich_tx.try_send(super::EnrichmentItem {
+        id: entry_id.clone(),
+        text: entry.text.clone(),
+        needs_embedding: true,
+        needs_summary: true,
+        target_db,
+        named_project: named_project.clone(),
+        foundry_agent_id: None,
+        foundry_path_prefix: None,
+        revision: 1,
+    });
+
+    insert_ingest_audit(server, "ingest_event", &event_hash);
+
+    let mut response = serde_json::Map::new();
+    response.insert("status".into(), json!("completed"));
+    response.insert("hash".into(), json!(event_hash));
+    response.insert("id".into(), json!(entry_id));
+    response.insert("db".into(), json!(target_db.as_str()));
+    if let Some(warning) = warning {
+        response.insert("warning".into(), json!(warning));
+    }
+
+    serde_json::to_string(&serde_json::Value::Object(response))
+        .map_err(|e| format!("Failed to serialize: {e}"))
+}
+
 pub(super) async fn handle_extract_facts(
     server: &MemoryServer,
     params: ExtractFactsParams,
@@ -59,12 +665,78 @@ pub(super) async fn handle_extract_facts(
     .unwrap())
 }
 
+pub(super) async fn handle_ingest(
+    server: &MemoryServer,
+    params: IngestParams,
+) -> Result<String, String> {
+    match params.ingest_type.trim().to_ascii_lowercase().as_str() {
+        "event" => {
+            handle_ingest_event(
+                server,
+                IngestEventParams {
+                    conversation_id: params.conversation_id.unwrap_or_default(),
+                    turn_id: params.turn_id.unwrap_or_default(),
+                    event_type: params.event_type,
+                    content: params.content,
+                    messages: params.messages,
+                    path_prefix: params.path_prefix,
+                    importance: Some(params.importance),
+                    scope: params.scope,
+                    project: params.project,
+                    domain: params.domain,
+                    metadata: params.metadata,
+                },
+            )
+            .await
+        }
+        "source" => {
+            let content = match params.content {
+                Some(serde_json::Value::String(text)) => text,
+                Some(other) => value_to_template_text(&other),
+                None => String::new(),
+            };
+            handle_ingest_source(
+                server,
+                IngestSourceParams {
+                    content,
+                    source_url: params.source_url,
+                    source: params.source,
+                    path_prefix: params.path_prefix,
+                    auto_chunk: params.auto_chunk,
+                    auto_summarize: params.auto_summarize,
+                    auto_link: params.auto_link,
+                    importance: params.importance,
+                    scope: params.scope,
+                    project: params.project,
+                    domain: params.domain,
+                    chunk_size_chars: params.chunk_size_chars,
+                    chunk_overlap_chars: params.chunk_overlap_chars,
+                    metadata: params.metadata,
+                },
+            )
+            .await
+        }
+        other => Err(format!(
+            "Unsupported ingest_type '{}'. Expected 'event' or 'source'.",
+            other
+        )),
+    }
+}
+
 pub(super) async fn handle_ingest_event(
     server: &MemoryServer,
     params: IngestEventParams,
 ) -> Result<String, String> {
+    if params.content.is_some() || params.event_type.is_some() {
+        return ingest_structured_event(server, params).await;
+    }
+
     let event_hash = stable_hash(&format!("{}:{}", params.conversation_id, params.turn_id));
-    let (target_db, _warning) = server.resolve_write_scope("project");
+    let (target_db, _warning) = if params.project.is_some() {
+        (DbScope::Project, None)
+    } else {
+        server.resolve_write_scope(&params.scope)
+    };
 
     let combined_text: String = params
         .messages
@@ -74,6 +746,16 @@ pub(super) async fn handle_ingest_event(
         .join("\n");
 
     if combined_text.trim().is_empty() {
+        eprintln!(
+            "[ingest_event] skipped empty conversation event (conversation_id={}, turn_id={})",
+            params.conversation_id, params.turn_id
+        );
+        insert_ingest_skip_audit(
+            server,
+            "ingest_event",
+            "empty_event_content",
+            &format!("{}:{}", params.conversation_id, params.turn_id),
+        );
         return Ok(serde_json::to_string(&serde_json::json!({
             "status": "skipped",
             "reason": "No content to process"
@@ -81,15 +763,14 @@ pub(super) async fn handle_ingest_event(
         .unwrap());
     }
 
-    let claimed = server.with_store_for_scope(target_db, |store| {
-        store
-            .try_claim_event(
-                &event_hash,
-                &format!("{}:{}", params.conversation_id, params.turn_id),
-                "ingest",
-            )
-            .map_err(|e| format!("Failed to claim event: {e}"))
-    })?;
+    let claimed = claim_ingest_event(
+        server,
+        target_db,
+        params.project.as_deref(),
+        "ingest",
+        &event_hash,
+        &format!("{}:{}", params.conversation_id, params.turn_id),
+    )?;
     if !claimed {
         return Ok(serde_json::to_string(&serde_json::json!({
             "status": "skipped",
@@ -103,6 +784,10 @@ pub(super) async fn handle_ingest_event(
     let conversation_id = params.conversation_id.clone();
     let turn_id = params.turn_id.clone();
     let eh = event_hash.clone();
+    let requested_scope = params.scope.clone();
+    let named_project = params.project.clone();
+    let domain = resolve_domain(params.domain.clone());
+    let extra_metadata = params.metadata.clone();
     tokio::spawn(async move {
         match server.llm.extract_facts(&combined_text).await {
             Ok(facts) if facts.is_empty() => {
@@ -110,115 +795,117 @@ pub(super) async fn handle_ingest_event(
             }
             Ok(facts) => {
                 let count = facts.len();
-                let saved = server.with_store_for_scope(target_db, |store| {
-                    let mut saved = 0;
-                    for fact in &facts {
-                        let metadata = crate::provenance::inject_provenance(
-                            &server,
-                            serde_json::json!({
-                                "conversation_id": conversation_id.clone(),
-                                "turn_id": turn_id.clone(),
-                            }),
-                            "ingest_event",
-                            "conversation_ingest",
-                            Some("project"),
-                            target_db,
-                            serde_json::json!({
-                                "conversation_id": conversation_id.clone(),
-                                "turn_id": turn_id.clone(),
-                                "event_hash": eh.clone(),
-                            }),
-                        );
-                        let Some(entry) = fact_to_entry(
-                            fact,
-                            &format!("conversation:{conversation_id}"),
-                            metadata,
-                        ) else {
-                            continue;
-                        };
-                        if store.upsert(&entry).is_ok() {
-                            saved += 1;
+                let saved = if let Some(ref project_name) = named_project {
+                    server.with_named_project_store(project_name, |store| {
+                        let mut saved = 0;
+                        for fact in &facts {
+                            let metadata = crate::provenance::inject_provenance(
+                                &server,
+                                merge_optional_metadata(extra_metadata.clone()),
+                                "ingest_event",
+                                "conversation_ingest",
+                                Some(requested_scope.as_str()),
+                                target_db,
+                                serde_json::json!({
+                                    "conversation_id": conversation_id.clone(),
+                                    "turn_id": turn_id.clone(),
+                                    "event_hash": eh.clone(),
+                                    "domain": domain.clone(),
+                                }),
+                            );
+                            let Some(mut entry) = fact_to_entry(
+                                fact,
+                                &format!("conversation:{conversation_id}"),
+                                metadata,
+                            ) else {
+                                continue;
+                            };
+                            entry.domain = domain.clone();
+                            if store.upsert(&entry).is_ok() {
+                                saved += 1;
+                            }
                         }
-                    }
-                    Ok(saved)
-                });
+                        Ok(saved)
+                    })
+                } else {
+                    server.with_store_for_scope(target_db, |store| {
+                        let mut saved = 0;
+                        for fact in &facts {
+                            let metadata = crate::provenance::inject_provenance(
+                                &server,
+                                merge_optional_metadata(extra_metadata.clone()),
+                                "ingest_event",
+                                "conversation_ingest",
+                                Some(requested_scope.as_str()),
+                                target_db,
+                                serde_json::json!({
+                                    "conversation_id": conversation_id.clone(),
+                                    "turn_id": turn_id.clone(),
+                                    "event_hash": eh.clone(),
+                                    "domain": domain.clone(),
+                                }),
+                            );
+                            let Some(mut entry) = fact_to_entry(
+                                fact,
+                                &format!("conversation:{conversation_id}"),
+                                metadata,
+                            ) else {
+                                continue;
+                            };
+                            entry.domain = domain.clone();
+                            if store.upsert(&entry).is_ok() {
+                                saved += 1;
+                            }
+                        }
+                        Ok(saved)
+                    })
+                };
                 match saved {
                     Ok(n) => {
+                        insert_ingest_audit(&server, "ingest_event", &eh);
                         eprintln!("[ingest_event] saved {n}/{count} facts for {conversation_id}:{turn_id}")
                     }
                     Err(e) => {
                         eprintln!(
                             "[ingest_event] DB write failed: {e} — releasing claim for retry"
                         );
-                        let _ = server.with_store_for_scope(target_db, |store| {
-                            store
-                                .release_event_claim(&eh, "ingest")
-                                .map_err(|e| format!("{e}"))
-                        });
-                        let dl = DeadLetter {
-                            id: uuid::Uuid::new_v4().to_string(),
-                            tool_name: "ingest_event".to_string(),
-                            arguments: Some(serde_json::Map::from_iter([
+                        release_ingest_claim(
+                            &server,
+                            target_db,
+                            named_project.as_deref(),
+                            "ingest",
+                            &eh,
+                        );
+                        enqueue_dead_letter(
+                            &server,
+                            "ingest_event",
+                            Some(serde_json::Map::from_iter([
                                 (
                                     "conversation_id".to_string(),
                                     serde_json::json!(conversation_id),
                                 ),
                                 ("turn_id".to_string(), serde_json::json!(turn_id)),
                             ])),
-                            error: format!("DB write failed: {e}"),
-                            error_category: "internal".to_string(),
-                            timestamp: Utc::now().to_rfc3339(),
-                            retry_count: 0,
-                            max_retries: 3,
-                            status: "pending".to_string(),
-                        };
-                        {
-                            let mut dlq = server
-                                .dead_letters
-                                .lock()
-                                .unwrap_or_else(|e| e.into_inner());
-                            dlq.push_back(dl);
-                            while dlq.len() > DLQ_MAX_ENTRIES {
-                                dlq.pop_front();
-                            }
-                        }
+                            format!("DB write failed: {e}"),
+                        );
                     }
                 }
             }
             Err(e) => {
                 eprintln!("[ingest_event] LLM extraction failed for {conversation_id}:{turn_id}: {e} — releasing claim for retry");
-                let _ = server.with_store_for_scope(target_db, |store| {
-                    store
-                        .release_event_claim(&eh, "ingest")
-                        .map_err(|e| format!("{e}"))
-                });
-                let dl = DeadLetter {
-                    id: uuid::Uuid::new_v4().to_string(),
-                    tool_name: "ingest_event".to_string(),
-                    arguments: Some(serde_json::Map::from_iter([
+                release_ingest_claim(&server, target_db, named_project.as_deref(), "ingest", &eh);
+                enqueue_dead_letter(
+                    &server,
+                    "ingest_event",
+                    Some(serde_json::Map::from_iter([
                         (
                             "conversation_id".to_string(),
                             serde_json::json!(conversation_id),
                         ),
                         ("turn_id".to_string(), serde_json::json!(turn_id)),
                     ])),
-                    error: format!("LLM extraction failed: {e}"),
-                    error_category: "internal".to_string(),
-                    timestamp: Utc::now().to_rfc3339(),
-                    retry_count: 0,
-                    max_retries: 3,
-                    status: "pending".to_string(),
-                };
-                {
-                    let mut dlq = server
-                        .dead_letters
-                        .lock()
-                        .unwrap_or_else(|e| e.into_inner());
-                    dlq.push_back(dl);
-                    while dlq.len() > DLQ_MAX_ENTRIES {
-                        dlq.pop_front();
-                    }
-                }
+                    format!("LLM extraction failed: {e}"),
+                );
             }
         }
     });
@@ -227,6 +914,196 @@ pub(super) async fn handle_ingest_event(
         "hash": event_hash
     }))
     .unwrap())
+}
+
+pub(super) async fn handle_ingest_source(
+    server: &MemoryServer,
+    params: IngestSourceParams,
+) -> Result<String, String> {
+    let content = params.content.trim();
+    if content.is_empty() {
+        eprintln!(
+            "[ingest_source] skipped empty source ingest (source={}, path_prefix={:?})",
+            params
+                .source
+                .as_deref()
+                .or(params.source_url.as_deref())
+                .unwrap_or("ingest_source"),
+            params.path_prefix
+        );
+        insert_ingest_skip_audit(
+            server,
+            "ingest_source",
+            "empty_source_content",
+            params
+                .path_prefix
+                .as_deref()
+                .or(params.source_url.as_deref())
+                .unwrap_or("/"),
+        );
+        return Ok(serde_json::to_string(&json!({
+            "status": "skipped",
+            "reason": "No source content to ingest"
+        }))
+        .unwrap());
+    }
+
+    let domain = resolve_domain(params.domain.clone());
+    let named_project = params.project.clone();
+    let (target_db, warning) = if named_project.is_some() {
+        (DbScope::Project, None)
+    } else {
+        server.resolve_write_scope(&params.scope)
+    };
+    let path_prefix = params.path_prefix.clone().unwrap_or_else(|| {
+        default_source_path_prefix(
+            params.source_url.as_deref(),
+            params.source.as_deref(),
+            domain.as_deref(),
+        )
+    });
+    let source_label = params
+        .source
+        .clone()
+        .or_else(|| params.source_url.clone())
+        .unwrap_or_else(|| "ingest_source".to_string());
+    let event_hash = stable_hash(&format!("{}:{}:{}", source_label, path_prefix, content,));
+
+    let claimed = claim_ingest_event(
+        server,
+        target_db,
+        named_project.as_deref(),
+        "ingest_source",
+        &event_hash,
+        &path_prefix,
+    )?;
+    if !claimed {
+        return Ok(serde_json::to_string(&json!({
+            "status": "skipped",
+            "reason": "Source already processed",
+            "hash": event_hash,
+        }))
+        .unwrap());
+    }
+
+    let chunks = if params.auto_chunk {
+        chunk_text(content, params.chunk_size_chars, params.chunk_overlap_chars)
+    } else {
+        vec![content.to_string()]
+    };
+    let chunk_total = chunks.len();
+    let base_metadata = merge_optional_metadata(params.metadata.clone());
+    let mut saved_entries: Vec<MemoryEntry> = Vec::new();
+
+    let persist_result = {
+        let action = |store: &mut MemoryStore| {
+            for (index, chunk) in chunks.iter().enumerate() {
+                let entry_id = uuid::Uuid::new_v4().to_string();
+                let chunk_path = if chunk_total <= 1 {
+                    path_prefix.clone()
+                } else {
+                    format!("{}/{}", path_prefix, index)
+                };
+                let metadata = crate::provenance::inject_provenance(
+                    server,
+                    base_metadata.clone(),
+                    "ingest_source",
+                    "source_ingest",
+                    Some(params.scope.as_str()),
+                    target_db,
+                    json!({
+                        "source": params.source,
+                        "source_url": params.source_url,
+                        "path_prefix": path_prefix,
+                        "chunk_index": index,
+                        "chunk_total": chunk_total,
+                        "event_hash": event_hash,
+                    }),
+                );
+                let entry = build_ingest_entry(
+                    entry_id,
+                    chunk_path,
+                    chunk.clone(),
+                    params.importance.clamp(0.0, 1.0),
+                    source_label.clone(),
+                    params.scope.clone(),
+                    metadata,
+                    None,
+                    domain.clone(),
+                    params.auto_summarize,
+                );
+                store
+                    .upsert(&entry)
+                    .map_err(|e| format!("Failed to save ingested chunk: {e}"))?;
+                saved_entries.push(entry);
+            }
+            Ok(())
+        };
+
+        if let Some(project_name) = named_project.as_deref() {
+            server.with_named_project_store(project_name, action)
+        } else {
+            server.with_store_for_scope(target_db, action)
+        }
+    };
+
+    if let Err(error) = persist_result {
+        release_ingest_claim(
+            server,
+            target_db,
+            named_project.as_deref(),
+            "ingest_source",
+            &event_hash,
+        );
+        return Err(error);
+    }
+
+    for entry in &saved_entries {
+        let _ = server.enrich_tx.try_send(super::EnrichmentItem {
+            id: entry.id.clone(),
+            text: entry.text.clone(),
+            needs_embedding: true,
+            needs_summary: params.auto_summarize,
+            target_db,
+            named_project: named_project.clone(),
+            foundry_agent_id: None,
+            foundry_path_prefix: None,
+            revision: 1,
+        });
+    }
+
+    if params.auto_link {
+        build_similarity_edges(
+            server,
+            target_db,
+            named_project.as_deref(),
+            domain.as_deref(),
+            &saved_entries,
+        )
+        .await;
+    }
+
+    insert_ingest_audit(server, "ingest_source", &event_hash);
+
+    let mut response = serde_json::Map::new();
+    response.insert("status".into(), json!("completed"));
+    response.insert("hash".into(), json!(event_hash));
+    response.insert("db".into(), json!(target_db.as_str()));
+    response.insert("path_prefix".into(), json!(path_prefix));
+    response.insert("chunks_saved".into(), json!(saved_entries.len()));
+    response.insert(
+        "ids".into(),
+        json!(saved_entries
+            .iter()
+            .map(|entry| entry.id.clone())
+            .collect::<Vec<_>>()),
+    );
+    if let Some(warning) = warning {
+        response.insert("warning".into(), json!(warning));
+    }
+
+    serde_json::to_string(&serde_json::Value::Object(response))
+        .map_err(|e| format!("Failed to serialize: {e}"))
 }
 
 pub(super) async fn handle_get_pipeline_status(server: &MemoryServer) -> Result<String, String> {
@@ -354,7 +1231,7 @@ pub(super) async fn handle_sync_memories(
             "changed_count": 0,
             "entries": [],
         }))
-        .map_err(|e| format!("Failed to serialize: {}", e));
+        .map_err(|e| format!("Failed to serialize: {e}"));
     }
 
     let memory_ids: Vec<String> = all_entries.iter().map(|(e, _)| e.id.clone()).collect();
@@ -419,8 +1296,7 @@ pub(super) async fn handle_sync_memories(
         "agent_id": params.agent_id,
         "new_count": new_count,
         "changed_count": changed_count,
-        "unchanged_count": all_entries.len() as u64 - new_count - changed_count,
         "entries": diff_entries,
     }))
-    .map_err(|e| format!("Failed to serialize: {}", e))
+    .map_err(|e| format!("Failed to serialize: {e}"))
 }

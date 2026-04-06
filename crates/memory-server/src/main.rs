@@ -4,6 +4,7 @@
 // Stateless design: each tool opens its own DB connection per-request.
 
 mod bootstrap;
+mod builtins;
 mod capability_ops;
 mod clawdoctor;
 mod cli;
@@ -37,7 +38,9 @@ mod tool_params;
 mod utils;
 mod vault_crypto;
 mod vault_ops;
+mod wiki_ops;
 
+use crate::builtins::seed_builtin_capabilities;
 use crate::capability_ops::{
     handle_prepare_capability_bundle, handle_recommend_capability, handle_recommend_skill,
     handle_recommend_toolchain,
@@ -67,10 +70,10 @@ use crate::hub_helpers::{
     should_expose_skill_tool, CapabilityVisibility,
 };
 use crate::hub_ops::{
-    handle_export_skills, handle_hub_call, handle_hub_disconnect, handle_hub_discover,
-    handle_hub_feedback, handle_hub_get, handle_hub_register, handle_hub_review,
-    handle_hub_set_active_version, handle_hub_set_enabled, handle_hub_stats, handle_run_skill,
-    handle_skill_evolve, handle_tachi_audit_log, handle_vc_bind, handle_vc_list,
+    handle_distill_trajectory, handle_export_skills, handle_hub_call, handle_hub_disconnect,
+    handle_hub_discover, handle_hub_feedback, handle_hub_get, handle_hub_register,
+    handle_hub_review, handle_hub_set_active_version, handle_hub_set_enabled, handle_hub_stats,
+    handle_run_skill, handle_skill_evolve, handle_tachi_audit_log, handle_vc_bind, handle_vc_list,
     handle_vc_register, handle_vc_resolve,
 };
 use crate::kanban::{
@@ -95,7 +98,8 @@ use crate::pack_ops::{
     handle_pack_remove, handle_projection_list,
 };
 use crate::pipeline_ops::{
-    handle_extract_facts, handle_get_pipeline_status, handle_ingest_event, handle_sync_memories,
+    handle_extract_facts, handle_get_pipeline_status, handle_ingest, handle_ingest_event,
+    handle_ingest_source, handle_sync_memories,
 };
 use crate::profiles::ToolProfile;
 use crate::project_db_ops::handle_tachi_init_project_db;
@@ -120,6 +124,7 @@ use crate::vault_ops::{
     VaultGetParams, VaultInitParams, VaultListParams, VaultRemoveParams, VaultSetParams,
     VaultSetupRotationParams, VaultUnlockParams,
 };
+use crate::wiki_ops::handle_wiki_lint;
 
 use chrono::Utc;
 use clap::Parser;
@@ -223,7 +228,9 @@ const CACHE_INVALIDATING_TOOLS: &[&str] = &[
     "save_memory",
     "cyberbrain_write",
     "extract_facts",
+    "ingest",
     "ingest_event",
+    "ingest_source",
     "set_state",
     "hub_register",
     "hub_review",
@@ -252,6 +259,8 @@ const CACHE_INVALIDATING_TOOLS: &[&str] = &[
     "pack_project",
     "register_domain",
     "delete_domain",
+    "distill_trajectory",
+    "wiki_lint",
 ];
 
 struct CachedResult {
@@ -500,6 +509,9 @@ impl MemoryServer {
             let foundry_server = server.clone();
             tokio::spawn(run_foundry_maintenance_worker(foundry_server, foundry_rx));
         }
+
+        seed_builtin_capabilities(&server)
+            .map_err(|e| std::io::Error::other(format!("seed builtin capabilities: {e}")))?;
 
         Ok(server)
     }
@@ -752,6 +764,16 @@ impl MemoryServer {
         handle_memory_graph(self, params).await
     }
 
+    #[tool(
+        description = "Run health checks over wiki memories and skill graph state. Returns orphan nodes, contradiction candidates, stale nodes, missing edge hints, and current skill quality guard status."
+    )]
+    async fn wiki_lint(
+        &self,
+        Parameters(params): Parameters<WikiLintParams>,
+    ) -> Result<String, String> {
+        handle_wiki_lint(self, params).await
+    }
+
     #[tool(description = "Set a key-value pair in server state (stored in hard_state table).")]
     async fn set_state(
         &self,
@@ -782,6 +804,23 @@ impl MemoryServer {
         Parameters(params): Parameters<IngestEventParams>,
     ) -> Result<String, String> {
         handle_ingest_event(self, params).await
+    }
+
+    #[tool(
+        description = "Unified ingest entrypoint for conversation events and source documents. Use ingest_type to select event vs source behavior."
+    )]
+    async fn ingest(&self, Parameters(params): Parameters<IngestParams>) -> Result<String, String> {
+        handle_ingest(self, params).await
+    }
+
+    #[tool(
+        description = "Batch ingest source content with optional chunking, enrichment, and graph edge building."
+    )]
+    async fn ingest_source(
+        &self,
+        Parameters(params): Parameters<IngestSourceParams>,
+    ) -> Result<String, String> {
+        handle_ingest_source(self, params).await
     }
 
     #[tool(description = "Get pipeline status and statistics.")]
@@ -870,6 +909,16 @@ impl MemoryServer {
         Parameters(params): Parameters<RunSkillParams>,
     ) -> Result<String, String> {
         handle_run_skill(self, params).await
+    }
+
+    #[tool(
+        description = "Distill a completed task trajectory into a reusable Skill, persist a permanent skill snapshot, and register/update the distilled Hub Skill."
+    )]
+    async fn distill_trajectory(
+        &self,
+        Parameters(params): Parameters<DistillTrajectoryParams>,
+    ) -> Result<String, String> {
+        handle_distill_trajectory(self, params).await
     }
 
     #[tool(
