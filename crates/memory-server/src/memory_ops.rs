@@ -306,8 +306,10 @@ pub(super) async fn handle_memory_gc(server: &MemoryServer) -> Result<String, St
             .gc_tables(&GcConfig::default())
             .map_err(|e| format!("GC failed on global DB: {}", e))?;
         let kanban_deleted = gc_expired_kanban_cards(store, DEFAULT_KANBAN_GC_MAX_AGE_DAYS)?;
+        let foundry_deleted = memory_core::gc_foundry_jobs(store.connection(), 7).unwrap_or(0);
         if let Some(object) = gc.as_object_mut() {
             object.insert("kanban_cards_pruned".into(), json!(kanban_deleted));
+            object.insert("foundry_jobs_pruned".into(), json!(foundry_deleted));
         }
         Ok(gc)
     })?;
@@ -319,8 +321,10 @@ pub(super) async fn handle_memory_gc(server: &MemoryServer) -> Result<String, St
                 .gc_tables(&GcConfig::default())
                 .map_err(|e| format!("GC failed on project DB: {}", e))?;
             let kanban_deleted = gc_expired_kanban_cards(store, DEFAULT_KANBAN_GC_MAX_AGE_DAYS)?;
+            let foundry_deleted = memory_core::gc_foundry_jobs(store.connection(), 7).unwrap_or(0);
             if let Some(object) = gc.as_object_mut() {
                 object.insert("kanban_cards_pruned".into(), json!(kanban_deleted));
+                object.insert("foundry_jobs_pruned".into(), json!(foundry_deleted));
             }
             Ok(gc)
         })?;

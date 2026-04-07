@@ -54,6 +54,17 @@ pub(super) fn slim_entry(e: &MemoryEntry, db: DbScope) -> serde_json::Value {
     if !e.entities.is_empty() {
         obj.insert("entities".into(), json!(e.entities));
     }
+    if !e.location.is_empty() {
+        obj.insert("location".into(), json!(e.location));
+    }
+    if let Some(ref rp) = e.retention_policy {
+        obj.insert("retention_policy".into(), json!(rp));
+    }
+    if let Some(ref domain) = e.domain {
+        if !domain.is_empty() {
+            obj.insert("domain".into(), json!(domain));
+        }
+    }
     if e.archived {
         obj.insert("archived".into(), json!(true));
     }

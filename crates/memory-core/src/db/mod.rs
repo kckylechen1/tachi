@@ -2,6 +2,7 @@ mod agent_state;
 mod audit;
 mod common;
 mod domain;
+pub mod foundry_jobs;
 mod ghost;
 mod graph;
 mod hub_db;

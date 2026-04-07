@@ -17,6 +17,29 @@ impl MemoryServer {
     }
 
     pub(super) fn enqueue_foundry_job(&self, item: FoundryMaintenanceItem) -> Result<(), String> {
+        // Persist to DB first so the job survives process exit
+        let persisted = memory_core::PersistedFoundryJob {
+            spec: item.job.clone(),
+            target_db: item.target_db.as_str().to_string(),
+            named_project: item.named_project.clone(),
+            path_prefix: item.path_prefix.clone(),
+            memory_ids: item.memory_ids.clone(),
+        };
+        let persist_result = if let Some(ref project_name) = item.named_project {
+            self.with_named_project_store(project_name, |store| {
+                memory_core::insert_foundry_job(store.connection(), &persisted)
+                    .map_err(|e| format!("persist foundry job: {e}"))
+            })
+        } else {
+            self.with_store_for_scope(item.target_db, |store| {
+                memory_core::insert_foundry_job(store.connection(), &persisted)
+                    .map_err(|e| format!("persist foundry job: {e}"))
+            })
+        };
+        if let Err(err) = persist_result {
+            eprintln!("[foundry] failed to persist job {}: {err}", item.job.id);
+        }
+
         self.foundry_stats
             .queued
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);

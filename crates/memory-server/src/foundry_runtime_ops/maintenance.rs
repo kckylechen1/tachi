@@ -579,6 +579,18 @@ pub(crate) async fn run_foundry_maintenance_worker(
         let result = handle_foundry_maintenance_item(&server, &item).await;
 
         server.foundry_stats.running.fetch_sub(1, Ordering::Relaxed);
+
+        // Update persisted job status in DB
+        let status_str = match &result {
+            Ok(memory_core::FoundryJobStatus::Skipped) => "skipped",
+            Ok(_) => "completed",
+            Err(_) => "failed",
+        };
+        let _ = with_foundry_store(&server, &item, |store| {
+            memory_core::update_foundry_job_status(store.connection(), &item.job.id, status_str)
+                .map_err(|e| format!("update foundry job status: {e}"))
+        });
+
         match result {
             Ok(memory_core::FoundryJobStatus::Skipped) => {
                 server.foundry_stats.skipped.fetch_add(1, Ordering::Relaxed);

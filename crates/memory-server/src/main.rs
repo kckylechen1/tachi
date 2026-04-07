@@ -510,6 +510,60 @@ impl MemoryServer {
             tokio::spawn(run_foundry_maintenance_worker(foundry_server, foundry_rx));
         }
 
+        // Replay pending foundry jobs from DB (survive process restart)
+        {
+            let replay_server = server.clone();
+            tokio::spawn(async move {
+                // Short delay to let the foundry worker start receiving
+                tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+                let mut replayed = 0usize;
+
+                // Helper: replay jobs from a store
+                let replay_from =
+                    |jobs: Vec<memory_core::PersistedFoundryJob>| -> usize {
+                        let mut count = 0;
+                        for job in jobs {
+                            let target_db = match job.target_db.as_str() {
+                                "project" => DbScope::Project,
+                                _ => DbScope::Global,
+                            };
+                            let item = FoundryMaintenanceItem {
+                                job: job.spec,
+                                target_db,
+                                named_project: job.named_project,
+                                path_prefix: job.path_prefix,
+                                memory_ids: job.memory_ids,
+                            };
+                            if replay_server.foundry_tx.try_send(item).is_ok() {
+                                count += 1;
+                            }
+                        }
+                        count
+                    };
+
+                // Replay from global DB
+                if let Ok(jobs) = replay_server.with_global_store(|store| {
+                    memory_core::load_pending_foundry_jobs(store.connection())
+                        .map_err(|e| format!("load pending foundry jobs (global): {e}"))
+                }) {
+                    replayed += replay_from(jobs);
+                }
+
+                // Replay from project DB
+                if let Ok(jobs) = replay_server.with_project_store(|store| {
+                    memory_core::load_pending_foundry_jobs(store.connection())
+                        .map_err(|e| format!("load pending foundry jobs (project): {e}"))
+                }) {
+                    replayed += replay_from(jobs);
+                }
+
+                if replayed > 0 {
+                    eprintln!("[foundry] replayed {replayed} pending jobs from DB");
+                }
+            });
+        }
+
         seed_builtin_capabilities(&server)
             .map_err(|e| std::io::Error::other(format!("seed builtin capabilities: {e}")))?;
 

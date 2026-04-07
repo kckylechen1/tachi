@@ -372,6 +372,27 @@ pub fn init_schema(conn: &Connection) -> Result<(), MemoryError> {
             updated_at          TEXT NOT NULL DEFAULT ''
         );
 
+        -- Foundry job persistence (survives process restarts)
+        CREATE TABLE IF NOT EXISTS foundry_jobs (
+            id            TEXT PRIMARY KEY,
+            kind          TEXT NOT NULL,
+            lane          TEXT NOT NULL,
+            status        TEXT NOT NULL DEFAULT 'queued',
+            target_db     TEXT NOT NULL DEFAULT 'project',
+            named_project TEXT,
+            path_prefix   TEXT NOT NULL DEFAULT '/',
+            memory_ids    TEXT NOT NULL DEFAULT '[]',
+            target_agent_id TEXT,
+            requested_by  TEXT,
+            evidence_count INTEGER NOT NULL DEFAULT 0,
+            goal_count    INTEGER NOT NULL DEFAULT 1,
+            metadata      TEXT NOT NULL DEFAULT '{}',
+            created_at    TEXT NOT NULL DEFAULT '',
+            updated_at    TEXT NOT NULL DEFAULT ''
+        );
+        CREATE INDEX IF NOT EXISTS idx_foundry_jobs_status ON foundry_jobs(status);
+        CREATE INDEX IF NOT EXISTS idx_foundry_jobs_kind ON foundry_jobs(kind);
+
         -- Domain configuration for memory routing and per-domain GC
         CREATE TABLE IF NOT EXISTS domains (
             name              TEXT PRIMARY KEY,

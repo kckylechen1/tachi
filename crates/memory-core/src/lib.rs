@@ -32,6 +32,10 @@ pub use types::{
     RetentionPolicy, SearchResult, StatsResult,
 };
 pub use vault::{SecretType, VaultConfig, VaultEntry, VaultKeyRotation};
+pub use db::foundry_jobs::{
+    gc_foundry_jobs, insert_foundry_job, load_pending_foundry_jobs, update_foundry_job_status,
+    PersistedFoundryJob,
+};
 
 use rusqlite::Connection;
 use std::time::Duration;
