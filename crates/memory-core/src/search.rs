@@ -131,7 +131,7 @@ pub fn hybrid_search(
     // ── Channel 1: Vector ─────────────────────────────────────────────────────
     let vec_scores: HashMap<String, f64> = if opts.vec_available {
         if let Some(qv) = &opts.query_vec {
-            search_vec(conn, qv, n, opts.include_archived)?
+            search_vec(conn, qv, n, opts.include_archived, opts.path_prefix.as_deref())?
         } else {
             HashMap::new()
         }
@@ -140,7 +140,7 @@ pub fn hybrid_search(
     };
 
     // ── Channel 2: FTS5 ───────────────────────────────────────────────────────
-    let fts_scores = search_fts(conn, query, n, opts.include_archived)?;
+    let fts_scores = search_fts(conn, query, n, opts.include_archived, opts.path_prefix.as_deref())?;
 
     // ── Collect all candidate IDs ──────────────────────────────────────────────
     let candidate_ids: Vec<String> = vec_scores
@@ -167,26 +167,12 @@ pub fn hybrid_search(
         })
         .collect();
 
-    // ── Optional path-prefix filter ───────────────────────────────────────────
-    let entries_ref: HashMap<String, &MemoryEntry> = if let Some(prefix) = &opts.path_prefix {
-        entries_map
-            .iter()
-            .filter(|(_, e)| e.path.starts_with(prefix.as_str()))
-            .map(|(k, v)| (k.clone(), v))
-            .collect()
-    } else {
-        entries_map.iter().map(|(k, v)| (k.clone(), v)).collect()
-    };
-
-    if entries_ref.is_empty() {
-        return Ok(vec![]);
-    }
-
     // ── ACT-R access history (Spreading Activation: 越用越靠前) ──────────────
-    let candidate_ids_vec: Vec<String> = entries_ref.keys().cloned().collect();
+    let candidate_ids_vec: Vec<String> = entries_map.keys().cloned().collect();
     let access_times = get_access_times(conn, &candidate_ids_vec).unwrap_or_default();
 
     // ── Hybrid scoring with ACT-R enhancement ─────────────────────────────────
+    let entries_ref: HashMap<String, &MemoryEntry> = entries_map.iter().map(|(k, v)| (k.clone(), v)).collect();
     let scores = hybrid_score(
         &entries_ref,
         &vec_scores,

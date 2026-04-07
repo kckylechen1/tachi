@@ -329,11 +329,25 @@ pub(super) async fn handle_sync_memories(
 
     let memory_ids: Vec<String> = all_entries.iter().map(|(e, _)| e.id.clone()).collect();
 
-    let known_revisions = server.with_global_store(|store| {
+    let mut known_revisions = server.with_global_store(|store| {
         store
             .get_agent_known_revisions(&params.agent_id, &memory_ids)
             .map_err(|e| format!("Failed to get known revisions: {}", e))
     })?;
+
+    let known_revisions = if server.project_db_path.is_some() {
+        let mut project_known = server.with_project_store(|store| {
+            store
+                .get_agent_known_revisions(&params.agent_id, &memory_ids)
+                .map_err(|e| format!("Failed to get project known revisions: {}", e))
+        })?;
+        for (id, rev) in known_revisions {
+            project_known.entry(id).or_insert(rev);
+        }
+        project_known
+    } else {
+        known_revisions
+    };
 
     let mut diff_entries: Vec<serde_json::Value> = Vec::new();
     let mut sync_updates: Vec<(String, i64)> = Vec::new();
@@ -383,6 +397,13 @@ pub(super) async fn handle_sync_memories(
                     params.agent_id, e
                 )
             })?;
+        if server.project_db_path.is_some() {
+            let _ = server.with_project_store(|store| {
+                store
+                    .update_agent_known_state(&params.agent_id, &sync_updates)
+                    .map_err(|e| format!("Failed to update project agent state: {}", e))
+            });
+        }
     }
 
     serde_json::to_string(&json!({

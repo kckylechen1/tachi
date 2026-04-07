@@ -338,7 +338,7 @@ impl MemoryStore {
     }
 
     /// Record feedback for a hub capability invocation.
-    pub fn hub_record_feedback(&self, id: &str, success: bool, rating: Option<f64>) -> Result<(), MemoryError> {
+    pub fn hub_record_feedback(&self, id: &str, success: bool, rating: Option<f64>) -> Result<bool, MemoryError> {
         db::hub_record_feedback(&self.conn, id, success, rating)
     }
 

@@ -726,35 +726,61 @@ pub fn search_vec(
     query_vec: &[f32],
     top_k: usize,
     include_archived: bool,
+    path_prefix: Option<&str>,
 ) -> Result<HashMap<String, f64>, MemoryError> {
     let blob = serialize_f32(query_vec);
-    let mut stmt = conn.prepare(
-        r#"SELECT v.id, v.distance
-           FROM memories_vec v
-           JOIN memories m ON m.id = v.id
-           WHERE v.embedding MATCH ?1
-             AND k = ?3
-             AND (?2 = 1 OR m.archived = 0)
-           ORDER BY v.distance"#,
-    )?;
-
-    let rows = stmt.query_map(
-        params![blob, include_archived as i64, top_k as i64],
-        |row| {
-            let id: String = row.get(0)?;
-            let dist: f64 = row.get(1)?;
-            Ok((id, dist))
-        },
-    )?;
-
     let mut scores = HashMap::new();
-    for r in rows {
-        let (id, dist) = r?;
-        // sqlite-vec returns L2 / cosine distance depending on vec0 config;
-        // treat as cosine distance ∈ [0, 2] → similarity ∈ [0, 1]
-        let sim = (1.0 - dist / 2.0).clamp(0.0, 1.0);
-        scores.insert(id, sim);
+
+    if let Some(prefix) = path_prefix {
+        let pattern = format!("{}%", prefix.trim_end_matches('/'));
+        let mut stmt = conn.prepare(
+            r#"SELECT v.id, v.distance
+               FROM memories_vec v
+               JOIN memories m ON m.id = v.id
+               WHERE v.embedding MATCH ?1
+                 AND k = ?3
+                 AND (?2 = 1 OR m.archived = 0)
+                 AND (m.path LIKE ?4 OR m.path = ?5)
+               ORDER BY v.distance"#,
+        )?;
+        let rows = stmt.query_map(
+            params![blob, include_archived as i64, top_k as i64, &pattern, prefix.trim_end_matches('/')],
+            |row| {
+                let id: String = row.get(0)?;
+                let dist: f64 = row.get(1)?;
+                Ok((id, dist))
+            },
+        )?;
+        for r in rows {
+            let (id, dist) = r?;
+            let sim: f64 = (1.0 - dist / 2.0).clamp(0.0, 1.0);
+            scores.insert(id, sim);
+        }
+    } else {
+        let mut stmt = conn.prepare(
+            r#"SELECT v.id, v.distance
+               FROM memories_vec v
+               JOIN memories m ON m.id = v.id
+               WHERE v.embedding MATCH ?1
+                 AND k = ?3
+                 AND (?2 = 1 OR m.archived = 0)
+               ORDER BY v.distance"#,
+        )?;
+        let rows = stmt.query_map(
+            params![blob, include_archived as i64, top_k as i64],
+            |row| {
+                let id: String = row.get(0)?;
+                let dist: f64 = row.get(1)?;
+                Ok((id, dist))
+            },
+        )?;
+        for r in rows {
+            let (id, dist) = r?;
+            let sim: f64 = (1.0 - dist / 2.0).clamp(0.0, 1.0);
+            scores.insert(id, sim);
+        }
     }
+
     Ok(scores)
 }
 
@@ -767,8 +793,8 @@ pub fn search_fts(
     query: &str,
     limit: usize,
     include_archived: bool,
+    path_prefix: Option<&str>,
 ) -> Result<HashMap<String, f64>, MemoryError> {
-    // Sanitise query: remove potentially dangerous characters
     let safe_query: String = query
         .chars()
         .filter(|c| {
@@ -780,27 +806,48 @@ pub fn search_fts(
         return Ok(HashMap::new());
     }
 
-    // Use simple_query() for automatic CJK segmentation in MATCH clause
-    let mut stmt = conn.prepare(
-        r#"SELECT memories_fts.id, -bm25(memories_fts) AS score
-           FROM memories_fts
-           JOIN memories m ON m.id = memories_fts.id
-           WHERE memories_fts MATCH simple_query(?1)
-             AND (?2 = 1 OR m.archived = 0)
-           ORDER BY bm25(memories_fts)
-           LIMIT ?3"#,
-    )?;
+    let mut raw: Vec<(String, f64)> = if let Some(prefix) = path_prefix {
+        let pattern = format!("{}%", prefix.trim_end_matches('/'));
+        let mut stmt = conn.prepare(
+            r#"SELECT memories_fts.id, -bm25(memories_fts) AS score
+               FROM memories_fts
+               JOIN memories m ON m.id = memories_fts.id
+               WHERE memories_fts MATCH simple_query(?1)
+                 AND (?2 = 1 OR m.archived = 0)
+                 AND (m.path LIKE ?4 OR m.path = ?5)
+               ORDER BY bm25(memories_fts)
+               LIMIT ?3"#,
+        )?;
+        let rows = stmt.query_map(
+            params![safe_query, include_archived as i64, limit as i64, &pattern, prefix.trim_end_matches('/')],
+            |row| {
+                let id: String = row.get(0)?;
+                let score: f64 = row.get(1)?;
+                Ok((id, score))
+            },
+        )?;
+        rows.filter_map(|r| r.ok()).collect()
+    } else {
+        let mut stmt = conn.prepare(
+            r#"SELECT memories_fts.id, -bm25(memories_fts) AS score
+               FROM memories_fts
+               JOIN memories m ON m.id = memories_fts.id
+               WHERE memories_fts MATCH simple_query(?1)
+                 AND (?2 = 1 OR m.archived = 0)
+               ORDER BY bm25(memories_fts)
+               LIMIT ?3"#,
+        )?;
+        let rows = stmt.query_map(
+            params![safe_query, include_archived as i64, limit as i64],
+            |row| {
+                let id: String = row.get(0)?;
+                let score: f64 = row.get(1)?;
+                Ok((id, score))
+            },
+        )?;
+        rows.filter_map(|r| r.ok()).collect()
+    };
 
-    let rows = stmt.query_map(
-        params![safe_query, include_archived as i64, limit as i64],
-        |row| {
-            let id: String = row.get(0)?;
-            let score: f64 = row.get(1)?;
-            Ok((id, score))
-        },
-    )?;
-
-    let mut raw: Vec<(String, f64)> = rows.filter_map(|r| r.ok()).collect();
     if raw.is_empty() {
         return Ok(HashMap::new());
     }
@@ -1713,7 +1760,7 @@ pub fn hub_record_feedback(
     id: &str,
     success: bool,
     rating: Option<f64>,
-) -> Result<(), MemoryError> {
+) -> Result<bool, MemoryError> {
     let now = now_utc_iso();
     // Update counters
     conn.execute(
@@ -1727,8 +1774,14 @@ pub fn hub_record_feedback(
         params![success as i32, (!success) as i32, &now, id,],
     )?;
 
+    let matched = conn.changes() > 0;
+    if !matched {
+        return Ok(false);
+    }
+
     // Update running average rating if provided
     if let Some(r) = rating {
+        let r = r.clamp(0.0, 5.0);
         conn.execute(
             "UPDATE hub_capabilities SET
                avg_rating = CASE
@@ -1740,7 +1793,7 @@ pub fn hub_record_feedback(
         )?;
     }
 
-    Ok(())
+    Ok(true)
 }
 
 /// Delete a hub capability. Returns true if found and deleted.
@@ -2047,7 +2100,7 @@ mod tests {
         let e = make_entry("abc", "Rust is a systems programming language");
         upsert(&mut conn, &e, false).unwrap();
 
-        let results = search_fts(&conn, "systems programming", 5, false).unwrap();
+        let results = search_fts(&conn, "systems programming", 5, false, None).unwrap();
         assert!(results.contains_key("abc"), "expected 'abc' in FTS results");
     }
 
@@ -2059,7 +2112,7 @@ mod tests {
         e.text = "updated text".into();
         upsert(&mut conn, &e, false).unwrap();
 
-        let results = search_fts(&conn, "updated", 5, false).unwrap();
+        let results = search_fts(&conn, "updated", 5, false, None).unwrap();
         assert!(results.contains_key("dup"));
     }
 
@@ -2125,7 +2178,7 @@ mod tests {
         upsert(&mut conn, &e, true).unwrap();
 
         let query = vec![0.1_f32; 1024];
-        let results = search_vec(&conn, &query, 3, false).unwrap();
+        let results = search_vec(&conn, &query, 3, false, None).unwrap();
         assert!(results.contains_key("vec-1"));
     }
 
@@ -2149,7 +2202,7 @@ mod tests {
         assert_eq!(count, 0);
 
         // Verify it's gone from FTS
-        let fts_results = search_fts(&conn, "deleted", 5, false).unwrap();
+        let fts_results = search_fts(&conn, "deleted", 5, false, None).unwrap();
         assert!(!fts_results.contains_key("del-1"));
     }
 

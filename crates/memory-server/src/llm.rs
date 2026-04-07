@@ -227,7 +227,8 @@ impl LlmClient {
     }
 
     /// Generate L0 summary using SUMMARY_PROMPT
-    pub async fn generate_summary(&self, text: &str) -> Result<String, String> {
+    /// Returns (summary, is_fallback). On LLM failure, falls back to truncation.
+    pub async fn generate_summary(&self, text: &str) -> Result<(String, bool), String> {
         match self
             .call_llm(
                 crate::prompts::SUMMARY_PROMPT,
@@ -238,10 +239,10 @@ impl LlmClient {
             )
             .await
         {
-            Ok(summary) => Ok(summary),
+            Ok(summary) => Ok((summary, false)),
             Err(_) => {
                 // Fallback to truncation on error
-                Ok(text.chars().take(100).collect())
+                Ok((text.chars().take(100).collect(), true))
             }
         }
     }
@@ -269,14 +270,19 @@ impl LlmClient {
     /// Remove ```json markdown code fences from response
     pub fn strip_code_fence(text: &str) -> &str {
         let text = text.trim();
-        if text.starts_with("```json") {
-            text[7..].trim()
+        let start = if text.starts_with("```json") {
+            &text[7..]
         } else if text.starts_with("```") {
-            text[3..].trim()
+            &text[3..]
         } else {
-            text
+            return text.trim();
+        };
+        let inner = start.trim();
+        // Find the LAST ``` to handle nested fences inside JSON
+        if let Some(idx) = inner.rfind("```") {
+            inner[..idx].trim()
+        } else {
+            inner
         }
-        .trim_end_matches("```")
-        .trim()
     }
 }

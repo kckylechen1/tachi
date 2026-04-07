@@ -30,7 +30,7 @@ pub(super) async fn handle_save_memory(
         path: params.path,
         summary,
         text: params.text,
-        importance: params.importance,
+        importance: params.importance.clamp(0.0, 1.0),
         timestamp: timestamp.clone(),
         category: params.category,
         topic: params.topic,
@@ -59,26 +59,44 @@ pub(super) async fn handle_save_memory(
     let enrich_text = entry.text.clone();
     let enrich_revision = 1_i64;
     tokio::spawn(async move {
-        let mut new_vec: Option<Vec<f32>> = None;
-        let mut new_summary: Option<String> = None;
-
-        if needs_embedding {
-            match server_clone
-                .llm
-                .embed_voyage(&enrich_text, "document")
-                .await
-            {
-                Ok(vec) => new_vec = Some(vec),
-                Err(e) => eprintln!("[enrichment] embedding failed for {enrich_id}: {e}"),
+        let embed_fut = async {
+            if needs_embedding {
+                match server_clone
+                    .llm
+                    .embed_voyage(&enrich_text, "document")
+                    .await
+                {
+                    Ok(vec) => Some(vec),
+                    Err(e) => {
+                        eprintln!("[enrichment] embedding failed for {enrich_id}: {e}");
+                        None
+                    }
+                }
+            } else {
+                None
             }
-        }
+        };
 
-        if needs_summary {
-            match server_clone.llm.generate_summary(&enrich_text).await {
-                Ok(s) => new_summary = Some(s),
-                Err(e) => eprintln!("[enrichment] summary failed for {enrich_id}: {e}"),
+        let summary_fut = async {
+            if needs_summary {
+                match server_clone.llm.generate_summary(&enrich_text).await {
+                    Ok((s, fallback)) => {
+                        if fallback {
+                            eprintln!("[enrichment] summary fallback to truncation for {enrich_id}");
+                        }
+                        Some(s)
+                    }
+                    Err(e) => {
+                        eprintln!("[enrichment] summary failed for {enrich_id}: {e}");
+                        None
+                    }
+                }
+            } else {
+                None
             }
-        }
+        };
+
+        let (new_vec, new_summary) = tokio::join!(embed_fut, summary_fut);
 
         if new_vec.is_some() || new_summary.is_some() {
             match server_clone.with_store_for_scope(target_db, |store| {
@@ -111,10 +129,11 @@ pub(super) async fn handle_save_memory(
         let auto_link_server = server.clone();
         let auto_link_id = id.clone();
         let auto_link_entities = entry.entities.clone();
+        let auto_link_db = target_db;
         tokio::spawn(async move {
             for entity in &auto_link_entities {
                 let query = entity.clone();
-                if let Ok(results) = auto_link_server.with_global_store(|store| {
+                if let Ok(results) = auto_link_server.with_store_for_scope(auto_link_db, |store| {
                     store
                         .search(
                             &query,
@@ -146,7 +165,7 @@ pub(super) async fn handle_save_memory(
                                 valid_from: String::new(),
                                 valid_to: None,
                             };
-                            let _ = auto_link_server.with_global_store(|store| {
+                            let _ = auto_link_server.with_store_for_scope(auto_link_db, |store| {
                                 store.add_edge(&edge).map_err(|e| format!("{}", e))
                             });
                         }
@@ -166,8 +185,12 @@ pub(super) async fn handle_search_memory(
     params: SearchMemoryParams,
 ) -> Result<String, String> {
     if memory_core::should_skip_query(&params.query) {
-        return serde_json::to_string(&json!([]))
-            .map_err(|e| format!("Failed to serialize: {}", e));
+        return serde_json::to_string(&json!({
+            "status": "skipped",
+            "reason": "Query detected as noise (greeting, command, or affirmation). Not worth searching.",
+            "results": []
+        }))
+        .map_err(|e| format!("Failed to serialize: {}", e));
     }
 
     let pipeline_enabled = server.pipeline_enabled;
@@ -200,6 +223,39 @@ pub(super) async fn handle_search_memory(
             .partial_cmp(&a.0.score.final_score)
             .unwrap_or(std::cmp::Ordering::Equal)
     });
+
+    // Re-normalize cross-DB scores: each DB's scores are independently normalized,
+    // so we re-scale each group by its own max to make them comparable.
+    {
+        let global_max = combined_results
+            .iter()
+            .filter(|(_, s)| matches!(s, DbScope::Global))
+            .map(|(r, _)| r.score.final_score)
+            .fold(0.0_f64, f64::max);
+        let project_max = combined_results
+            .iter()
+            .filter(|(_, s)| matches!(s, DbScope::Project))
+            .map(|(r, _)| r.score.final_score)
+            .fold(0.0_f64, f64::max);
+
+        if global_max > 0.0 || project_max > 0.0 {
+            let scale_global = if global_max > 0.0 { 1.0 / global_max } else { 1.0 };
+            let scale_project = if project_max > 0.0 { 1.0 / project_max } else { 1.0 };
+            for (result, db_scope) in &mut combined_results {
+                let scale = match db_scope {
+                    DbScope::Global => scale_global,
+                    DbScope::Project => scale_project,
+                };
+                result.score.final_score *= scale;
+            }
+        }
+        combined_results.sort_by(|a, b| {
+            b.0.score
+                .final_score
+                .partial_cmp(&a.0.score.final_score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+    }
 
     let mut seen_ids = HashSet::new();
     let mut deduped_results: Vec<(memory_core::SearchResult, DbScope)> = Vec::new();
