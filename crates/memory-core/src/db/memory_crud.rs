@@ -323,8 +323,10 @@ pub fn search_vec(
     query_vec: &[f32],
     top_k: usize,
     include_archived: bool,
+    path_prefix: Option<&str>,
 ) -> Result<HashMap<String, f64>, MemoryError> {
     let blob = serialize_f32(query_vec);
+    let path_like = path_prefix.map(|prefix| format!("{prefix}%"));
     let mut stmt = conn.prepare(
         r#"SELECT v.id, v.distance
            FROM memories_vec v
@@ -332,11 +334,12 @@ pub fn search_vec(
            WHERE v.embedding MATCH ?1
              AND k = ?3
              AND (?2 = 1 OR m.archived = 0)
+             AND (?4 IS NULL OR m.path LIKE ?4)
            ORDER BY v.distance"#,
     )?;
 
     let rows = stmt.query_map(
-        params![blob, include_archived as i64, top_k as i64],
+        params![blob, include_archived as i64, top_k as i64, path_like],
         |row| {
             let id: String = row.get(0)?;
             let dist: f64 = row.get(1)?;
@@ -364,6 +367,7 @@ pub fn search_fts(
     query: &str,
     limit: usize,
     include_archived: bool,
+    path_prefix: Option<&str>,
 ) -> Result<HashMap<String, f64>, MemoryError> {
     // Sanitise query: remove potentially dangerous characters
     let safe_query: String = query
@@ -377,6 +381,7 @@ pub fn search_fts(
         return Ok(HashMap::new());
     }
 
+    let path_like = path_prefix.map(|prefix| format!("{prefix}%"));
     // Use simple_query() for automatic CJK segmentation in MATCH clause
     let mut stmt = conn.prepare(
         r#"SELECT memories_fts.id, -bm25(memories_fts) AS score
@@ -384,12 +389,13 @@ pub fn search_fts(
            JOIN memories m ON m.id = memories_fts.id
            WHERE memories_fts MATCH simple_query(?1)
              AND (?2 = 1 OR m.archived = 0)
+             AND (?4 IS NULL OR m.path LIKE ?4)
            ORDER BY bm25(memories_fts)
            LIMIT ?3"#,
     )?;
 
     let rows = stmt.query_map(
-        params![safe_query, include_archived as i64, limit as i64],
+        params![safe_query, include_archived as i64, limit as i64, path_like],
         |row| {
             let id: String = row.get(0)?;
             let score: f64 = row.get(1)?;

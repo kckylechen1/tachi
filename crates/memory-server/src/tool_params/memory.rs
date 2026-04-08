@@ -742,20 +742,29 @@ pub(crate) fn fact_to_entry(
     source: &str,
     metadata: serde_json::Value,
 ) -> Option<MemoryEntry> {
+    fn string_list(value: &serde_json::Value) -> Vec<String> {
+        value
+            .as_array()
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(|item| item.as_str().map(str::trim))
+                    .filter(|item| !item.is_empty())
+                    .map(String::from)
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
     let text = fact["text"].as_str().unwrap_or("").to_string();
     if text.is_empty() {
         return None;
     }
     let topic = fact["topic"].as_str().unwrap_or("").to_string();
     let importance = fact["importance"].as_f64().unwrap_or(0.7).clamp(0.0, 1.0);
-    let keywords: Vec<String> = fact["keywords"]
-        .as_array()
-        .map(|a| {
-            a.iter()
-                .filter_map(|v| v.as_str().map(String::from))
-                .collect()
-        })
-        .unwrap_or_default();
+    let keywords = string_list(&fact["keywords"]);
+    let persons = string_list(&fact["persons"]);
+    let entities = string_list(&fact["entities"]);
     let scope_raw = fact["scope"].as_str().unwrap_or("general");
     let scope = match scope_raw {
         "user" | "project" | "general" => scope_raw.to_string(),
@@ -772,8 +781,8 @@ pub(crate) fn fact_to_entry(
         category: "fact".to_string(),
         topic,
         keywords,
-        persons: vec![],
-        entities: vec![],
+        persons,
+        entities,
         location: String::new(),
         source: source.to_string(),
         scope,

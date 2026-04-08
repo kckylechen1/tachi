@@ -51,7 +51,7 @@ pub(super) async fn handle_save_memory(
         path,
         summary,
         text: params.text,
-        importance: params.importance,
+        importance: params.importance.clamp(0.0, 1.0),
         timestamp: timestamp.clone(),
         category,
         topic,

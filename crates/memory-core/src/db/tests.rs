@@ -47,7 +47,7 @@ fn upsert_and_fts() {
     let e = make_entry("abc", "Rust is a systems programming language");
     upsert(&mut conn, &e, false).unwrap();
 
-    let results = search_fts(&conn, "systems programming", 5, false).unwrap();
+    let results = search_fts(&conn, "systems programming", 5, false, None).unwrap();
     assert!(results.contains_key("abc"), "expected 'abc' in FTS results");
 }
 
@@ -59,7 +59,7 @@ fn upsert_idempotent() {
     e.text = "updated text".into();
     upsert(&mut conn, &e, false).unwrap();
 
-    let results = search_fts(&conn, "updated", 5, false).unwrap();
+    let results = search_fts(&conn, "updated", 5, false, None).unwrap();
     assert!(results.contains_key("dup"));
 }
 
@@ -125,7 +125,7 @@ fn search_vec_knn_with_k_constraint() {
     upsert(&mut conn, &e, true).unwrap();
 
     let query = vec![0.1_f32; 1024];
-    let results = search_vec(&conn, &query, 3, false).unwrap();
+    let results = search_vec(&conn, &query, 3, false, None).unwrap();
     assert!(results.contains_key("vec-1"));
 }
 
@@ -149,8 +149,24 @@ fn delete_existing() {
     assert_eq!(count, 0);
 
     // Verify it's gone from FTS
-    let fts_results = search_fts(&conn, "deleted", 5, false).unwrap();
+    let fts_results = search_fts(&conn, "deleted", 5, false, None).unwrap();
     assert!(!fts_results.contains_key("del-1"));
+}
+
+#[test]
+fn search_fts_respects_path_prefix() {
+    let mut conn = make_conn();
+    let mut project_entry = make_entry("proj-1", "systems programming with Rust");
+    project_entry.path = "/project/rust".into();
+    upsert(&mut conn, &project_entry, false).unwrap();
+
+    let mut docs_entry = make_entry("docs-1", "systems programming with Rust");
+    docs_entry.path = "/docs/rust".into();
+    upsert(&mut conn, &docs_entry, false).unwrap();
+
+    let results = search_fts(&conn, "systems programming", 5, false, Some("/project")).unwrap();
+    assert!(results.contains_key("proj-1"));
+    assert!(!results.contains_key("docs-1"));
 }
 
 #[test]

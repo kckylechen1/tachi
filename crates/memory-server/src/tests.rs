@@ -4478,6 +4478,97 @@ async fn hub_feedback_records_success_and_rating() {
 }
 
 #[tokio::test]
+async fn hub_feedback_returns_not_recorded_for_missing_capability() {
+    let server = make_server();
+
+    let feedback = server
+        .hub_feedback(Parameters(HubFeedbackParams {
+            id: "mcp:missing-capability".to_string(),
+            success: true,
+            rating: Some(7.5),
+        }))
+        .await
+        .expect("hub_feedback should succeed");
+
+    let feedback_json: serde_json::Value =
+        serde_json::from_str(&feedback).expect("feedback should be valid JSON");
+    assert_eq!(feedback_json["recorded"], json!(false));
+    assert_eq!(feedback_json["db"], json!("global"));
+}
+
+#[tokio::test]
+async fn save_memory_clamps_importance_into_valid_range() {
+    let server = make_server();
+
+    let saved = server
+        .save_memory(Parameters(SaveMemoryParams {
+            text: "importance clamp regression".to_string(),
+            summary: "importance clamp".to_string(),
+            path: "/project/tests".to_string(),
+            importance: 9.9,
+            category: "fact".to_string(),
+            topic: "testing".to_string(),
+            keywords: vec!["importance".to_string()],
+            persons: vec![],
+            entities: vec![],
+            location: String::new(),
+            scope: "project".to_string(),
+            vector: None,
+            id: None,
+            force: true,
+            auto_link: false,
+            project: None,
+            retention_policy: None,
+            domain: None,
+        }))
+        .await
+        .expect("save_memory should succeed");
+
+    let saved_json: serde_json::Value =
+        serde_json::from_str(&saved).expect("save should be valid JSON");
+    let id = saved_json["id"].as_str().expect("save should return id");
+    let fetched = server
+        .get_memory(Parameters(GetMemoryParams {
+            id: id.to_string(),
+            include_archived: false,
+            project: None,
+        }))
+        .await
+        .expect("get_memory should succeed");
+    let fetched_json: serde_json::Value =
+        serde_json::from_str(&fetched).expect("get should be valid JSON");
+    assert_eq!(fetched_json["importance"], json!(1.0));
+}
+
+#[test]
+fn strip_code_fence_uses_last_closing_fence() {
+    let raw = "```json\n{\"outer\":\"ok\",\"inner\":\"```json\\n{}\\n```\"}\n```";
+    let stripped = crate::llm::LlmClient::strip_code_fence(raw);
+    assert_eq!(stripped, "{\"outer\":\"ok\",\"inner\":\"```json\\n{}\\n```\"}");
+}
+
+#[test]
+fn fact_to_entry_preserves_persons_and_entities() {
+    let fact = json!({
+        "text": "Kyle migrated Sigil search",
+        "topic": "migration",
+        "keywords": ["sigil", "search"],
+        "persons": ["Kyle", ""],
+        "entities": ["Sigil", "memory-server"],
+        "scope": "project",
+        "importance": 0.9
+    });
+
+    let entry = crate::tool_params::fact_to_entry(&fact, "extraction", json!({}))
+        .expect("fact_to_entry should build an entry");
+    assert_eq!(entry.persons, vec!["Kyle".to_string()]);
+    assert_eq!(
+        entry.entities,
+        vec!["Sigil".to_string(), "memory-server".to_string()]
+    );
+}
+
+#[tokio::test]
 async fn hub_stats_returns_capability_counts() {
     let server = make_server();
 

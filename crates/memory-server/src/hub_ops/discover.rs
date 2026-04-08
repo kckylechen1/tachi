@@ -134,25 +134,29 @@ pub(crate) async fn handle_hub_feedback(
                 .map_err(|e| format!("hub get: {e}"))
         })?;
         if found.is_some() {
-            server.with_project_store(|store| {
+            let recorded = server.with_project_store(|store| {
                 store
                     .hub_record_feedback(&params.id, params.success, params.rating)
                     .map_err(|e| format!("feedback: {e}"))
             })?;
-            let _ = crate::wiki_ops::refresh_skill_quality_guards(server);
+            if recorded {
+                let _ = crate::wiki_ops::refresh_skill_quality_guards(server);
+            }
             return serde_json::to_string(
-                &json!({"id": params.id, "recorded": true, "db": "project"}),
+                &json!({"id": params.id, "recorded": recorded, "db": "project"}),
             )
             .map_err(|e| format!("serialize: {e}"));
         }
     }
-    server.with_global_store(|store| {
+    let recorded = server.with_global_store(|store| {
         store
             .hub_record_feedback(&params.id, params.success, params.rating)
             .map_err(|e| format!("feedback: {e}"))
     })?;
-    let _ = crate::wiki_ops::refresh_skill_quality_guards(server);
-    serde_json::to_string(&json!({"id": params.id, "recorded": true, "db": "global"}))
+    if recorded {
+        let _ = crate::wiki_ops::refresh_skill_quality_guards(server);
+    }
+    serde_json::to_string(&json!({"id": params.id, "recorded": recorded, "db": "global"}))
         .map_err(|e| format!("serialize: {e}"))
 }
 

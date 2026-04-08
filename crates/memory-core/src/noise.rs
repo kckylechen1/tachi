@@ -19,6 +19,12 @@ lazy_static! {
         Regex::new(r"(?i)i wasn'?t able to find").unwrap(),
         Regex::new(r"(?i)no (relevant )?memories found").unwrap(),
         Regex::new(r"(?i)i don'?t have access to").unwrap(),
+        Regex::new(r"(?i)^i apologize\b").unwrap(),
+        Regex::new(r"(?i)^as an ai\b").unwrap(),
+        Regex::new(r"(?i)^i cannot\b").unwrap(),
+        Regex::new(r"(?i)^i can'?t\b").unwrap(),
+        Regex::new(r"(?i)^i am unable to\b").unwrap(),
+        Regex::new(r"(?i)^i'?m unable to\b").unwrap(),
     ];
 
     /// User-side meta-question patterns
@@ -207,6 +213,8 @@ mod tests {
         assert!(is_noise_text("I don't recall anything relevant"));
         assert!(is_noise_text("No relevant memories found"));
         assert!(is_noise_text("I wasn't able to find anything"));
+        assert!(is_noise_text("I apologize, but I can't help with that"));
+        assert!(is_noise_text("As an AI, I cannot access that information"));
     }
 
     #[test]

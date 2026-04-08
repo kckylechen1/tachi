@@ -132,6 +132,7 @@ fn build_ingest_entry(
     } else {
         summary_from_text(&text)
     };
+    let importance = importance.clamp(0.0, 1.0);
 
     MemoryEntry {
         id,

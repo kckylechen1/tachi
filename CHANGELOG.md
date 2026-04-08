@@ -5,6 +5,23 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.15.1] - 2026-04-08
+
+### Fixed
+- **Hub feedback truthfulness**: `hub_record_feedback` now returns whether a capability record was actually updated. Missing hub items correctly surface `"recorded": false` instead of silently reporting success.
+- **Search path-prefix filtering**: `search_vec` and `search_fts` now push `path_prefix` filtering down into SQL via `m.path LIKE ?`, reducing noisy candidates before scoring.
+- **Importance and rating bounds**: `save_memory`, pipeline ingestion, and hub feedback now clamp invalid numeric inputs into safe ranges (`importance` to `0.0..=1.0`, `rating` to `0.0..=5.0`).
+- **Nested fenced JSON extraction**: `strip_code_fence` now trims against the last closing fence, avoiding truncation when model output contains nested fenced snippets.
+- **Projection test/runtime roots**: Foundry projection root detection now includes the workspace root in addition to the current directory and Git root, fixing rooted write validation in workspace-driven runs.
+
+### Changed
+- **Extraction schema enrichment**: prompt and parser paths now preserve `persons` and `entities` fields when distilling structured facts into memory entries.
+- **Noise filtering hardened**: AI boilerplate denial phrases such as `I apologize`, `As an AI`, and `I cannot` are now treated as ignorable noise on ingest.
+- **All crates and packages bumped to 0.15.1**: `memory-core`, `memory-node`, `memory-python`, `memory-server`, `integrations/openclaw`, and npm optionalDependencies.
+
+### Tests
+- **Regression coverage expanded**: added tests for hub-feedback misses, importance clamping, nested code-fence stripping, `persons` / `entities` extraction, FTS `path_prefix` filtering, and new noise-denial patterns.
+
 ## [0.15.0] - 2026-04-06
 
 ### Added

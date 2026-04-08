@@ -653,6 +653,12 @@ fn projection_allowed_roots() -> Vec<std::path::PathBuf> {
     if let Ok(cwd) = std::env::current_dir() {
         roots.push(cwd);
     }
+    if let Some(workspace_root) = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(|path| path.parent())
+    {
+        roots.push(workspace_root.to_path_buf());
+    }
     if let Some(git_root) = find_git_root() {
         roots.push(git_root);
     }

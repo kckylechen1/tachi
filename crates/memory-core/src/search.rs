@@ -138,7 +138,7 @@ pub fn hybrid_search(
     // ── Channel 1: Vector ─────────────────────────────────────────────────────
     let vec_scores: HashMap<String, f64> = if opts.vec_available {
         if let Some(qv) = &opts.query_vec {
-            search_vec(conn, qv, n, opts.include_archived)?
+            search_vec(conn, qv, n, opts.include_archived, opts.path_prefix.as_deref())?
         } else {
             HashMap::new()
         }
@@ -147,7 +147,7 @@ pub fn hybrid_search(
     };
 
     // ── Channel 2: FTS5 ───────────────────────────────────────────────────────
-    let fts_scores = search_fts(conn, query, n, opts.include_archived)?;
+    let fts_scores = search_fts(conn, query, n, opts.include_archived, opts.path_prefix.as_deref())?;
 
     // ── Collect all candidate IDs ──────────────────────────────────────────────
     let candidate_ids: Vec<String> = vec_scores
