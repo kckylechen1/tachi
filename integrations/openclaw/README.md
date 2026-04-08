@@ -53,6 +53,7 @@ curl -fsSL https://raw.githubusercontent.com/kckylechen1/tachi/main/scripts/inst
 | 变量 | 必填 | 说明 |
 |------|------|------|
 | `TACHI_BIN` / `OPENCLAW_MEMORY_SERVER_BIN` | 否 | 显式指定 `tachi` / `memory-server` 二进制路径，优先于 PATH |
+| `TACHI_OPENCLAW_EXPERIMENTAL_TACHI_TOOLS` | 否 | 设为 `1` / `true` 时，重新暴露 `memory_delete`、`compact_context` 与一组直通 Tachi 的 passthrough tools |
 | `MEMORY_BRIDGE_CAPTURE_MIN_CHARS` | 否 | 自动捕获最小字符数阈值 |
 | `MEMORY_BRIDGE_CAPTURE_TRIGGERS` | 否 | 自动捕获关键词列表 |
 
@@ -68,6 +69,8 @@ curl -fsSL https://raw.githubusercontent.com/kckylechen1/tachi/main/scripts/inst
 | `memory_save` | 显式写入 durable memory |
 | `memory_get` | 按 ID 获取单条记忆 |
 | `memory_graph` | 只读查看记忆图谱邻域 |
+
+实验性直通 tools 默认关闭；如启用 `TACHI_OPENCLAW_EXPERIMENTAL_TACHI_TOOLS`，插件还会暴露 `memory_delete`、`compact_context`、`tachi_kanban_*`、`tachi_ghost_*`、`tachi_vault_*` 等高阶 passthrough。
 
 ## 注册的 Hooks
 

@@ -49,6 +49,7 @@ export type BridgeConfig = {
   shadowStorePath: string; // Keep for migration only
   auditLogPath: string;
   topK: number;
+  exposeExperimentalTachiTools: boolean;
   captureMinChars: number;
   captureTriggerKeywords: string[];
   selfEvolutionAgents: string[];
@@ -69,6 +70,9 @@ export const defaultConfig: BridgeConfig = {
   ),
   auditLogPath: path.resolve(pluginDataDir, "audit-log.jsonl"),
   topK: 6,
+  exposeExperimentalTachiTools:
+    process.env.TACHI_OPENCLAW_EXPERIMENTAL_TACHI_TOOLS === "1" ||
+    process.env.TACHI_OPENCLAW_EXPERIMENTAL_TACHI_TOOLS === "true",
   captureMinChars: Number(process.env.MEMORY_BRIDGE_CAPTURE_MIN_CHARS || 24),
   captureTriggerKeywords: (
     process.env.MEMORY_BRIDGE_CAPTURE_TRIGGERS ||

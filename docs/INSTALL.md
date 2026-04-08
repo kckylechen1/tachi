@@ -203,6 +203,33 @@ Once connected, Tachi exposes 77+ MCP tools organized into layers:
 ### Utilities
 `skill_evolve`, `run_skill`, `sync_memories`, `tachi_init_project_db`, `tachi_audit_log`, `dlq_list`, `dlq_retry`, `get_pipeline_status`
 
+### Tool Surface Selection
+
+Tachi does not need to expose the full tool catalog to every host. Use `--profile` or `TACHI_PROFILE` to select an additive surface bundle:
+
+- `observe` — read-only memory + capability recommendation
+- `remember` — `observe` + `save_memory`, `extract_facts`, `run_skill`
+- `coordinate` — `remember` + ghost / kanban / handoff tools
+- `operate` — `remember` + runtime hooks and gateway/evolution helpers
+- `admin` — full surface
+
+Host aliases:
+
+- `codex`, `claude`, `cursor`, `trae`, `ide`, `agent` → `remember`
+- `antigravity` → `coordinate`
+- `workflow` → `coordinate + operate`
+- `openclaw`, `runtime`, `adapter`, `ops` → `operate`
+
+Examples:
+
+```bash
+tachi --profile remember
+TACHI_PROFILE=antigravity tachi
+TACHI_PROFILE=observe+coordinate tachi
+```
+
+If no profile is specified, Tachi keeps the historical `admin` default for compatibility. New host integrations should set an explicit surface.
+
 ---
 
 ## Troubleshooting

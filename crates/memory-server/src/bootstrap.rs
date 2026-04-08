@@ -1398,7 +1398,7 @@ async fn tokio_main(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         match crate::profiles::parse_tool_profile(raw_profile) {
             Some(profile) => server.set_tool_profile(Some(profile)),
             None => eprintln!(
-                "Ignoring unknown tool profile '{}'; expected one of ide | runtime | workflow | admin",
+                "Ignoring unknown tool profile '{}'; expected observe | remember | coordinate | operate | admin or a compatible host alias",
                 raw_profile
             ),
         }
@@ -1677,10 +1677,10 @@ async fn tokio_main(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         server.global_vec_available, server.project_vec_available
     );
     eprintln!(
-        "Tool profile: {}",
+        "Tool surface: {}",
         server
             .active_tool_profile()
-            .map(|profile| profile.as_str().to_string())
+            .map(|profile| profile.as_str())
             .unwrap_or_else(|| "admin".to_string())
     );
 

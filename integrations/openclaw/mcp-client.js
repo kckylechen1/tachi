@@ -154,7 +154,7 @@ export class MemoryMcpClient {
         const env = {
             ...process.env,
             MEMORY_DB_PATH: this.dbPath,
-            TACHI_PROFILE: process.env.TACHI_PROFILE || "runtime",
+            TACHI_PROFILE: process.env.TACHI_PROFILE || "openclaw",
         };
         const candidates = [
             // First candidate: explicit global-db, no project db (clean isolation)

@@ -26,7 +26,7 @@ pub(crate) struct Cli {
     #[arg(long)]
     pub no_project_db: bool,
 
-    /// Built-in tool surface profile: ide | runtime | workflow | admin
+    /// Built-in tool surface bundles or host alias, e.g. remember, observe+coordinate, openclaw, admin
     #[arg(long)]
     pub profile: Option<String>,
 

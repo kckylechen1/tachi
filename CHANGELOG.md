@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+- **Tool surface bundles**: Replaced mutually exclusive tool profiles with additive surface bundles: `observe`, `remember`, `coordinate`, `operate`, and `admin`.
+- **Compatibility default**: Tachi still keeps `admin` as the implicit no-profile default, but host aliases and docs now steer new integrations toward explicit least-privilege bundles.
+- **Host alias mapping**: `antigravity` now resolves to the coordination surface, while `openclaw` resolves to the runtime/operator surface. OpenClaw’s embedded client now sets `TACHI_PROFILE=openclaw`.
+- **Capability-first agent surface**: `run_skill` is now part of the normal agent-facing write surface, while raw hub/pack/vault/vc governance tools remain admin-only.
+
 ## [0.15.1] - 2026-04-08
 
 ### Fixed

@@ -105,7 +105,7 @@ Examples:
 These should be:
 
 - hidden by default
-- profile-gated
+- surface-gated
 - exposed only to the right host or operator flow
 
 The key rule is that workflow tools should not be mixed into the default kernel surface.
@@ -169,40 +169,46 @@ Tachi should know about them well enough to recommend and orchestrate them, even
 
 ## Default Exposure Model
 
-### Agent-facing
+Tachi now expresses exposure through additive bundles instead of mutually exclusive profiles.
 
-- `memory_search`
-- `memory_save`
-- `memory_get`
+### `observe`
 
-### Runtime-only
-
-- `recall_context`
-- `capture_session`
-- `compact_context`
-
-### Workflow-gated
-
-- `ghost_*`
-- kanban / delegation / handoff
-- evolution review / projection
-
-### Admin-only
-
-- hub
-- vault
-- sandbox
-- pack
-- vc
-- dlq
-
-### Capability-facing
-
-First-pass implementation is now available for direct MCP hosts and operator flows.
-
+- `search_memory`
+- `get_memory`
+- `memory_graph`
+- `list_memories`
+- `memory_stats`
+- `get_edges`
 - `recommend_capability`
 - `recommend_skill`
 - `recommend_toolchain`
+- `prepare_capability_bundle`
+
+### `remember`
+
+- `observe` +
+- `save_memory`
+- `extract_facts`
+- `run_skill`
+
+### `coordinate`
+
+- `remember` +
+- `ghost_*`
+- kanban / delegation / handoff
+
+### `operate`
+
+- `remember` +
+- `recall_context`
+- `capture_session`
+- `compact_context`
+- evolution queue / review / projection helpers
+- `hub_call`
+
+### `admin`
+
+- full surface, including hub governance, pack, vc, vault, sandbox, and destructive operations
 
 ## Why This Matters
 

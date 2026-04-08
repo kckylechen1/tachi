@@ -1,31 +1,125 @@
 use rmcp::model::Tool;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum ToolProfile {
-    Ide,
-    Runtime,
-    Workflow,
-    Admin,
+enum ToolBundle {
+    Observe,
+    Remember,
+    Coordinate,
+    Operate,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct ToolProfile {
+    observe: bool,
+    remember: bool,
+    coordinate: bool,
+    operate: bool,
+    admin: bool,
 }
 
 impl ToolProfile {
-    pub(super) fn as_str(self) -> &'static str {
-        match self {
-            Self::Ide => "ide",
-            Self::Runtime => "runtime",
-            Self::Workflow => "workflow",
-            Self::Admin => "admin",
+    const fn observe() -> Self {
+        Self {
+            observe: true,
+            remember: false,
+            coordinate: false,
+            operate: false,
+            admin: false,
+        }
+    }
+
+    const fn remember() -> Self {
+        Self {
+            observe: true,
+            remember: true,
+            coordinate: false,
+            operate: false,
+            admin: false,
+        }
+    }
+
+    const fn coordinate() -> Self {
+        Self {
+            observe: true,
+            remember: true,
+            coordinate: true,
+            operate: false,
+            admin: false,
+        }
+    }
+
+    const fn operate() -> Self {
+        Self {
+            observe: true,
+            remember: true,
+            coordinate: false,
+            operate: true,
+            admin: false,
+        }
+    }
+
+    const fn admin() -> Self {
+        Self {
+            observe: true,
+            remember: true,
+            coordinate: true,
+            operate: true,
+            admin: true,
+        }
+    }
+
+    fn merge(self, other: Self) -> Self {
+        Self {
+            observe: self.observe || other.observe,
+            remember: self.remember || other.remember,
+            coordinate: self.coordinate || other.coordinate,
+            operate: self.operate || other.operate,
+            admin: self.admin || other.admin,
+        }
+    }
+
+    fn allows(self, bundle: ToolBundle) -> bool {
+        self.admin
+            || match bundle {
+                ToolBundle::Observe => self.observe,
+                ToolBundle::Remember => self.remember,
+                ToolBundle::Coordinate => self.coordinate,
+                ToolBundle::Operate => self.operate,
+            }
+    }
+
+    pub(super) fn as_str(self) -> String {
+        if self.admin {
+            return "admin".to_string();
+        }
+
+        let mut names = Vec::new();
+        if self.observe {
+            names.push("observe");
+        }
+        if self.remember {
+            names.push("remember");
+        }
+        if self.coordinate {
+            names.push("coordinate");
+        }
+        if self.operate {
+            names.push("operate");
+        }
+        if names.is_empty() {
+            "observe".to_string()
+        } else {
+            names.join(",")
         }
     }
 }
 
-const IDE_TOOL_PATTERNS: &[&str] = &[
+const OBSERVE_TOOL_PATTERNS: &[&str] = &[
     "recommend_capability",
     "recommend_skill",
     "recommend_toolchain",
     "prepare_capability_bundle",
     "search_memory",
-    "save_memory",
     "get_memory",
     "memory_graph",
     "list_memories",
@@ -33,7 +127,22 @@ const IDE_TOOL_PATTERNS: &[&str] = &[
     "get_edges",
 ];
 
-const RUNTIME_EXTRA_TOOL_PATTERNS: &[&str] = &[
+const REMEMBER_TOOL_PATTERNS: &[&str] = &[
+    "save_memory",
+    "extract_facts",
+    "run_skill",
+];
+
+const COORDINATE_TOOL_PATTERNS: &[&str] = &[
+    "check_inbox",
+    "ghost_*",
+    "handoff_check",
+    "handoff_leave",
+    "post_card",
+    "update_card",
+];
+
+const OPERATE_TOOL_PATTERNS: &[&str] = &[
     "section_build",
     "compact_context",
     "compact_rollup",
@@ -41,36 +150,46 @@ const RUNTIME_EXTRA_TOOL_PATTERNS: &[&str] = &[
     "recall_context",
     "capture_session",
     "archive_memory",
-    "delete_memory",
-    "extract_facts",
     "find_similar_memory",
     "get_pipeline_status",
     "ingest_event",
     "sync_memories",
-];
-
-const WORKFLOW_TOOL_PATTERNS: &[&str] = &[
-    "check_inbox",
-    "ghost_*",
-    "handoff_check",
-    "handoff_leave",
-    "post_card",
+    "agent_register",
+    "agent_whoami",
+    "synthesize_agent_evolution",
     "project_agent_profile",
     "queue_agent_evolution",
     "review_agent_evolution_proposal",
     "list_agent_evolution_proposals",
-    "update_card",
+    "hub_call",
+    "hub_disconnect",
 ];
 
 pub(super) fn parse_tool_profile(raw: &str) -> Option<ToolProfile> {
-    match raw.trim().to_ascii_lowercase().as_str() {
-        "" | "admin" | "full" => Some(ToolProfile::Admin),
-        "ide" | "agent" | "claude" | "claude-code" | "codex" | "cursor" | "trae"
-        | "antigravity" => Some(ToolProfile::Ide),
-        "runtime" | "openclaw" | "adapter" => Some(ToolProfile::Runtime),
-        "workflow" | "ops" => Some(ToolProfile::Workflow),
-        _ => None,
+    let mut resolved: Option<ToolProfile> = None;
+
+    for token in raw
+        .split([',', '+'])
+        .map(str::trim)
+        .filter(|token| !token.is_empty())
+    {
+        let token_profile = match token.to_ascii_lowercase().as_str() {
+            "observe" | "read" | "reader" => ToolProfile::observe(),
+            "remember" | "write" | "writer" | "ide" | "agent" | "claude" | "claude-code"
+            | "codex" | "cursor" | "trae" => ToolProfile::remember(),
+            "coordinate" | "antigravity" => ToolProfile::coordinate(),
+            "workflow" => ToolProfile::coordinate().merge(ToolProfile::operate()),
+            "operate" | "runtime" | "openclaw" | "adapter" | "ops" => ToolProfile::operate(),
+            "admin" | "full" => ToolProfile::admin(),
+            _ => return None,
+        };
+        resolved = Some(match resolved {
+            Some(profile) => profile.merge(token_profile),
+            None => token_profile,
+        });
     }
+
+    resolved
 }
 
 pub(super) fn parse_tool_patterns_csv(raw: &str) -> Vec<String> {
@@ -103,17 +222,18 @@ fn tool_visible(
         }
     }
 
-    match profile.unwrap_or(ToolProfile::Admin) {
-        ToolProfile::Admin => true,
-        ToolProfile::Ide => matches_any_pattern(tool_name, IDE_TOOL_PATTERNS.iter().copied()),
-        ToolProfile::Runtime => {
-            matches_any_pattern(tool_name, IDE_TOOL_PATTERNS.iter().copied())
-                || matches_any_pattern(tool_name, RUNTIME_EXTRA_TOOL_PATTERNS.iter().copied())
-        }
-        ToolProfile::Workflow => {
-            matches_any_pattern(tool_name, WORKFLOW_TOOL_PATTERNS.iter().copied())
-        }
+    let profile = profile.unwrap_or_else(ToolProfile::admin);
+    if profile.admin {
+        return true;
     }
+    profile.allows(ToolBundle::Observe)
+        && matches_any_pattern(tool_name, OBSERVE_TOOL_PATTERNS.iter().copied())
+        || profile.allows(ToolBundle::Remember)
+            && matches_any_pattern(tool_name, REMEMBER_TOOL_PATTERNS.iter().copied())
+        || profile.allows(ToolBundle::Coordinate)
+            && matches_any_pattern(tool_name, COORDINATE_TOOL_PATTERNS.iter().copied())
+        || profile.allows(ToolBundle::Operate)
+            && matches_any_pattern(tool_name, OPERATE_TOOL_PATTERNS.iter().copied())
 }
 
 fn matches_any_pattern<'a>(tool_name: &str, mut patterns: impl Iterator<Item = &'a str>) -> bool {
@@ -179,10 +299,29 @@ mod tests {
 
     #[test]
     fn profile_parsing_maps_host_aliases() {
-        assert_eq!(parse_tool_profile("codex"), Some(ToolProfile::Ide));
-        assert_eq!(parse_tool_profile("openclaw"), Some(ToolProfile::Runtime));
-        assert_eq!(parse_tool_profile("workflow"), Some(ToolProfile::Workflow));
-        assert_eq!(parse_tool_profile("admin"), Some(ToolProfile::Admin));
+        assert_eq!(parse_tool_profile("codex"), Some(ToolProfile::remember()));
+        assert_eq!(parse_tool_profile("openclaw"), Some(ToolProfile::operate()));
+        assert_eq!(
+            parse_tool_profile("antigravity"),
+            Some(ToolProfile::coordinate())
+        );
+        assert_eq!(
+            parse_tool_profile("workflow"),
+            Some(ToolProfile::coordinate().merge(ToolProfile::operate()))
+        );
+        assert_eq!(parse_tool_profile("admin"), Some(ToolProfile::admin()));
+    }
+
+    #[test]
+    fn profile_parsing_supports_additive_surface_tokens() {
+        assert_eq!(
+            parse_tool_profile("observe,coordinate"),
+            Some(ToolProfile::observe().merge(ToolProfile::coordinate()))
+        );
+        assert_eq!(
+            parse_tool_profile("remember+operate"),
+            Some(ToolProfile::remember().merge(ToolProfile::operate()))
+        );
     }
 
     #[test]
@@ -201,7 +340,7 @@ mod tests {
                 test_tool("recall_context"),
                 test_tool("ghost_publish"),
             ],
-            Some(ToolProfile::Runtime),
+            Some(ToolProfile::operate()),
             Some(&["search_memory".to_string(), "recall_*".to_string()]),
         );
         let names: Vec<String> = filtered
@@ -211,6 +350,78 @@ mod tests {
         assert_eq!(
             names,
             vec!["search_memory".to_string(), "recall_context".to_string()]
+        );
+    }
+
+    #[test]
+    fn coordinate_surface_includes_memory_and_workflow_tools() {
+        let filtered = filter_tool_defs(
+            vec![
+                test_tool("search_memory"),
+                test_tool("save_memory"),
+                test_tool("post_card"),
+                test_tool("hub_register"),
+            ],
+            Some(ToolProfile::coordinate()),
+            None,
+        );
+        let names: Vec<String> = filtered
+            .into_iter()
+            .map(|tool| tool.name.into_owned())
+            .collect();
+        assert_eq!(
+            names,
+            vec![
+                "search_memory".to_string(),
+                "save_memory".to_string(),
+                "post_card".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn explicit_remember_surface_excludes_admin_tools() {
+        let filtered = filter_tool_defs(
+            vec![
+                test_tool("search_memory"),
+                test_tool("save_memory"),
+                test_tool("hub_register"),
+            ],
+            Some(ToolProfile::remember()),
+            None,
+        );
+        let names: Vec<String> = filtered
+            .into_iter()
+            .map(|tool| tool.name.into_owned())
+            .collect();
+        assert_eq!(
+            names,
+            vec!["search_memory".to_string(), "save_memory".to_string()]
+        );
+    }
+
+    #[test]
+    fn omitted_profile_keeps_compatibility_admin_surface() {
+        let filtered = filter_tool_defs(
+            vec![
+                test_tool("search_memory"),
+                test_tool("save_memory"),
+                test_tool("hub_register"),
+            ],
+            None,
+            None,
+        );
+        let names: Vec<String> = filtered
+            .into_iter()
+            .map(|tool| tool.name.into_owned())
+            .collect();
+        assert_eq!(
+            names,
+            vec![
+                "search_memory".to_string(),
+                "save_memory".to_string(),
+                "hub_register".to_string()
+            ]
         );
     }
 }

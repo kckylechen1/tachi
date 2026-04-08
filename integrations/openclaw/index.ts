@@ -665,155 +665,157 @@ export const memoryHybridBridgePlugin = {
       },
     });
 
-    api.registerTool({
-      name: "memory_delete",
-      label: "Memory Delete",
-      description: "Delete a specific memory entry by id from Tachi.",
-      parameters: Type.Object({
-        path: Type.String({
-          description: "Entry id (e.g. memory/m_1234) or raw id (m_1234)",
-        }),
-      }),
-      async execute(_toolCallId, params, _signal, context) {
-        const rawPath = (params as { path: string }).path;
-        const entryId = rawPath.replace(/^(?:shadow-store|memory)\//, "");
-        const agentId = (context as any)?.agentId || "main";
-        const result = await runWithClient(
-          "delete_memory",
-          async (client) => await client.deleteMemory(entryId),
-          agentId,
-        );
-
-        return result.ok
-          ? formatJsonTextResult({ deleted: result.value, id: entryId })
-          : textResult("Tachi MCP client unavailable.");
-      },
-    });
-
-    api.registerTool({
-      name: "compact_context",
-      label: "Compact Context",
-      description:
-        "Compact the current session window via Tachi MCP and return a reusable summary block.",
-      parameters: Type.Object({
-        conversation_id: Type.String({ description: "Conversation identifier" }),
-        window_id: Type.String({ description: "Compaction window identifier" }),
-        messages: Type.Array(
-          Type.Object({
-            role: Type.String(),
-            content: Type.String(),
+    if (config.exposeExperimentalTachiTools) {
+      api.registerTool({
+        name: "memory_delete",
+        label: "Memory Delete",
+        description: "Delete a specific memory entry by id from Tachi.",
+        parameters: Type.Object({
+          path: Type.String({
+            description: "Entry id (e.g. memory/m_1234) or raw id (m_1234)",
           }),
-          { description: "Recent messages to compact" },
-        ),
-        trigger: Type.Optional(Type.String()),
-        current_summary: Type.Optional(Type.String()),
-        path_prefix: Type.Optional(Type.String()),
-        target_tokens: Type.Optional(Type.Number()),
-        max_output_tokens: Type.Optional(Type.Number()),
-        persist: Type.Optional(Type.Boolean()),
-      }),
-      async execute(_toolCallId, params, _signal, context) {
-        const agentId = (context as any)?.agentId || "main";
-        const payload = params as {
-          conversation_id: string;
-          window_id: string;
-          messages: Array<{ role: string; content: string }>;
-          trigger?: string;
-          current_summary?: string;
-          path_prefix?: string;
-          target_tokens?: number;
-          max_output_tokens?: number;
-          persist?: boolean;
-        };
-        const result = await runWithClient(
-          "compact_context",
-          async (client) =>
-            await client.compactContext({
-              agent_id: agentId,
-              conversation_id: payload.conversation_id,
-              window_id: payload.window_id,
-              messages: payload.messages,
-              trigger: payload.trigger,
-              current_summary: payload.current_summary,
-              path_prefix: payload.path_prefix,
-              target_tokens: payload.target_tokens,
-              max_output_tokens: payload.max_output_tokens,
-              persist: payload.persist,
+        }),
+        async execute(_toolCallId, params, _signal, context) {
+          const rawPath = (params as { path: string }).path;
+          const entryId = rawPath.replace(/^(?:shadow-store|memory)\//, "");
+          const agentId = (context as any)?.agentId || "main";
+          const result = await runWithClient(
+            "delete_memory",
+            async (client) => await client.deleteMemory(entryId),
+            agentId,
+          );
+
+          return result.ok
+            ? formatJsonTextResult({ deleted: result.value, id: entryId })
+            : textResult("Tachi MCP client unavailable.");
+        },
+      });
+
+      api.registerTool({
+        name: "compact_context",
+        label: "Compact Context",
+        description:
+          "Compact the current session window via Tachi MCP and return a reusable summary block.",
+        parameters: Type.Object({
+          conversation_id: Type.String({ description: "Conversation identifier" }),
+          window_id: Type.String({ description: "Compaction window identifier" }),
+          messages: Type.Array(
+            Type.Object({
+              role: Type.String(),
+              content: Type.String(),
             }),
-          agentId,
-        );
+            { description: "Recent messages to compact" },
+          ),
+          trigger: Type.Optional(Type.String()),
+          current_summary: Type.Optional(Type.String()),
+          path_prefix: Type.Optional(Type.String()),
+          target_tokens: Type.Optional(Type.Number()),
+          max_output_tokens: Type.Optional(Type.Number()),
+          persist: Type.Optional(Type.Boolean()),
+        }),
+        async execute(_toolCallId, params, _signal, context) {
+          const agentId = (context as any)?.agentId || "main";
+          const payload = params as {
+            conversation_id: string;
+            window_id: string;
+            messages: Array<{ role: string; content: string }>;
+            trigger?: string;
+            current_summary?: string;
+            path_prefix?: string;
+            target_tokens?: number;
+            max_output_tokens?: number;
+            persist?: boolean;
+          };
+          const result = await runWithClient(
+            "compact_context",
+            async (client) =>
+              await client.compactContext({
+                agent_id: agentId,
+                conversation_id: payload.conversation_id,
+                window_id: payload.window_id,
+                messages: payload.messages,
+                trigger: payload.trigger,
+                current_summary: payload.current_summary,
+                path_prefix: payload.path_prefix,
+                target_tokens: payload.target_tokens,
+                max_output_tokens: payload.max_output_tokens,
+                persist: payload.persist,
+              }),
+            agentId,
+          );
 
-        return result.ok
-          ? formatJsonTextResult(result.value)
-          : textResult("Tachi MCP client unavailable.");
-      },
-    });
+          return result.ok
+            ? formatJsonTextResult(result.value)
+            : textResult("Tachi MCP client unavailable.");
+        },
+      });
 
-    registerTachiPassthrough(
-      "tachi_vault_store",
-      "vault_set",
-      "Store a secret in the Tachi vault.",
-    );
-    registerTachiPassthrough(
-      "tachi_vault_retrieve",
-      "vault_get",
-      "Retrieve a secret from the Tachi vault.",
-    );
-    registerTachiPassthrough(
-      "tachi_vault_list",
-      "vault_list",
-      "List secrets in the Tachi vault.",
-    );
-    registerTachiPassthrough(
-      "tachi_ghost_whisper",
-      "ghost_publish",
-      "Publish a Ghost whisper message.",
-    );
-    registerTachiPassthrough(
-      "tachi_ghost_listen",
-      "ghost_subscribe",
-      "Listen for Ghost whisper messages.",
-    );
-    registerTachiPassthrough(
-      "tachi_kanban_add",
-      "post_card",
-      "Create a kanban card in Tachi.",
-    );
-    registerTachiPassthrough(
-      "tachi_kanban_update",
-      "update_card",
-      "Update a kanban card in Tachi.",
-    );
-    registerTachiPassthrough(
-      "tachi_kanban_list",
-      "check_inbox",
-      "List kanban cards from a Tachi inbox.",
-    );
-    registerTachiPassthrough(
-      "tachi_create_handoff",
-      "handoff_leave",
-      "Create a Tachi handoff memo.",
-    );
-    registerTachiPassthrough(
-      "tachi_get_handoff",
-      "handoff_check",
-      "Read pending Tachi handoff memos.",
-    );
-    registerTachiPassthrough(
-      "tachi_run_skill",
-      "run_skill",
-      "Run a Tachi skill.",
-    );
-    registerTachiPassthrough(
-      "tachi_hub_discover",
-      "hub_discover",
-      "Discover available Tachi hub capabilities.",
-    );
-    registerTachiPassthrough(
-      "tachi_recommend_toolchain",
-      "recommend_toolchain",
-      "Recommend a Tachi toolchain for the current task.",
-    );
+      registerTachiPassthrough(
+        "tachi_vault_store",
+        "vault_set",
+        "Store a secret in the Tachi vault.",
+      );
+      registerTachiPassthrough(
+        "tachi_vault_retrieve",
+        "vault_get",
+        "Retrieve a secret from the Tachi vault.",
+      );
+      registerTachiPassthrough(
+        "tachi_vault_list",
+        "vault_list",
+        "List secrets in the Tachi vault.",
+      );
+      registerTachiPassthrough(
+        "tachi_ghost_whisper",
+        "ghost_publish",
+        "Publish a Ghost whisper message.",
+      );
+      registerTachiPassthrough(
+        "tachi_ghost_listen",
+        "ghost_subscribe",
+        "Listen for Ghost whisper messages.",
+      );
+      registerTachiPassthrough(
+        "tachi_kanban_add",
+        "post_card",
+        "Create a kanban card in Tachi.",
+      );
+      registerTachiPassthrough(
+        "tachi_kanban_update",
+        "update_card",
+        "Update a kanban card in Tachi.",
+      );
+      registerTachiPassthrough(
+        "tachi_kanban_list",
+        "check_inbox",
+        "List kanban cards from a Tachi inbox.",
+      );
+      registerTachiPassthrough(
+        "tachi_create_handoff",
+        "handoff_leave",
+        "Create a Tachi handoff memo.",
+      );
+      registerTachiPassthrough(
+        "tachi_get_handoff",
+        "handoff_check",
+        "Read pending Tachi handoff memos.",
+      );
+      registerTachiPassthrough(
+        "tachi_run_skill",
+        "run_skill",
+        "Run a Tachi skill.",
+      );
+      registerTachiPassthrough(
+        "tachi_hub_discover",
+        "hub_discover",
+        "Discover available Tachi hub capabilities.",
+      );
+      registerTachiPassthrough(
+        "tachi_recommend_toolchain",
+        "recommend_toolchain",
+        "Recommend a Tachi toolchain for the current task.",
+      );
+    }
 
     api.registerTool({
       name: "todo_write",

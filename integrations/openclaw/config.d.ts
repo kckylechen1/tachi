@@ -33,6 +33,7 @@ export type BridgeConfig = {
     shadowStorePath: string;
     auditLogPath: string;
     topK: number;
+    exposeExperimentalTachiTools: boolean;
     captureMinChars: number;
     captureTriggerKeywords: string[];
     selfEvolutionAgents: string[];
