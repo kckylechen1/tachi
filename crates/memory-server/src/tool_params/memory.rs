@@ -756,6 +756,22 @@ pub(crate) fn fact_to_entry(
                 .collect()
         })
         .unwrap_or_default();
+    let entities: Vec<String> = fact["entities"]
+        .as_array()
+        .map(|a| {
+            a.iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect()
+        })
+        .unwrap_or_default();
+    let persons: Vec<String> = fact["persons"]
+        .as_array()
+        .map(|a| {
+            a.iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect()
+        })
+        .unwrap_or_default();
     let scope_raw = fact["scope"].as_str().unwrap_or("general");
     let scope = match scope_raw {
         "user" | "project" | "general" => scope_raw.to_string(),
@@ -772,8 +788,8 @@ pub(crate) fn fact_to_entry(
         category: "fact".to_string(),
         topic,
         keywords,
-        persons: vec![],
-        entities: vec![],
+        persons,
+        entities,
         location: String::new(),
         source: source.to_string(),
         scope,

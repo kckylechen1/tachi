@@ -518,7 +518,7 @@ impl MemoryStore {
         id: &str,
         success: bool,
         rating: Option<f64>,
-    ) -> Result<(), MemoryError> {
+    ) -> Result<bool, MemoryError> {
         db::hub_record_feedback(&self.conn, id, success, rating)
     }
 

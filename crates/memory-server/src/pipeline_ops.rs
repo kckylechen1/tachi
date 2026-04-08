@@ -1242,6 +1242,20 @@ pub(super) async fn handle_sync_memories(
             .map_err(|e| format!("Failed to get known revisions: {}", e))
     })?;
 
+    let known_revisions = if server.has_project_db() {
+        let mut project_known = server.with_project_store(|store| {
+            store
+                .get_agent_known_revisions(&params.agent_id, &memory_ids)
+                .map_err(|e| format!("Failed to get project known revisions: {}", e))
+        })?;
+        for (id, rev) in known_revisions {
+            project_known.entry(id).or_insert(rev);
+        }
+        project_known
+    } else {
+        known_revisions
+    };
+
     let mut diff_entries: Vec<serde_json::Value> = Vec::new();
     let mut sync_updates: Vec<(String, i64)> = Vec::new();
     let mut new_count = 0u64;

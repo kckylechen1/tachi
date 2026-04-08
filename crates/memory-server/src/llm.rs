@@ -569,14 +569,18 @@ impl LlmClient {
     /// Remove ```json markdown code fences from response
     pub fn strip_code_fence(text: &str) -> &str {
         let text = text.trim();
-        if text.starts_with("```json") {
-            text[7..].trim()
+        let start = if text.starts_with("```json") {
+            &text[7..]
         } else if text.starts_with("```") {
-            text[3..].trim()
+            &text[3..]
         } else {
-            text
+            return text.trim();
+        };
+        let inner = start.trim();
+        if let Some(idx) = inner.rfind("```") {
+            inner[..idx].trim()
+        } else {
+            inner
         }
-        .trim_end_matches("```")
-        .trim()
     }
 }

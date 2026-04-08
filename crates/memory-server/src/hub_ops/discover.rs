@@ -146,14 +146,19 @@ pub(crate) async fn handle_hub_feedback(
             .map_err(|e| format!("serialize: {e}"));
         }
     }
-    server.with_global_store(|store| {
+    let recorded = server.with_global_store(|store| {
         store
             .hub_record_feedback(&params.id, params.success, params.rating)
             .map_err(|e| format!("feedback: {e}"))
     })?;
     let _ = crate::wiki_ops::refresh_skill_quality_guards(server);
-    serde_json::to_string(&json!({"id": params.id, "recorded": true, "db": "global"}))
-        .map_err(|e| format!("serialize: {e}"))
+    if recorded {
+        serde_json::to_string(&json!({"id": params.id, "recorded": true, "db": "global"}))
+            .map_err(|e| format!("serialize: {e}"))
+    } else {
+        serde_json::to_string(&json!({"id": params.id, "recorded": false, "error": "Capability not found"}))
+            .map_err(|e| format!("serialize: {e}"))
+    }
 }
 
 pub(crate) async fn handle_hub_stats(server: &MemoryServer) -> Result<String, String> {

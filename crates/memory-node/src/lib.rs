@@ -293,7 +293,7 @@ impl JsMemoryStore {
 
     /// Record feedback for a hub capability invocation.
     #[napi]
-    pub fn hub_feedback(&self, id: String, success: bool, rating: Option<f64>) -> napi::Result<()> {
+    pub fn hub_feedback(&self, id: String, success: bool, rating: Option<f64>) -> napi::Result<bool> {
         self.inner
             .lock()
             .unwrap_or_else(|e| e.into_inner())

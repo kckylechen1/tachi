@@ -281,9 +281,8 @@ pub fn hub_record_feedback(
     id: &str,
     success: bool,
     rating: Option<f64>,
-) -> Result<(), MemoryError> {
+) -> Result<bool, MemoryError> {
     let now = now_utc_iso();
-    // Update counters
     conn.execute(
         "UPDATE hub_capabilities SET
            uses = uses + 1,
@@ -295,8 +294,13 @@ pub fn hub_record_feedback(
         params![success as i32, (!success) as i32, &now, id,],
     )?;
 
-    // Update running average rating if provided
+    let matched = conn.changes() > 0;
+    if !matched {
+        return Ok(false);
+    }
+
     if let Some(r) = rating {
+        let r = r.clamp(0.0, 5.0);
         conn.execute(
             "UPDATE hub_capabilities SET
                avg_rating = CASE
@@ -308,7 +312,7 @@ pub fn hub_record_feedback(
         )?;
     }
 
-    Ok(())
+    Ok(true)
 }
 
 /// Delete a hub capability. Returns true if found and deleted.
