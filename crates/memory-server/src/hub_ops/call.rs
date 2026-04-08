@@ -1,4 +1,5 @@
 use super::*;
+use crate::hub_helpers::capability_callable;
 
 pub(crate) async fn handle_run_skill(
     server: &MemoryServer,
@@ -27,6 +28,12 @@ pub(crate) async fn handle_run_skill(
         return Err(format!(
             "'{}' is type '{}', not 'skill'",
             params.skill_id, cap.cap_type
+        ));
+    }
+    if !capability_callable(&cap) {
+        return Err(format!(
+            "Skill '{}' is not callable (enabled={}, review_status={}, health_status={}).",
+            params.skill_id, cap.enabled, cap.review_status, cap.health_status
         ));
     }
 

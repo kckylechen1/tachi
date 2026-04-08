@@ -51,6 +51,12 @@
 - **入库更稳**：`importance` 与 `rating` 皆受法度箝制，越界之数自动归入正轨，免邪值污库。
 - **抽绎更全**：结构化炼丹今可存 `persons` 与 `entities`，并能识破嵌套 code fence 与常见 AI 套话废言。
 
+### 新近理路（Tool Surface Bundles）
+
+- **不再强迫四选一**：MCP 暴露面今由可叠加之 surface bundles 统辖：`observe`、`remember`、`coordinate`、`operate`、`admin`。
+- **灵核见其所当见**：新接入之灵核宜显式择 `remember`、`coordinate` 或 `operate`；Antigravity 可取 `coordinate`；OpenClaw 走 `openclaw` / `operate` 之别名。为保旧缘，未指明者仍循 `admin` 旧制。
+- **万宝楼居上，不使杂乱**：`recommend_*`、`prepare_capability_bundle`、`run_skill` 归入常用灵核之正道；`hub` / `pack` / `vc` / `vault` 等治道法器收于 `admin`，不再裸露于常途。
+
 ---
 
 ## 🎯 二、 立派初心

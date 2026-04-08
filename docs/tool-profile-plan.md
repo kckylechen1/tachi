@@ -1,4 +1,4 @@
-# Tool Profile & Host Surface Plan
+# Tool Surface Bundle Plan
 
 This document is the exposure-policy companion to [Kernel Surface V1](./kernel-surface-v1.md).  
 `Kernel Surface V1` defines the conceptual layers; this document defines how much of that surface each host sees by default.
@@ -19,17 +19,17 @@ The target split is:
 ## Principles
 
 1. Agent-facing tools stay tiny.
-   - Default agent surface should be `memory_search`, `memory_save`, `memory_get`, and read-only `memory_graph`
-2. Runtime hooks stay internal.
-   - `recall_context`, `capture_session`, and later `compact_context` are host/runtime APIs, not default agent tools
+   - Default agent surface should be a narrow `observe + remember` kernel, not the full MCP catalog
+2. Runtime hooks stay explicit.
+   - `recall_context`, `capture_session`, and later `compact_context` are runtime/adapter APIs, not part of the ordinary IDE default
 3. Capability selection should become a first-class public layer.
-   - `recommend_capability`, `recommend_skill`, `recommend_toolchain`, and `prepare_capability_bundle` belong in the kernel surface
-   - but they should be added as a deliberate layer, not mixed into low-level memory or admin tools
+   - `recommend_capability`, `recommend_skill`, `recommend_toolchain`, `prepare_capability_bundle`, and `run_skill` are the preferred agent UX
+   - raw hub / pack / vc governance tools should not leak into ordinary agent surfaces
 4. Workflow tools are not kernel primitives.
    - `ghost_*`, `post_card`, `check_inbox`, `update_card`, proposal review/project tools stay hidden unless a host or profile explicitly asks for them
 5. Filtering must only reduce exposure.
    - Effective surface is the intersection of:
-     - built-in host profile
+     - built-in surface bundle selection
      - `TACHI_EXPOSED_TOOLS`, if present
    - We should not let one layer widen another
 6. `agent_register.tool_filter` is deferred.
@@ -38,68 +38,70 @@ The target split is:
 
 ## Implemented
 
-### Built-in host profiles
+### Built-in additive bundles
 
-`Tachi` now understands four built-in profiles:
+`Tachi` now understands additive surface bundles instead of mutually exclusive profiles:
 
-- `ide`
-  - `recommend_capability`
-  - `recommend_skill`
-  - `recommend_toolchain`
-  - `search_memory`
+- `observe`
+  - capability recommendation
+  - read-only memory and graph inspection
+- `remember`
+  - `observe` +
   - `save_memory`
-  - `get_memory`
-  - `list_memories`
-  - `memory_stats`
-  - `get_edges`
-- `runtime`
-  - `ide` +
-  - `recall_context`
-  - `capture_session`
-  - `archive_memory`
-  - `delete_memory`
   - `extract_facts`
-  - `find_similar_memory`
-  - `get_pipeline_status`
-  - `ingest_event`
-  - `sync_memories`
-- `workflow`
-  - `ghost_*`
-  - `handoff_*`
-  - `post_card`
-  - `check_inbox`
-  - `update_card`
-  - evolution proposal/project tools
+  - `run_skill`
+- `coordinate`
+  - `remember` +
+  - kanban / ghost / handoff collaboration tools
+- `operate`
+  - `remember` +
+  - runtime hook primitives (`recall_context`, `capture_session`, `compact_*`, `section_build`)
+  - routed execution / evolution helpers (`hub_call`, proposal queue/review/project tools, `agent_register`)
 - `admin`
-  - full surface
+  - full surface, including hub governance, pack management, vault, sandbox, VC, and destructive operations
 
 Selection paths:
 
-- `tachi --profile ide`
-- `TACHI_PROFILE=runtime tachi`
-- default with no profile: `admin`
+- `tachi --profile remember`
+- `tachi --profile observe+coordinate`
+- `TACHI_PROFILE=openclaw tachi`
+- default with no profile: `admin` for backward compatibility; agent hosts should opt into `remember`, `coordinate`, or `operate`
+
+Host aliases expand to bundle sets:
+
+- `codex`, `claude`, `claude-code`, `cursor`, `trae`, `ide`, `agent` → `remember`
+- `antigravity` → `coordinate`
+- `workflow` → `coordinate + operate`
+- `openclaw`, `runtime`, `adapter`, `ops` → `operate`
+- `admin`, `full` → `admin`
 
 ### OpenClaw extension surface
 
-The OpenClaw plugin now exposes only:
+The OpenClaw plugin now keeps its default Tachi-facing model tool surface focused on:
 
 - `memory_search`
 - `memory_save`
 - `memory_get`
+- `memory_graph`
 
-It no longer exposes raw passthrough workflow tools like:
+High-risk passthroughs and runtime-only helpers are now hidden by default. They can be re-enabled explicitly with `TACHI_OPENCLAW_EXPERIMENTAL_TACHI_TOOLS=1`.
 
-- `tachi_ghost_publish`
-- `tachi_kanban_post`
-- `tachi_save_memory`
-- `memory_hybrid_search`
+Examples of gated tools:
+
+- `memory_delete`
+- `compact_context`
+- `tachi_vault_*`
+- `tachi_ghost_*`
+- `tachi_kanban_*`
+- `tachi_get_handoff` / `tachi_create_handoff`
+- `tachi_hub_discover`
 
 Internally, the plugin still uses runtime-only MCP primitives through hooks:
 
 - `before_agent_start` → `recall_context`
 - `agent_end` → `capture_session`
 
-OpenClaw also forces `TACHI_PROFILE=runtime` when it launches the embedded MCP client.
+OpenClaw now forces `TACHI_PROFILE=openclaw` when it launches the embedded MCP client.
 
 ### Compaction primitive
 
@@ -146,7 +148,7 @@ This keeps the model-facing surface small while preserving a rich kernel for:
 - section / compaction artifacts
 - operator and workflow tooling
 
-It also preserves compatibility for direct MCP clients that do not have a native extension layer: they can still select a smaller host profile without losing the full kernel from `admin`.
+It also avoids the old mutually exclusive trap where a client needed a workflow tool and suddenly had to choose between unrelated surfaces. Bundles compose upward, and aliases remain for backward compatibility.
 
 ## Next Steps
 

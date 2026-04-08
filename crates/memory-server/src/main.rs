@@ -368,7 +368,7 @@ struct MemoryServer {
     // ─── Agent Profile ───────────────────────────────────────────────────────
     /// Per-session agent profile (set via agent_register tool).
     agent_profile: Arc<StdRwLock<Option<AgentProfile>>>,
-    /// Default host-facing tool profile for this server instance.
+    /// Default host-facing tool surface bundle selection for this server instance.
     tool_profile: Arc<StdRwLock<Option<ToolProfile>>>,
     // ─── Cross-Agent Handoff ─────────────────────────────────────────────────
     /// Pending handoff memos from previous agent sessions.
