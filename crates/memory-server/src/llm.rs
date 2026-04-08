@@ -572,7 +572,7 @@ impl LlmClient {
         let inner = if text.starts_with("```json") {
             text[7..].trim()
         } else if text.starts_with("```") {
-            text[3..].trim()
+            &text[3..]
         } else {
             return text;
         };

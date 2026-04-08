@@ -283,7 +283,6 @@ pub fn hub_record_feedback(
     rating: Option<f64>,
 ) -> Result<bool, MemoryError> {
     let now = now_utc_iso();
-    // Update counters
     conn.execute(
         "UPDATE hub_capabilities SET
            uses = uses + 1,
@@ -299,7 +298,6 @@ pub fn hub_record_feedback(
         return Ok(false);
     }
 
-    // Update running average rating if provided
     if let Some(r) = rating {
         let rating = r.clamp(0.0, 5.0);
         conn.execute(
