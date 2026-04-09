@@ -113,13 +113,20 @@ brew tap kckylechen1/tachi && brew install tachi
     "tachi": {
       "command": "tachi",
       "env": {
-        "VOYAGE_API_KEY": "..."
+        "VOYAGE_API_KEY": "...",
+        "TACHI_PROFILE": "coordinate"
       }
     }
   }
 }
 ```
 
+> **明规**：设 `"TACHI_PROFILE": "coordinate"`（或 `"remember"`），可保 Cursor、Claude Desktop 等游标神器之卷轴不为海量 `tachi_skill_*` 仙诀淹没。惟因隐藏直调法器，钝根之 Agent 恐不知应对。**敬请于你的 Cursor Rules (`.cursorrules`) 抑或 System Prompt 中，以大白话或夷语（English）明文下发死令**：
+> 
+> *“You have access to the Tachi MCP Server. You cannot see individual skills natively. When facing a complex task, you MUST first use the `recommend_skill` tool to search for an appropriate workflow capability. Once you find it, you MUST use the `run_skill` tool to execute it explicitly.”*
+> 
+> （按：训诫灵核务以夷语或白话为之，切莫以文言相授，恐其神识错乱自作主张瞎写脚本。）
+>
 > 程序将依据项目根目录的 `.env` 文件挂载灵气（参见 `.env.example`）。
 >
 > **藏经禁忌**：万万不可将宝库置于云同步之地（iCloud, Dropbox, OneDrive）。SQLite WAL 之术与网络灵境不合。
