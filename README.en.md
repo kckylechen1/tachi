@@ -101,7 +101,6 @@ Then add to your agent's MCP config:
     "tachi": {
       "command": "tachi",
       "env": {
-        "VOYAGE_API_KEY": "your-key-here",
         "TACHI_PROFILE": "coordinate"
       }
     }

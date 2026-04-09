@@ -113,7 +113,6 @@ brew tap kckylechen1/tachi && brew install tachi
     "tachi": {
       "command": "tachi",
       "env": {
-        "VOYAGE_API_KEY": "...",
         "TACHI_PROFILE": "coordinate"
       }
     }
