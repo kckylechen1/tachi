@@ -1653,6 +1653,34 @@ async fn tokio_main(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
 
     if server.pipeline_enabled {
         eprintln!("Pipeline workers: ENABLED (external)");
+
+        let distill_interval_secs: u64 = std::env::var("DISTILL_INTERVAL_SECS")
+            .ok()
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(1800);
+
+        let distill_server = server.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_secs(60)).await;
+            let mut interval = tokio::time::interval(Duration::from_secs(distill_interval_secs));
+            eprintln!(
+                "Distill scheduler: ENABLED (interval={}s)",
+                distill_interval_secs
+            );
+            loop {
+                interval.tick().await;
+                match crate::foundry_runtime_ops::schedule_pending_distill_jobs(&distill_server)
+                    .await
+                {
+                    Ok(count) => {
+                        if count > 0 {
+                            eprintln!("[distill] Scheduled {count} distill jobs");
+                        }
+                    }
+                    Err(err) => eprintln!("[distill] Scheduler error: {err}"),
+                }
+            }
+        });
     } else {
         eprintln!("Pipeline workers: DISABLED (set ENABLE_PIPELINE=true to enable)");
     }

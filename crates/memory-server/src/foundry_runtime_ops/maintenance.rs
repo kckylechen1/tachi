@@ -1,6 +1,7 @@
 use super::capture::*;
 use super::helpers::*;
 use super::*;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::Ordering;
 
 fn foundry_requested_by(server: &MemoryServer) -> Option<String> {
@@ -149,6 +150,132 @@ pub(crate) fn enqueue_foundry_capture_maintenance(
         0,
         0,
     )
+}
+
+fn scheduled_distill_group_key(path: &str) -> String {
+    let mut segments = path.trim_matches('/').split('/').filter(|s| !s.is_empty());
+    match segments.next() {
+        Some(segment) => format!("/{segment}"),
+        None => "/".to_string(),
+    }
+}
+
+/// Scan for project memories that have not yet been included in a distill output
+/// and enqueue distill jobs for sufficiently large top-level groups.
+pub(crate) async fn schedule_pending_distill_jobs(server: &MemoryServer) -> Result<usize, String> {
+    const MIN_GROUP_SIZE: usize = 4;
+
+    if !server.has_project_db() {
+        return Ok(0);
+    }
+
+    let (unprocessed_memories, pending_groups) = server.with_project_store_read(|store| {
+        let conn = store.connection();
+
+        let mut processed_ids = HashSet::new();
+        let mut stmt = conn
+            .prepare("SELECT metadata FROM memories WHERE archived = 0 AND source = ?1")
+            .map_err(|e| format!("prepare distill metadata query: {e}"))?;
+        let rows = stmt
+            .query_map([FOUNDRY_DISTILL_SOURCE], |row| row.get::<_, String>(0))
+            .map_err(|e| format!("query distill metadata rows: {e}"))?;
+        for row in rows {
+            let metadata_raw = row.map_err(|e| format!("read distill metadata row: {e}"))?;
+            let metadata = serde_json::from_str::<serde_json::Value>(&metadata_raw)
+                .unwrap_or_else(|_| json!({}));
+            let source_ids = metadata
+                .get("source_memory_ids")
+                .and_then(|value| value.as_array())
+                .into_iter()
+                .flatten()
+                .filter_map(|value| value.as_str());
+            processed_ids.extend(source_ids.map(ToOwned::to_owned));
+        }
+
+        let mut pending_groups = HashSet::new();
+        let mut stmt = conn
+            .prepare(
+                "SELECT path_prefix
+                 FROM foundry_jobs
+                 WHERE kind = 'memory_distill' AND status IN ('queued', 'running')",
+            )
+            .map_err(|e| format!("prepare pending distill job query: {e}"))?;
+        let rows = stmt
+            .query_map([], |row| row.get::<_, String>(0))
+            .map_err(|e| format!("query pending distill jobs: {e}"))?;
+        for row in rows {
+            pending_groups.insert(row.map_err(|e| format!("read pending distill row: {e}"))?);
+        }
+
+        let mut unprocessed = Vec::new();
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, path
+                 FROM memories
+                 WHERE archived = 0 AND source != ?1
+                 ORDER BY timestamp ASC",
+            )
+            .map_err(|e| format!("prepare candidate memory query: {e}"))?;
+        let rows = stmt
+            .query_map([FOUNDRY_DISTILL_SOURCE], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .map_err(|e| format!("query candidate memories: {e}"))?;
+        for row in rows {
+            let (memory_id, path) = row.map_err(|e| format!("read candidate memory row: {e}"))?;
+            if !processed_ids.contains(&memory_id) {
+                unprocessed.push((memory_id, path));
+            }
+        }
+
+        Ok((unprocessed, pending_groups))
+    })?;
+
+    if unprocessed_memories.is_empty() {
+        return Ok(0);
+    }
+
+    let mut grouped_ids: HashMap<String, Vec<String>> = HashMap::new();
+    for (memory_id, path) in unprocessed_memories {
+        let group_key = scheduled_distill_group_key(&path);
+        if pending_groups.contains(&group_key) {
+            continue;
+        }
+        grouped_ids.entry(group_key).or_default().push(memory_id);
+    }
+
+    let scheduler_agent_id = foundry_requested_by(server).unwrap_or_else(|| "tachi_scheduler".into());
+    let mut jobs_scheduled = 0usize;
+
+    for (path_prefix, memory_ids) in grouped_ids {
+        if memory_ids.len() < MIN_GROUP_SIZE {
+            continue;
+        }
+
+        let job = build_foundry_maintenance_job(
+            server,
+            memory_core::FoundryJobKind::MemoryDistill,
+            &scheduler_agent_id,
+            &path_prefix,
+            &memory_ids,
+            json!({
+                "kind": "memory_distill",
+                "window": FOUNDRY_DISTILL_WINDOW,
+                "scheduler": "bootstrap_distill_interval",
+            }),
+        );
+
+        server.enqueue_foundry_job(FoundryMaintenanceItem {
+            job,
+            target_db: DbScope::Project,
+            named_project: None,
+            path_prefix,
+            memory_ids,
+        })?;
+        jobs_scheduled += 1;
+    }
+
+    Ok(jobs_scheduled)
 }
 
 pub(super) fn with_foundry_store<T>(

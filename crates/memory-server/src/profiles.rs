@@ -131,6 +131,7 @@ const REMEMBER_TOOL_PATTERNS: &[&str] = &[
     "save_memory",
     "extract_facts",
     "run_skill",
+    "ingest_event",
 ];
 
 const COORDINATE_TOOL_PATTERNS: &[&str] = &[
@@ -152,7 +153,6 @@ const OPERATE_TOOL_PATTERNS: &[&str] = &[
     "archive_memory",
     "find_similar_memory",
     "get_pipeline_status",
-    "ingest_event",
     "sync_memories",
     "agent_register",
     "agent_whoami",
@@ -359,6 +359,7 @@ mod tests {
             vec![
                 test_tool("search_memory"),
                 test_tool("save_memory"),
+                test_tool("ingest_event"),
                 test_tool("post_card"),
                 test_tool("hub_register"),
             ],
@@ -374,6 +375,7 @@ mod tests {
             vec![
                 "search_memory".to_string(),
                 "save_memory".to_string(),
+                "ingest_event".to_string(),
                 "post_card".to_string()
             ]
         );
@@ -385,6 +387,7 @@ mod tests {
             vec![
                 test_tool("search_memory"),
                 test_tool("save_memory"),
+                test_tool("ingest_event"),
                 test_tool("hub_register"),
             ],
             Some(ToolProfile::remember()),
@@ -396,7 +399,11 @@ mod tests {
             .collect();
         assert_eq!(
             names,
-            vec!["search_memory".to_string(), "save_memory".to_string()]
+            vec![
+                "search_memory".to_string(),
+                "save_memory".to_string(),
+                "ingest_event".to_string()
+            ]
         );
     }
 
