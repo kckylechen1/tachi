@@ -286,10 +286,16 @@ graph TD
 
 | 职位角色 | 推荐选用方案 | 原理说明 |
 |------|-------------------|------------------|
-| **特征向量 (Embedding)** | [Voyage-4](https://voyageai.com/) | 1024 高维度向量输出，提供领先的多语种文本检索能力。与 Rust 执行核心直连。 |
-| **逻辑提取与快摄 (Extraction & Summarization)** | [Qwen3.5-27B](https://cloud.siliconflow.cn/i/QwFqsLF1) 分片部署 | 面向高精度 JSON 数据集校验、L0 简要提取提供的强大因果推理能力。（仅启用 `ENABLE_PIPELINE=true` 时加载） |
-| **全局蒸馏 (Distillation)** | [Qwen3.5-27B](https://cloud.siliconflow.cn/i/QwFqsLF1) 分片部署 | 用于梳理高层级跨场景行为图谱及全局规则统一沉淀。（同上） |
-| **异步客户端库** | [`async-openai`](https://github.com/64bit/async-openai) + [`reqwest`](https://docs.rs/reqwest/) | Rust 原生异步 HTTP 客户端，用于 MCP 服务器内直接 API 集成。 |
+| **特征向量 / 重排 (Embedding / Rerank)** | [Voyage-4](https://voyageai.com/) | 提供领先的多语种文本检索能力，仍是默认的向量底座。 |
+| **事实提取 (Extract)** | [Qwen3.5-27B](https://cloud.siliconflow.cn/) via SiliconFlow | 针对当前 Tachi/OpenClaw 基准测试中，极其稳定可靠的结构化事实提取。 |
+| **上下文蒸馏 (Distill)** | MiniMax M2.7 | 能够提供高保真度的压缩块并在多场景复用。可接入兼容 OpenAI 格式的 MiniMax 终点。 |
+| **状态快摄 (Summary)** | MiniMax M2.7 | 拥有强大的低 Token 消耗摘要能力，同时保留极高的信号密度。 |
+| **架构裁决与进化 (Reasoning / Skill Audit)** | GLM-5.1 via Z.AI | 在架构级判断、进化优先级划分以及 Skill 版本演进的最终决策上表现最优秀。 |
+| **快速勘界 (Fast Pre-Audit / Scout)** | Gemini Flash 或 MiniMax M2.7 | (可选) 在重型 GLM 决策介入前，作为低成本低延迟的初筛层使用。 |
+
+实现补充说明：
+- 分体架构现已将各个独立通道（Lanes）解耦。
+- 开箱使用默认通过 Voyage + SiliconFlow 作为核心，但允许你在 `.env` 中精细覆盖每一个角色的选用配置。
 
 ---
 
@@ -299,9 +305,6 @@ graph TD
 
 ### ⚙️ MCP 工具调用示例（通过任意 MCP 客户端）
 ```python
-# 通过 MCP 协议连接 Tachi 服务器
-# 以下为工具调用的伪代码示例
-
 # 1. 写入结构化软记忆 (Vector + FTS + Time-衰减，异步摘要)
 save_memory(
     text="前端项目强制使用 React 与 Vite 构建，严禁混入 Webpack 相关生态配置。支持 Tailwind。",
@@ -331,8 +334,27 @@ set_state(
 # Core 向量查询底座
 VOYAGE_API_KEY="your_voyage_key_here"
 
-# 大模型抽取层与清洗归置
+# 同宗同源·总门基础之气 (共享通道)
 SILICONFLOW_API_KEY="your_siliconflow_key_here"
+SILICONFLOW_BASE_URL="https://api.siliconflow.cn/v1/chat/completions"
+SILICONFLOW_MODEL="Qwen/Qwen3.5-27B"
+
+# 千机百晓·特科真气 (独立通道覆盖，皆作可选配)
+EXTRACT_API_KEY=""
+EXTRACT_BASE_URL=""
+EXTRACT_MODEL="Qwen/Qwen3.5-27B"
+
+DISTILL_API_KEY="your_minimax_key_here"
+DISTILL_BASE_URL="https://api.minimaxi.com/v1/chat/completions"
+DISTILL_MODEL="MiniMax-M2.7"
+
+SUMMARY_API_KEY="your_minimax_key_here"
+SUMMARY_BASE_URL="https://api.minimaxi.com/v1/chat/completions"
+SUMMARY_MODEL="MiniMax-M2.7"
+
+REASONING_API_KEY="your_glm_key_here"
+REASONING_BASE_URL="https://open.bigmodel.cn/api/coding/paas/v4/chat/completions"
+REASONING_MODEL="glm-5.1"
 
 # 本地 SQLite 文件（可选 — 默认自动解析为 ~/.Tachi/global/memory.db + 每个项目 .Tachi/memory.db）
 MEMORY_DB_PATH="~/.Tachi/global/memory.db"
