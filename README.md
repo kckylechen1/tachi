@@ -298,10 +298,17 @@ graph TD
 
 | 司职 | 仙班首座 | 荐书 |
 |------|-------------------|------------------|
-| **搜神引（Embedding）** | [Voyage-4](https://voyageai.com/) | 千维道标，八荒九州语皆可探明。与玄铁丹心（Rust 核心）直接交汇。 |
-| **抽丝剥茧（抽取）** | [Qwen3.5-27B](https://cloud.siliconflow.cn/i/QwFqsLF1) | 断文识字、破空捉影。（惟于 `ENABLE_PIPELINE=true` 方遣将其降世）|
-| **大造化（全局蒸馏）** | [Qwen3.5-27B](https://cloud.siliconflow.cn/i/QwFqsLF1) | 以同源之智凝练万里乾坤总纲。（同上） |
-| **异步法器（Rust）** | [`async-openai`](https://github.com/64bit/async-openai) + [`reqwest`](https://docs.rs/reqwest/) | 玄铁MCP之内丹，直通云端法力，异步吞吐，不滞于物。 |
+| **搜神引（Embedding/Rerank）** | [Voyage-4](https://voyageai.com/) | 千维道标，八荒九州语皆可探明。与玄铁丹心直接交汇。 |
+| **抽丝剥茧（Extract）** | [Qwen3.5-27B](https://cloud.siliconflow.cn/) | 断文识字、破空捉影，尤擅抽取结构化事实。 |
+| **大造化（Distill）** | MiniMax M2.7 | 去芜存菁，百卷经轴可凝作十字长篇，仍保神意不散。 |
+| **浮生录（Summary）** | MiniMax M2.7 | 一目十行，过目成诵，以最微之气力换极密之情报。 |
+| **点金笔（Reasoning/Skill Audit）** | GLM-5.1 via Z.AI | 洞明世事，掌判法器阵图之高下，定旧典化新诀之裁度。 |
+| **千里眼（Fast Pre-Audit / Scout）** | Gemini Flash 或 MiniMax M2.7 | （备选）主将提剑之前，先遣此二者拨云见日，最省灵气。 |
+
+按：
+- 今版出海（Release）默认行 OpenAI 之普适仙规直连。
+- 诸般真火通道（Lanes）今已分而治之，尽数仰赖天地灵气（环境变量）加赋，道长可于 `.env` 依自家底蕴任意拔擢顶替。
+- 寻常起势法阵以 Voyage 辅以 SiliconFlow 为常态大脉，足应万法。
 
 ---
 
@@ -340,8 +347,27 @@ set_state(
 # Core 向量查询底座
 VOYAGE_API_KEY="your_voyage_key_here"
 
-# 大模型抽取层与清洗归置
+# 同宗同源·总门基础之气 (共享通道)
 SILICONFLOW_API_KEY="your_siliconflow_key_here"
+SILICONFLOW_BASE_URL="https://api.siliconflow.cn/v1/chat/completions"
+SILICONFLOW_MODEL="Qwen/Qwen3.5-27B"
+
+# 千机百晓·特科真气 (独立通道覆盖，皆作可选选配)
+EXTRACT_API_KEY=""
+EXTRACT_BASE_URL=""
+EXTRACT_MODEL="Qwen/Qwen3.5-27B"
+
+DISTILL_API_KEY="your_minimax_key_here"
+DISTILL_BASE_URL="https://api.minimaxi.com/v1/chat/completions"
+DISTILL_MODEL="MiniMax-M2.7"
+
+SUMMARY_API_KEY="your_minimax_key_here"
+SUMMARY_BASE_URL="https://api.minimaxi.com/v1/chat/completions"
+SUMMARY_MODEL="MiniMax-M2.7"
+
+REASONING_API_KEY="your_glm_key_here"
+REASONING_BASE_URL="https://open.bigmodel.cn/api/coding/paas/v4/chat/completions"
+REASONING_MODEL="glm-5.1"
 
 # 本地 SQLite 文件路径 (可选·默认自动解析为 ~/.Tachi/global/memory.db + 项目 .Tachi/memory.db)
 MEMORY_DB_PATH="~/.Tachi/global/memory.db"
