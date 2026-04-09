@@ -1308,7 +1308,7 @@ dependencies = [
 
 [[package]]
 name = "memory-node"
-version = "0.15.2"
+version = "0.15.3"
 dependencies = [
  "memory-core",
  "napi",
@@ -1329,7 +1329,7 @@ dependencies = [
 
 [[package]]
 name = "memory-server"
-version = "0.15.2"
+version = "0.15.3"
 dependencies = [
  "aes-gcm",
  "argon2",

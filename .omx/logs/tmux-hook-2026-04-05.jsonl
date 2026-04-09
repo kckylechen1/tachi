@@ -1,0 +1,13 @@
+{"timestamp":"2026-04-05T02:39:34.652Z","type":"auto_nudge_skipped","reason":"unmanaged_session"}
+{"timestamp":"2026-04-05T02:49:37.252Z","type":"auto_nudge_skipped","reason":"unmanaged_session"}
+{"timestamp":"2026-04-05T02:51:28.573Z","type":"auto_nudge_skipped","reason":"unmanaged_session"}
+{"timestamp":"2026-04-05T02:58:28.363Z","type":"auto_nudge_skipped","reason":"unmanaged_session"}
+{"timestamp":"2026-04-05T03:06:15.557Z","type":"auto_nudge_skipped","reason":"unmanaged_session"}
+{"timestamp":"2026-04-05T03:13:15.826Z","type":"auto_nudge_skipped","reason":"unmanaged_session"}
+{"timestamp":"2026-04-05T03:16:27.338Z","type":"auto_nudge_skipped","reason":"unmanaged_session"}
+{"timestamp":"2026-04-05T03:17:19.079Z","type":"auto_nudge_skipped","reason":"unmanaged_session"}
+{"timestamp":"2026-04-05T03:20:23.112Z","type":"auto_nudge_skipped","reason":"unmanaged_session"}
+{"timestamp":"2026-04-05T03:40:04.166Z","type":"auto_nudge_skipped","reason":"unmanaged_session"}
+{"timestamp":"2026-04-05T08:29:45.140Z","type":"auto_nudge_skipped","reason":"stall_window_pending","source":"payload","stall_ms":5000,"signature":"payload:019d5cc2-a0aa-7a11-b814-b6ebb68d92ca|019d5cc2-a0c3-75a1-b5f3-25e9ba04d749|stall:proceed_intent"}
+{"timestamp":"2026-04-05T08:30:07.687Z","type":"auto_nudge_skipped","reason":"stall_window_pending","source":"payload","stall_ms":5000,"signature":"payload:019d5cc3-0afd-7ef3-8e22-f925d7ec54d6|019d5cc3-0b28-7fa0-ac0c-c284b7b0a7c9|stall:proceed_intent"}
+{"timestamp":"2026-04-05T08:49:53.134Z","type":"auto_nudge_skipped","reason":"stall_window_pending","source":"payload","stall_ms":5000,"signature":"payload:019d5cd5-0b51-7492-993b-b3b3266aed5c|019d5cd5-0b64-7533-a244-51396d9b5b07|stall:proceed_intent"}
