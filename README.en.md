@@ -109,7 +109,10 @@ Then add to your agent's MCP config:
 }
 ```
 
-> **Note**: Setting `"TACHI_PROFILE": "coordinate"` (or `"remember"`) ensures that standard Agent/IDE sidebars (like Cursor/Claude Desktop) are not cluttered with hundreds of raw Tachi skills, while still allowing the agent to access them cleanly via the `run_skill` tool.
+> **Note**: Setting `"TACHI_PROFILE": "coordinate"` (or `"remember"`) ensures that standard Agent/IDE sidebars (like Cursor/Claude Desktop) are not cluttered with hundreds of raw Tachi skills.
+> 
+> **🤖 Prompting Tip for IDE Agents**: Because individual skills are hidden in gateway mode, less capable AI assistants might not know how to invoke them organically. We strongly recommend appending the following strict instruction to your IDE's Custom Instructions or `.cursorrules`:
+> *"You have access to the Tachi MCP Server. You cannot see individual skills natively. When facing a complex task, you MUST first use the `recommend_skill` tool to search for an appropriate workflow capability. Once you find it, you MUST use the `run_skill` tool to execute it explicitly."*
 >
 > **Note**: The server loads `.env` from the project root automatically. See `.env.example` for all configuration options.
 >

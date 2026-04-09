@@ -112,7 +112,10 @@ brew tap kckylechen1/tachi && brew install tachi
 }
 ```
 
-> **注意**：配置 `"TACHI_PROFILE": "coordinate"`（或 `"remember"`）权限，可保证 Cursor、Claude Desktop 等外部界面的工具侧边栏**不会**被海量 `tachi_skill_*` 强行霸屏，但 Agent 依然能通过 `run_skill` 单入口干净地按需调取技能。
+> **注意**：配置 `"TACHI_PROFILE": "coordinate"`（或 `"remember"`）权限，可保证 Cursor、Claude Desktop 等外部界面的工具侧边栏**不会**被海量 `tachi_skill_*` 强行霸屏。
+> 
+> **🤖 针对“脑力平平” Agent 的调教指南**：因为隐藏了展平的直调工具，某些依赖穷举列表的 IDE Agent 可能不知道如何调用框架。建议在你的 Cursor Rules（`.cursorrules`）或全局 System Prompt 中强制补充以下“死命令”：
+> *“你已连接 Tachi MCP 记忆中枢。由于安全限制，你无法在工具列表里直接看到所有细分技能。当你需要处理业务任务时，**禁止自己瞎猜或乱写脚本**，你【必须】先调用 `recommend_skill` 工具查询可用的技能库组合，找到对应能力后，【必须】使用 `run_skill` 工具执行它。”*
 >
 > **注意**：服务器会自动从项目根目录加载 `.env` 文件。完整配置项请参见 `.env.example`。
 >
