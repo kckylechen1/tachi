@@ -166,8 +166,9 @@ Tachi 亦化身为 OpenClaw 气海之元婴法宝。
    - `plugins.slots.memory` 设置为 `tachi`
 
 3. 在项目根目录的 `.env` 中配置 API 密钥（参见 `.env.example`）：
-   - VOYAGE_API_KEY (向量与重排)
-   - SILICONFLOW_API_KEY (结构化抽取)
+   - `VOYAGE_API_KEY` (向量与重排)
+   - `SILICONFLOW_API_KEY` (结构化抽取)
+   - 或可逐一钦定暗卫司之各脉真火 (独立覆写)：`EXTRACT_*`, `DISTILL_*`, `SUMMARY_*`, `REASONING_*`
 
 运行要诀：
 - OpenClaw 现行运行拓扑，已按灵核各自分库：`data/agents/<agent>/memory.db`。

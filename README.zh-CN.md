@@ -156,8 +156,9 @@ Tachi 支持以外部扩展插件的形式桥接运行于 OpenClaw 内核。
    - `plugins.slots.memory` 设置为 `tachi`
 
 3. 在项目根目录的 `.env` 中配置 API 密钥（参见 `.env.example`）：
-   - VOYAGE_API_KEY (向量与重排)
-   - SILICONFLOW_API_KEY (结构化抽取)
+   - `VOYAGE_API_KEY` (向量与重排)
+   - `SILICONFLOW_API_KEY` (结构化提取的默认底座)
+   - 可选的工作站独立通道覆盖：`EXTRACT_*`, `DISTILL_*`, `SUMMARY_*`, `REASONING_*`
 
 运行注意事项：
 - 当前 OpenClaw 的运行时拓扑已经是按 agent 分库：`data/agents/<agent>/memory.db`。
