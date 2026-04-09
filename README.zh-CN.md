@@ -104,13 +104,16 @@ brew tap kckylechen1/tachi && brew install tachi
     "tachi": {
       "command": "tachi",
       "env": {
-        "VOYAGE_API_KEY": "your-key-here"
+        "VOYAGE_API_KEY": "your-key-here",
+        "TACHI_PROFILE": "coordinate"
       }
     }
   }
 }
 ```
 
+> **注意**：配置 `"TACHI_PROFILE": "coordinate"`（或 `"remember"`）权限，可保证 Cursor、Claude Desktop 等外部界面的工具侧边栏**不会**被海量 `tachi_skill_*` 强行霸屏，但 Agent 依然能通过 `run_skill` 单入口干净地按需调取技能。
+>
 > **注意**：服务器会自动从项目根目录加载 `.env` 文件。完整配置项请参见 `.env.example`。
 >
 > **数据库安全**：切勿将数据库放置在云同步文件夹中（iCloud、Dropbox、OneDrive）。SQLite WAL 模式与网络文件系统不兼容。

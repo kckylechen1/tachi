@@ -101,13 +101,16 @@ Then add to your agent's MCP config:
     "tachi": {
       "command": "tachi",
       "env": {
-        "VOYAGE_API_KEY": "your-key-here"
+        "VOYAGE_API_KEY": "your-key-here",
+        "TACHI_PROFILE": "coordinate"
       }
     }
   }
 }
 ```
 
+> **Note**: Setting `"TACHI_PROFILE": "coordinate"` (or `"remember"`) ensures that standard Agent/IDE sidebars (like Cursor/Claude Desktop) are not cluttered with hundreds of raw Tachi skills, while still allowing the agent to access them cleanly via the `run_skill` tool.
+>
 > **Note**: The server loads `.env` from the project root automatically. See `.env.example` for all configuration options.
 >
 > **Database Safety**: Never place the database in a cloud-synced folder (iCloud, Dropbox, OneDrive). SQLite WAL mode is incompatible with network filesystems.
