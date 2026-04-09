@@ -63,13 +63,15 @@ impl ServerHandler for MemoryServer {
                 }
             }
             // Add skill tools
-            match self.skill_tool_defs.lock() {
-                Ok(skill_defs) => tools.extend(skill_defs.values().cloned()),
-                Err(poisoned) => {
-                    eprintln!(
-                        "[list_tools] WARNING: skill_tool_defs mutex poisoned; recovering with inner state"
-                    );
-                    tools.extend(poisoned.into_inner().values().cloned());
+            if self.mcp_tool_exposure_mode != McpToolExposureMode::Gateway {
+                match self.skill_tool_defs.lock() {
+                    Ok(skill_defs) => tools.extend(skill_defs.values().cloned()),
+                    Err(poisoned) => {
+                        eprintln!(
+                            "[list_tools] WARNING: skill_tool_defs mutex poisoned; recovering with inner state"
+                        );
+                        tools.extend(poisoned.into_inner().values().cloned());
+                    }
                 }
             }
 
@@ -178,7 +180,14 @@ impl ServerHandler for MemoryServer {
                     })
                     .contains_key(name)
                 {
-                    self.call_skill_tool(name, params.arguments).await
+                    if self.mcp_tool_exposure_mode == McpToolExposureMode::Gateway {
+                        Err(rmcp::ErrorData::invalid_params(
+                            "Direct skill tools are disabled for gateway mode; use run_skill".to_string(),
+                            None,
+                        ))
+                    } else {
+                        self.call_skill_tool(name, params.arguments).await
+                    }
                 }
                 // 3. Proxy tools (server__tool pattern)
                 else if let Some((server_name, tool_name)) = name.split_once("__") {
