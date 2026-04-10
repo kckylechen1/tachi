@@ -817,6 +817,20 @@ pub(crate) struct WikiWriteParams {
     pub force: bool,
 }
 
+// ─── Wiki Search / Browse ───────────────────────────────────────────────────
+
+fn default_wiki_project() -> String {
+    "wiki".to_string()
+}
+
+fn default_wiki_search_top_k() -> usize {
+    10
+}
+
+fn default_wiki_browse_limit() -> usize {
+    50
+}
+
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub(crate) struct WikiSearchParams {
     /// Search query text.
@@ -826,8 +840,12 @@ pub(crate) struct WikiSearchParams {
     #[serde(default = "default_wiki_path_prefix_opt")]
     pub path_prefix: Option<String>,
 
+    /// Wiki category filter for legacy wiki_search, e.g. "quant" or "/wiki/engineering".
+    #[serde(default)]
+    pub category: Option<String>,
+
     /// Number of results to return.
-    #[serde(default = "default_top_k")]
+    #[serde(default = "default_wiki_search_top_k")]
     pub top_k: usize,
 
     /// Include archived wiki entries.
@@ -845,6 +863,26 @@ pub(crate) struct WikiSearchParams {
     /// Optional domain filter.
     #[serde(default)]
     pub domain: Option<String>,
+
+    /// Optional scoring weights override
+    #[serde(default)]
+    pub weights: Option<HybridWeightsParam>,
+}
+
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub(crate) struct WikiBrowseParams {
+    /// Wiki category path to browse, e.g. "/wiki/quant/strategy" or just "quant".
+    /// If omitted, returns top-level category stats.
+    #[serde(default)]
+    pub category: Option<String>,
+
+    /// Maximum entries to return when browsing a specific category
+    #[serde(default = "default_wiki_browse_limit")]
+    pub limit: usize,
+
+    /// Named project DB containing wiki memories (default: "wiki")
+    #[serde(default = "default_wiki_project")]
+    pub project: String,
 }
 
 /// Build a MemoryEntry from a JSON fact value (shared by extract_facts and ingest_event).

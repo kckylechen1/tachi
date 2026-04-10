@@ -532,14 +532,60 @@ pub(crate) async fn handle_recall_context(
         .collect::<Vec<_>>();
     let prepend_context = build_prepend_context(&final_rows);
 
+    // ── Wiki auto-search: enrich recall with wiki knowledge ─────────────
+    let (wiki_rows, wiki_context) = if params.include_wiki && !params.query.trim().is_empty() {
+        let wiki_top_k = params.wiki_top_k.max(1).min(10);
+        match search_memory_rows(
+            server,
+            SearchMemoryParams {
+                query: params.query.clone(),
+                query_vec: None,
+                top_k: wiki_top_k,
+                path_prefix: Some("/wiki".to_string()),
+                include_archived: false,
+                candidates_per_channel: (wiki_top_k * 3).max(20),
+                mmr_threshold: Some(0.85),
+                graph_expand_hops: 1,
+                graph_relation_filter: None,
+                weights: None,
+                agent_role: None,
+                project: Some(params.wiki_project.clone()),
+                domain: None,
+            },
+        )
+        .await
+        {
+            Ok(rows) if !rows.is_empty() => {
+                let ctx = build_wiki_context(&rows);
+                (rows, ctx)
+            }
+            Ok(_) => (vec![], String::new()),
+            Err(err) => {
+                eprintln!("[recall_context] wiki search failed, skipping: {err}");
+                (vec![], String::new())
+            }
+        }
+    } else {
+        (vec![], String::new())
+    };
+
+    // Combine prepend_context blocks
+    let combined_context = if wiki_context.is_empty() {
+        prepend_context
+    } else {
+        format!("{}\n{}", prepend_context, wiki_context)
+    };
+
     serde_json::to_string(&json!({
         "status": "completed",
         "count": final_rows.len(),
         "results": final_rows,
-        "prepend_context": prepend_context,
+        "prepend_context": combined_context,
         "path_prefixes": recall_scope.search_prefixes,
         "allowed_prefixes": recall_scope.allowed_prefixes,
         "warning": recall_scope.warning,
+        "wiki_count": wiki_rows.len(),
+        "wiki_results": wiki_rows,
     }))
     .map_err(|e| format!("Failed to serialize recall_context response: {e}"))
 }

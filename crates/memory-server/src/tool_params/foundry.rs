@@ -62,6 +62,18 @@ fn default_compact_session_importance() -> f64 {
     0.6
 }
 
+fn default_true_wiki() -> bool {
+    true
+}
+
+fn default_wiki_top_k() -> usize {
+    3
+}
+
+fn default_wiki_project_name() -> String {
+    "wiki".to_string()
+}
+
 // ─── Recall ─────────────────────────────────────────────────────────────────
 
 #[allow(dead_code)]
@@ -101,6 +113,19 @@ pub(crate) struct RecallContextParams {
     /// Optional named project DB
     #[serde(default)]
     pub project: Option<String>,
+
+    /// When true, automatically search the wiki knowledge base and include
+    /// relevant wiki entries in the prepend_context block (default: true)
+    #[serde(default = "default_true_wiki")]
+    pub include_wiki: bool,
+
+    /// Maximum wiki entries to include when include_wiki is true (default: 3)
+    #[serde(default = "default_wiki_top_k")]
+    pub wiki_top_k: usize,
+
+    /// Named project DB for wiki memories (default: "wiki")
+    #[serde(default = "default_wiki_project_name")]
+    pub wiki_project: String,
 }
 
 // ─── Capture ────────────────────────────────────────────────────────────────

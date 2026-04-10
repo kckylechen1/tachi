@@ -244,6 +244,7 @@ impl MemoryStore {
     }
 
     /// Backfill FTS index for entries missing from memories_fts.
+    /// Returns the number of rows inserted.
     pub fn backfill_fts_missing(&mut self) -> Result<usize, MemoryError> {
         let inserted = self.conn.execute(
             r#"INSERT INTO memories_fts (id, path, summary, text, keywords, entities)

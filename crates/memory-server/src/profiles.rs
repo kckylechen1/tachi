@@ -128,6 +128,8 @@ const OBSERVE_TOOL_PATTERNS: &[&str] = &[
     "list_memories",
     "memory_stats",
     "get_edges",
+    "wiki_search",
+    "wiki_browse",
 ];
 
 const REMEMBER_TOOL_PATTERNS: &[&str] = &[
@@ -167,6 +169,7 @@ const OPERATE_TOOL_PATTERNS: &[&str] = &[
     "list_agent_evolution_proposals",
     "hub_call",
     "hub_disconnect",
+    "wiki_lint",
 ];
 
 pub(super) fn parse_tool_profile(raw: &str) -> Option<ToolProfile> {

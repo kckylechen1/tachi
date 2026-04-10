@@ -318,6 +318,201 @@ pub(crate) fn refresh_skill_quality_guards(server: &MemoryServer) -> Result<Valu
     Ok(json!({"global": global, "project": project}))
 }
 
+// ─── Wiki Search ────────────────────────────────────────────────────────────
+
+/// Wiki category prefixes for quick lookup. Resolves short names to full paths.
+fn resolve_wiki_category(category: &str) -> String {
+    let trimmed = category.trim().trim_start_matches('/');
+    // Already a full wiki path
+    if trimmed.starts_with("wiki/") || trimmed.starts_with("wiki\\") {
+        return format!("/{}", trimmed);
+    }
+    // Short alias → full path
+    match trimmed.to_ascii_lowercase().as_str() {
+        "quant" | "trading" => "/wiki/quant".to_string(),
+        "quant/strategy" | "strategy" => "/wiki/quant/strategy".to_string(),
+        "quant/stock-analysis" | "stock-analysis" | "stock" => {
+            "/wiki/quant/stock-analysis".to_string()
+        }
+        "quant/portfolio" | "portfolio" => "/wiki/quant/portfolio".to_string(),
+        "quant/market-analysis" | "market-analysis" | "market" => {
+            "/wiki/quant/market-analysis".to_string()
+        }
+        "quant/data-pipeline" | "data-pipeline" | "data" => {
+            "/wiki/quant/data-pipeline".to_string()
+        }
+        "quant/autoresearch" | "autoresearch" => "/wiki/quant/autoresearch".to_string(),
+        "engineering" | "eng" | "code" | "coding" => "/wiki/engineering".to_string(),
+        "engineering/architecture" | "architecture" | "arch" => {
+            "/wiki/engineering/architecture".to_string()
+        }
+        "engineering/devops" | "devops" => "/wiki/engineering/devops".to_string(),
+        "engineering/debugging" | "debugging" | "debug" => {
+            "/wiki/engineering/debugging".to_string()
+        }
+        "engineering/code-review" | "code-review" | "review" => {
+            "/wiki/engineering/code-review".to_string()
+        }
+        "agent" => "/wiki/agent".to_string(),
+        "agent/tachi" | "tachi" => "/wiki/agent/tachi".to_string(),
+        "agent/openclaw" | "openclaw" => "/wiki/agent/openclaw".to_string(),
+        "agent/evolution" | "evolution" => "/wiki/agent/evolution".to_string(),
+        "product" => "/wiki/product".to_string(),
+        "product/hyperion" | "hyperion" => "/wiki/product/hyperion".to_string(),
+        "product/crimson-alphard" | "crimson-alphard" | "crimson" => {
+            "/wiki/product/crimson-alphard".to_string()
+        }
+        "misc" => "/wiki/misc".to_string(),
+        other => format!("/wiki/{}", other),
+    }
+}
+
+/// All known wiki top-level categories for browse stats.
+const WIKI_CATEGORIES: &[&str] = &[
+    "/wiki/quant/strategy",
+    "/wiki/quant/stock-analysis",
+    "/wiki/quant/portfolio",
+    "/wiki/quant/market-analysis",
+    "/wiki/quant/data-pipeline",
+    "/wiki/quant/autoresearch",
+    "/wiki/engineering/architecture",
+    "/wiki/engineering/devops",
+    "/wiki/engineering/debugging",
+    "/wiki/engineering/code-review",
+    "/wiki/agent/tachi",
+    "/wiki/agent/openclaw",
+    "/wiki/agent/evolution",
+    "/wiki/product/hyperion",
+    "/wiki/product/crimson-alphard",
+    "/wiki/misc",
+];
+
+pub(crate) async fn handle_wiki_search(
+    server: &MemoryServer,
+    params: WikiSearchParams,
+) -> Result<String, String> {
+    if params.query.trim().is_empty() {
+        return serde_json::to_string(&json!({
+            "status": "skipped",
+            "reason": "empty_query",
+            "count": 0,
+            "results": [],
+        }))
+        .map_err(|e| format!("serialize wiki_search: {e}"));
+    }
+
+    let path_prefix = params
+        .category
+        .as_deref()
+        .map(resolve_wiki_category)
+        .or_else(|| Some("/wiki".to_string()));
+
+    let rows = search_memory_rows(
+        server,
+        SearchMemoryParams {
+            query: params.query.clone(),
+            query_vec: None,
+            top_k: params.top_k.max(1).min(50),
+            path_prefix,
+            include_archived: false,
+            candidates_per_channel: params.top_k.max(20),
+            mmr_threshold: Some(0.85),
+            graph_expand_hops: 1,
+            graph_relation_filter: None,
+            weights: params.weights,
+            agent_role: None,
+            project: Some(params.project.unwrap_or_else(|| "wiki".to_string())),
+            domain: None,
+        },
+    )
+    .await?;
+
+    serde_json::to_string(&json!({
+        "status": "completed",
+        "count": rows.len(),
+        "results": rows,
+    }))
+    .map_err(|e| format!("serialize wiki_search: {e}"))
+}
+
+pub(crate) fn handle_wiki_browse(
+    server: &MemoryServer,
+    params: WikiBrowseParams,
+) -> Result<String, String> {
+    let project_name = params.project;
+
+    match params.category.as_deref() {
+        None | Some("") => {
+            // Return category stats (counts per category)
+            let mut categories = Vec::new();
+            let mut total = 0usize;
+
+            for &cat_path in WIKI_CATEGORIES {
+                let count = server
+                    .with_named_project_store_read(&project_name, |store| {
+                        store
+                            .list_by_path(cat_path, 5000, false)
+                            .map(|entries| entries.len())
+                            .map_err(|e| format!("wiki_browse count: {e}"))
+                    })
+                    .unwrap_or(0);
+                if count > 0 {
+                    categories.push(json!({
+                        "path": cat_path,
+                        "count": count,
+                    }));
+                    total += count;
+                }
+            }
+
+            serde_json::to_string(&json!({
+                "status": "completed",
+                "mode": "stats",
+                "total_entries": total,
+                "categories": categories,
+            }))
+            .map_err(|e| format!("serialize wiki_browse: {e}"))
+        }
+        Some(category) => {
+            // Browse a specific category
+            let resolved_path = resolve_wiki_category(category);
+            let limit = params.limit.max(1).min(500);
+
+            let entries = server.with_named_project_store_read(&project_name, |store| {
+                store
+                    .list_by_path(&resolved_path, limit, false)
+                    .map_err(|e| format!("wiki_browse list: {e}"))
+            })?;
+
+            let slim_entries: Vec<Value> = entries
+                .iter()
+                .map(|entry| {
+                    json!({
+                        "id": entry.id,
+                        "path": entry.path,
+                        "summary": entry.summary,
+                        "topic": entry.topic,
+                        "importance": entry.importance,
+                        "keywords": entry.keywords,
+                        "timestamp": entry.timestamp,
+                    })
+                })
+                .collect();
+
+            serde_json::to_string(&json!({
+                "status": "completed",
+                "mode": "browse",
+                "path": resolved_path,
+                "count": slim_entries.len(),
+                "entries": slim_entries,
+            }))
+            .map_err(|e| format!("serialize wiki_browse: {e}"))
+        }
+    }
+}
+
+// ─── Wiki Lint ──────────────────────────────────────────────────────────────
+
 pub(crate) async fn handle_wiki_lint(
     server: &MemoryServer,
     params: WikiLintParams,
