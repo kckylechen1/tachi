@@ -14,6 +14,10 @@ pub mod search;
 pub mod types;
 pub mod vault;
 
+pub use db::foundry_jobs::{
+    gc_foundry_jobs, insert_foundry_job, load_pending_foundry_jobs, update_foundry_job_status,
+    PersistedFoundryJob,
+};
 pub use error::MemoryError;
 pub use foundry::{
     AgentEvolutionProposal, AgentEvolutionSynthesis, AgentProfileDocument,
@@ -32,10 +36,6 @@ pub use types::{
     RetentionPolicy, SearchResult, StatsResult,
 };
 pub use vault::{SecretType, VaultConfig, VaultEntry, VaultKeyRotation};
-pub use db::foundry_jobs::{
-    gc_foundry_jobs, insert_foundry_job, load_pending_foundry_jobs, update_foundry_job_status,
-    PersistedFoundryJob,
-};
 
 use rusqlite::Connection;
 use std::time::Duration;
@@ -209,6 +209,63 @@ impl MemoryStore {
             })?
             .collect::<Result<Vec<_>, _>>()?;
         Ok(rows)
+    }
+
+    /// Get total memory count and FTS index count.
+    pub fn fts_stats(&self) -> Result<(i64, i64), MemoryError> {
+        let total: i64 = self
+            .conn
+            .query_row("SELECT COUNT(*) FROM memories", [], |r| r.get(0))?;
+        let with_fts: i64 =
+            self.conn
+                .query_row("SELECT COUNT(DISTINCT id) FROM memories_fts", [], |r| {
+                    r.get(0)
+                })?;
+        Ok((total, with_fts))
+    }
+
+    /// Backfill FTS index for entries missing from memories_fts.
+    /// Returns the number of rows inserted.
+    pub fn backfill_fts_missing(&mut self) -> Result<usize, MemoryError> {
+        let inserted = self.conn.execute(
+            r#"INSERT INTO memories_fts (id, path, summary, text, keywords, entities)
+               SELECT
+                 id, path, summary, text,
+                 trim(replace(replace(replace(keywords, '[', ' '), ']', ' '), '"', ' ')),
+                 trim(replace(replace(replace(entities, '[', ' '), ']', ' '), '"', ' '))
+               FROM memories
+               WHERE id NOT IN (SELECT id FROM memories_fts)"#,
+            [],
+        )?;
+        Ok(inserted)
+    }
+
+    /// Full FTS rebuild: drop the table, recreate, and re-insert all rows.
+    /// Use this when the FTS index is corrupted.
+    pub fn rebuild_fts_full(&mut self) -> Result<usize, MemoryError> {
+        self.conn
+            .execute_batch("DROP TABLE IF EXISTS memories_fts;")?;
+        self.conn.execute_batch(
+            r#"CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts USING fts5(
+                   id UNINDEXED,
+                   path,
+                   summary,
+                   text,
+                   keywords,
+                   entities,
+                   tokenize = 'simple'
+               );"#,
+        )?;
+        let inserted = self.conn.execute(
+            r#"INSERT INTO memories_fts (id, path, summary, text, keywords, entities)
+               SELECT
+                 id, path, summary, text,
+                 trim(replace(replace(replace(keywords, '[', ' '), ']', ' '), '"', ' ')),
+                 trim(replace(replace(replace(entities, '[', ' '), ']', ' '), '"', ' '))
+               FROM memories"#,
+            [],
+        )?;
+        Ok(inserted)
     }
 
     /// Get total memory count and vector count.

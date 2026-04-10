@@ -125,14 +125,12 @@ const OBSERVE_TOOL_PATTERNS: &[&str] = &[
     "list_memories",
     "memory_stats",
     "get_edges",
+    "wiki_search",
+    "wiki_browse",
 ];
 
-const REMEMBER_TOOL_PATTERNS: &[&str] = &[
-    "save_memory",
-    "extract_facts",
-    "run_skill",
-    "ingest_event",
-];
+const REMEMBER_TOOL_PATTERNS: &[&str] =
+    &["save_memory", "extract_facts", "run_skill", "ingest_event"];
 
 const COORDINATE_TOOL_PATTERNS: &[&str] = &[
     "check_inbox",
@@ -163,6 +161,7 @@ const OPERATE_TOOL_PATTERNS: &[&str] = &[
     "list_agent_evolution_proposals",
     "hub_call",
     "hub_disconnect",
+    "wiki_lint",
 ];
 
 pub(super) fn parse_tool_profile(raw: &str) -> Option<ToolProfile> {

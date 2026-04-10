@@ -925,11 +925,167 @@ async fn run_setup_command(
     )?;
 
     if json_output {
-        print_pretty_json(&serde_json::to_value(&report)?)
-    } else {
-        println!("{}", render_setup_report(&report));
-        Ok(())
+        return print_pretty_json(&serde_json::to_value(&report)?);
     }
+
+    println!("{}", render_setup_report(&report));
+
+    // Interactive wizard — only when stdout is a TTY and not JSON mode
+    if !atty_stdout() {
+        return Ok(());
+    }
+
+    let needs_attention: Vec<&SetupItem> = report
+        .items
+        .iter()
+        .filter(|item| item.status != "ready" && item.status != "configured")
+        .collect();
+
+    if needs_attention.is_empty() {
+        println!("\nAll checks passed. Nothing to configure.");
+        return Ok(());
+    }
+
+    let proceed = dialoguer::Confirm::new()
+        .with_prompt("Run interactive setup wizard?")
+        .default(true)
+        .interact()?;
+
+    if !proceed {
+        return Ok(());
+    }
+
+    let config_env_path = app_home.join("config.env");
+    let mut new_entries: Vec<(String, String)> = Vec::new();
+
+    // 1. API Keys
+    let missing_keys: Vec<(&str, &str)> = SETUP_API_KEYS
+        .iter()
+        .filter(|(key, _)| {
+            !env_vars
+                .get(*key)
+                .map(|v| !v.trim().is_empty())
+                .unwrap_or(false)
+        })
+        .copied()
+        .collect();
+
+    if !missing_keys.is_empty() {
+        println!("\n--- API Keys ---");
+        for (key, label) in &missing_keys {
+            let value: String = dialoguer::Input::new()
+                .with_prompt(format!("{key} ({label})"))
+                .allow_empty(true)
+                .interact_text()?;
+            let value = value.trim().to_string();
+            if !value.is_empty() {
+                new_entries.push((key.to_string(), value));
+            }
+        }
+    }
+
+    // 2. Pipeline
+    let pipeline_enabled = env_vars
+        .get("ENABLE_PIPELINE")
+        .map(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"))
+        .unwrap_or(false);
+
+    if !pipeline_enabled {
+        println!("\n--- Pipeline ---");
+        let enable = dialoguer::Confirm::new()
+            .with_prompt("Enable the extraction pipeline? (ENABLE_PIPELINE=true)")
+            .default(false)
+            .interact()?;
+        if enable {
+            new_entries.push(("ENABLE_PIPELINE".to_string(), "true".to_string()));
+        }
+    }
+
+    // 3. Daemon settings
+    let daemon_port = env_vars.get("TACHI_DAEMON_PORT");
+    if daemon_port.is_none() {
+        println!("\n--- Daemon ---");
+        let port: String = dialoguer::Input::new()
+            .with_prompt("Daemon port (TACHI_DAEMON_PORT)")
+            .default("6919".to_string())
+            .interact_text()?;
+        let port = port.trim().to_string();
+        if !port.is_empty() && port != "6919" {
+            new_entries.push(("TACHI_DAEMON_PORT".to_string(), port));
+        }
+    }
+
+    // Write to config.env
+    if new_entries.is_empty() {
+        println!("\nNo new values to write.");
+        return Ok(());
+    }
+
+    println!("\nWill append to {}:", config_env_path.display());
+    for (key, value) in &new_entries {
+        let masked = if key.contains("KEY") || key.contains("SECRET") || key.contains("TOKEN") {
+            let v = value.as_str();
+            if v.len() > 8 {
+                format!("{}...{}", &v[..4], &v[v.len() - 4..])
+            } else {
+                "****".to_string()
+            }
+        } else {
+            value.clone()
+        };
+        println!("  {key}={masked}");
+    }
+
+    let confirm = dialoguer::Confirm::new()
+        .with_prompt("Write these values?")
+        .default(true)
+        .interact()?;
+
+    if !confirm {
+        println!("Aborted.");
+        return Ok(());
+    }
+
+    // Ensure parent directory exists
+    if let Some(parent) = config_env_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+
+    // Read existing content and build updated lines
+    let existing = std::fs::read_to_string(&config_env_path).unwrap_or_default();
+    let mut existing_lines: Vec<String> = existing.lines().map(String::from).collect();
+
+    for (key, value) in &new_entries {
+        let prefix = format!("{key}=");
+        let commented_prefix = format!("# {key}=");
+        let mut replaced = false;
+        for line in existing_lines.iter_mut() {
+            let trimmed = line.trim();
+            if trimmed.starts_with(&prefix) || trimmed.starts_with(&commented_prefix) {
+                *line = format!("{key}={value}");
+                replaced = true;
+                break;
+            }
+        }
+        if !replaced {
+            existing_lines.push(format!("{key}={value}"));
+        }
+    }
+
+    // Ensure trailing newline
+    let mut output = existing_lines.join("\n");
+    if !output.ends_with('\n') {
+        output.push('\n');
+    }
+
+    std::fs::write(&config_env_path, output)?;
+    println!("\nWrote {} entries to {}", new_entries.len(), config_env_path.display());
+    println!("Restart the daemon for changes to take effect.");
+    Ok(())
+}
+
+fn atty_stdout() -> bool {
+    unsafe { libc::isatty(libc::STDOUT_FILENO) != 0 }
 }
 
 async fn run_tidy_command(
@@ -1070,6 +1226,9 @@ async fn run_cli_command(
         }
         Commands::BackfillSummaries { .. } => {
             unreachable!("BackfillSummaries is handled in async context before this point")
+        }
+        Commands::BackfillFts { .. } => {
+            unreachable!("BackfillFts is handled in async context before this point")
         }
         Commands::Setup { .. } => {
             unreachable!("Setup is handled in async context before generic CLI dispatch")
@@ -1283,6 +1442,20 @@ async fn tokio_main(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             global_db_path.clone()
         };
         return run_backfill_summaries(&target_path, *dry_run).await;
+    }
+
+    if let Commands::BackfillFts {
+        db,
+        full,
+        dry_run,
+    } = &command
+    {
+        let target_path = if let Some(p) = db {
+            expand_user_path(p.to_string_lossy().as_ref())
+        } else {
+            global_db_path.clone()
+        };
+        return run_backfill_fts(&target_path, *full, *dry_run).await;
     }
 
     let gc_enabled = cli
@@ -1926,5 +2099,55 @@ async fn run_backfill_summaries(
     let final_missing = store.entries_missing_summaries()?.len();
     let final_with_summary = total.saturating_sub(final_missing as u64);
     println!("\n✅ Done! Summaries: {with_summary} → {final_with_summary} / {total}");
+    Ok(())
+}
+
+/// Rebuild or backfill FTS5 full-text search index for a given DB.
+async fn run_backfill_fts(
+    db_path: &PathBuf,
+    full: bool,
+    dry_run: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let db_str = db_path.to_str().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("DB path contains invalid UTF-8: {}", db_path.display()),
+        )
+    })?;
+
+    let store = MemoryStore::open(db_str)?;
+    let (total, with_fts) = store.fts_stats()?;
+    let missing = total - with_fts;
+
+    println!("DB:      {}", db_path.display());
+    println!("Total:   {total}");
+    println!("FTS:     {with_fts}");
+    println!("Missing: {missing}");
+    println!("Mode:    {}", if full { "full rebuild" } else { "incremental" });
+
+    if !full && missing == 0 {
+        println!("\n✅ All entries have FTS index!");
+        return Ok(());
+    }
+
+    if dry_run {
+        println!("\n(dry-run mode, no changes made)");
+        return Ok(());
+    }
+
+    drop(store);
+    let mut store = MemoryStore::open(db_str)?;
+
+    if full {
+        println!("\nDropping and rebuilding FTS table...");
+        let inserted = store.rebuild_fts_full()?;
+        println!("\n✅ Full rebuild done! {inserted} entries indexed.");
+    } else {
+        println!("\nBackfilling {missing} missing FTS entries...");
+        let inserted = store.backfill_fts_missing()?;
+        let (_, final_fts) = store.fts_stats()?;
+        println!("\n✅ Done! FTS: {with_fts} → {final_fts} / {total} (+{inserted})");
+    }
+
     Ok(())
 }

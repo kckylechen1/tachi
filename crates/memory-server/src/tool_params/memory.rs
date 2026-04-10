@@ -736,6 +736,59 @@ pub(crate) struct WikiLintParams {
     pub contradiction_threshold: f64,
 }
 
+// ─── Wiki Search / Browse ───────────────────────────────────────────────────
+
+fn default_wiki_project() -> String {
+    "wiki".to_string()
+}
+
+fn default_wiki_search_top_k() -> usize {
+    10
+}
+
+fn default_wiki_browse_limit() -> usize {
+    50
+}
+
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub(crate) struct WikiSearchParams {
+    /// Natural language search query against the wiki knowledge base
+    pub query: String,
+
+    /// Wiki category filter: "quant", "engineering", "agent", "product", "misc", or a full path like "/wiki/quant/strategy".
+    /// If omitted, searches all wiki categories.
+    #[serde(default)]
+    pub category: Option<String>,
+
+    /// Number of results to return (default: 10)
+    #[serde(default = "default_wiki_search_top_k")]
+    pub top_k: usize,
+
+    /// Named project DB containing wiki memories (default: "wiki")
+    #[serde(default = "default_wiki_project")]
+    pub project: String,
+
+    /// Optional scoring weights override
+    #[serde(default)]
+    pub weights: Option<HybridWeightsParam>,
+}
+
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub(crate) struct WikiBrowseParams {
+    /// Wiki category path to browse, e.g. "/wiki/quant/strategy" or just "quant".
+    /// If omitted, returns top-level category stats.
+    #[serde(default)]
+    pub category: Option<String>,
+
+    /// Maximum entries to return when browsing a specific category
+    #[serde(default = "default_wiki_browse_limit")]
+    pub limit: usize,
+
+    /// Named project DB containing wiki memories (default: "wiki")
+    #[serde(default = "default_wiki_project")]
+    pub project: String,
+}
+
 /// Build a MemoryEntry from a JSON fact value (shared by extract_facts and ingest_event).
 pub(crate) fn fact_to_entry(
     fact: &serde_json::Value,

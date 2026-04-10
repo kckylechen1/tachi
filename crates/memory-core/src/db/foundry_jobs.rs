@@ -50,7 +50,11 @@ pub fn insert_foundry_job(conn: &Connection, job: &PersistedFoundryJob) -> Resul
             job.spec.evidence_count as i64,
             job.spec.goal_count as i64,
             job.spec.metadata.to_string(),
-            if job.spec.created_at.is_empty() { &now } else { &job.spec.created_at },
+            if job.spec.created_at.is_empty() {
+                &now
+            } else {
+                &job.spec.created_at
+            },
             now,
         ],
     )?;

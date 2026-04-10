@@ -124,7 +124,7 @@ use crate::vault_ops::{
     VaultGetParams, VaultInitParams, VaultListParams, VaultRemoveParams, VaultSetParams,
     VaultSetupRotationParams, VaultUnlockParams,
 };
-use crate::wiki_ops::handle_wiki_lint;
+use crate::wiki_ops::{handle_wiki_browse, handle_wiki_lint, handle_wiki_search};
 
 use chrono::Utc;
 use clap::Parser;
@@ -221,6 +221,8 @@ const CACHEABLE_TOOLS: &[&str] = &[
     "get_pipeline_status",
     "list_domains",
     "get_domain",
+    "wiki_search",
+    "wiki_browse",
 ];
 
 /// Tools that invalidate the cache (write operations)
@@ -826,6 +828,26 @@ impl MemoryServer {
         Parameters(params): Parameters<WikiLintParams>,
     ) -> Result<String, String> {
         handle_wiki_lint(self, params).await
+    }
+
+    #[tool(
+        description = "Search the wiki knowledge base for relevant entries. The wiki contains distilled knowledge from past development sessions organized by category (quant, engineering, agent, product). Supports short category aliases like 'quant', 'strategy', 'tachi', 'debugging', etc."
+    )]
+    async fn wiki_search(
+        &self,
+        Parameters(params): Parameters<WikiSearchParams>,
+    ) -> Result<String, String> {
+        handle_wiki_search(self, params).await
+    }
+
+    #[tool(
+        description = "Browse wiki entries by category. Without a category, returns category stats (counts per path). With a category, lists entries under that path. Supports short aliases like 'quant', 'engineering', 'tachi', etc."
+    )]
+    async fn wiki_browse(
+        &self,
+        Parameters(params): Parameters<WikiBrowseParams>,
+    ) -> Result<String, String> {
+        handle_wiki_browse(self, params)
     }
 
     #[tool(description = "Set a key-value pair in server state (stored in hard_state table).")]

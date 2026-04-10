@@ -27,6 +27,7 @@ argon2 = { workspace = true }
 base64 = { workspace = true }
 rand = { workspace = true }
 regex = { workspace = true }
+dialoguer = "0.11"
 
 [[bin]]
 name = "memory-server"

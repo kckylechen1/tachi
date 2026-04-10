@@ -132,6 +132,64 @@ pub(super) fn build_prepend_context(rows: &[Value]) -> String {
     block
 }
 
+/// Build a dedicated wiki knowledge context block from wiki search results.
+pub(super) fn build_wiki_context(rows: &[Value]) -> String {
+    if rows.is_empty() {
+        return String::new();
+    }
+
+    let wiki_lines = rows
+        .iter()
+        .enumerate()
+        .map(|(idx, row)| {
+            let path = row.get("path").and_then(Value::as_str).unwrap_or("unknown");
+            let topic = value_topic(row);
+            let relevance = value_relevance(row);
+            let summary = value_summary(row);
+            let text = value_text(row);
+            let keywords = value_string_array(row, "keywords").join(", ");
+
+            // Extract category from path for cleaner display
+            let category = path
+                .strip_prefix("/wiki/")
+                .unwrap_or(path)
+                .replace('/', " > ");
+
+            [
+                format!(
+                    "W-ENTRY #{} [Category={}] [Topic={}] [Score={:.2}]",
+                    idx + 1,
+                    category,
+                    if topic.is_empty() { "unknown" } else { &topic },
+                    relevance
+                ),
+                format!(
+                    "Summary: {}",
+                    if summary.is_empty() {
+                        text.chars().take(120).collect::<String>()
+                    } else {
+                        summary
+                    }
+                ),
+                if keywords.is_empty() {
+                    String::new()
+                } else {
+                    format!("Keywords: {}", keywords)
+                },
+            ]
+            .into_iter()
+            .filter(|line| !line.is_empty())
+            .collect::<Vec<_>>()
+            .join("\n")
+        })
+        .collect::<Vec<_>>();
+
+    format!(
+        "\n<wiki-knowledge>\n{}\n</wiki-knowledge>\n",
+        wiki_lines.join("\n\n")
+    )
+}
+
 pub(super) fn parse_compact_context_response(raw: &str) -> Result<CompactContextDraft, String> {
     let json_str = llm::LlmClient::strip_code_fence(raw);
     let parsed: CompactContextDraft = serde_json::from_str(json_str).map_err(|e| {
