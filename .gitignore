@@ -2,6 +2,9 @@
 .env
 .env.local
 
+# oh-my-codex (omx) plugin artifacts
+.omx/
+
 # Node.js
 node_modules/
 npm-debug.log
