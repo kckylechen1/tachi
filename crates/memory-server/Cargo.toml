@@ -1,6 +1,6 @@
 [package]
 name = "memory-server"
-version = "0.15.3"
+version = "0.16.0"
 edition = "2021"
 
 [dependencies]
@@ -27,7 +27,12 @@ argon2 = { workspace = true }
 base64 = { workspace = true }
 rand = { workspace = true }
 regex = { workspace = true }
+rusqlite = { workspace = true }
 
 [[bin]]
 name = "memory-server"
 path = "src/main.rs"
+
+[[bin]]
+name = "tachi-hub"
+path = "src/bin/tachi_hub.rs"

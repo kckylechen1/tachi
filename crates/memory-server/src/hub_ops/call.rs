@@ -90,7 +90,7 @@ pub(crate) async fn handle_run_skill(
 
     // Record call outcome for skill telemetry (enables skill_evolve)
     let success = result.is_ok();
-    let error_msg = result.as_ref().err().map(|e| format!("{e}"));
+    let error_msg = result.as_ref().err().map(|e| e.to_string());
     let _ = server.record_capability_call_outcome(&params.skill_id, success, error_msg.as_deref());
 
     result.map_err(|e| format!("skill execution failed: {}", e))

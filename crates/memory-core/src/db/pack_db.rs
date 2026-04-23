@@ -176,7 +176,7 @@ pub fn projection_list(
     sql.push_str(order_by);
 
     let mut stmt = conn.prepare(&sql)?;
-    let params = rusqlite::params_from_iter(agent.into_iter().chain(pack_id.into_iter()));
+    let params = rusqlite::params_from_iter(agent.into_iter().chain(pack_id));
 
     let rows = stmt.query_map(params, |row| {
         Ok(AgentProjection {

@@ -44,7 +44,7 @@ pub fn encrypt(key: &[u8; 32], plaintext: &[u8]) -> Result<(String, String), Str
     let ciphertext = cipher
         .encrypt(nonce, plaintext)
         .map_err(|e| format!("Encryption failed: {e}"))?;
-    Ok((B64.encode(&ciphertext), B64.encode(&nonce_bytes)))
+    Ok((B64.encode(&ciphertext), B64.encode(nonce_bytes)))
 }
 
 /// Decrypt ciphertext (base64) with AES-256-GCM.

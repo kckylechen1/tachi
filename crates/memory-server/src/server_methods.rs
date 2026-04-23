@@ -828,12 +828,12 @@ impl MemoryServer {
             // Evict stale sessions when map exceeds cap
             if windows.len() > RATE_LIMIT_MAX_SESSIONS {
                 let cutoff = now - Duration::from_secs(120);
-                windows.retain(|_, deque| deque.back().map_or(false, |&t| t >= cutoff));
+                windows.retain(|_, deque| deque.back().is_some_and(|&t| t >= cutoff));
             }
 
             let window = windows
                 .entry(session_id.to_string())
-                .or_insert_with(VecDeque::new);
+                .or_default();
 
             // Evict entries older than 60 seconds
             let cutoff = now - Duration::from_secs(60);
@@ -876,10 +876,10 @@ impl MemoryServer {
             // Evict stale burst keys when map exceeds cap
             if bursts.len() > RATE_LIMIT_MAX_BURST_KEYS {
                 let cutoff = now - RATE_LIMIT_BURST_WINDOW;
-                bursts.retain(|_, deque| deque.back().map_or(false, |&t| t >= cutoff));
+                bursts.retain(|_, deque| deque.back().is_some_and(|&t| t >= cutoff));
             }
 
-            let stamps = bursts.entry(burst_key).or_insert_with(VecDeque::new);
+            let stamps = bursts.entry(burst_key).or_default();
 
             // Evict entries outside the burst window
             let cutoff = now - RATE_LIMIT_BURST_WINDOW;

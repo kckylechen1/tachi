@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.16.0] - 2026-04-23
+
+### Fixed
+- **Coherent foundry distill**: `process_memory_distill_job` now buckets candidate memories by `topic:` / `entity:` before invoking the LLM. Previously the worker passed every record under a `path` prefix to the model, producing "缝合怪" (frankenstein) summaries that mixed unrelated topics. Memories without a topic or entity are skipped; the largest coherent bucket wins, and distilled output is tagged with a `coherence_key` for traceability. (`crates/memory-server/src/foundry_runtime_ops/maintenance.rs`)
+- **Hallucinated foundry rows purged**: 47 phantom `topic='foundry_distill'` records under `/foundry/%` were hard-deleted from the antigravity DB (and verified absent from global). FTS, edges, and vector caches were swept in the same migration.
+- **Project DB schema drift**: Older project DBs (`tachi`, `sigil`, `openclaw`) were missing the `retention_policy` and `domain` columns added in 0.15.x. `tachi-hub doctor --fix` now patches drift in-place; the standard `memory-server` boot path already auto-migrates.
+
+### Added
+- **`tachi-hub` CLI**: New standalone read-only inspector binary shipped from the `memory-server` crate. Subcommands: `list`, `show`, `packs`, `bindings`, `stats`, `doctor [--fix]`. Reads `~/.tachi/global/memory.db` (or `$TACHI_HOME`) without spawning the MCP server. Brew bottle now ships both `memory-server` and `tachi-hub`.
+- **Tachi usage addendum (`prompts/tachi_addendum.md`)**: Curated guide that operators can include into agent root prompts (`AGENTS.md` / `CLAUDE.md` / `GEMINI.md`). Covers the three iron rules (search-before-write, structured `save_memory`, skill-first), tool quick-reference table, path conventions, anti-patterns, and the new `tachi-hub` CLI surface. Not auto-injected — operators copy the fenced block manually.
+- **`VOYAGE_RERANK_API_KEY` setup hint**: Added as an optional fifth entry in `bootstrap::SETUP_API_KEYS` so `tachi setup` and `install.sh` surface it. The key is currently informational; the rerank wiring is intentionally not yet enabled in the search pipeline.
+- **Antigravity DB de-noising**: `scripts/migrate_antigravity_split.py` reclassified 808 cross-cutting records out of the antigravity DB into their owning project DBs (hapi 501, quant 148, openclaw 55, tachi 36, sigil 35, global 22, hyperion 11), and stood up the new `quant` and `hyperion` project DBs. The script doubles as a worked example for the foundry classifier model.
+- **`build-bottles.yml` workflow**: GitHub Actions workflow for cross-platform Homebrew bottle builds, triggered on tag push or manual dispatch.
+
+### Changed
+- **`integrations/openclaw`**, **all four core crates**, and the brew formula bumped to `0.16.0`.
+
 ### Changed
 - **Tool surface bundles**: Replaced mutually exclusive tool profiles with additive surface bundles: `observe`, `remember`, `coordinate`, `operate`, and `admin`.
 - **Compatibility default**: Tachi still keeps `admin` as the implicit no-profile default, but host aliases and docs now steer new integrations toward explicit least-privilege bundles.

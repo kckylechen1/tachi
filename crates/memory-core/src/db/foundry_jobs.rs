@@ -114,10 +114,8 @@ pub fn load_pending_foundry_jobs(
     })?;
 
     let mut jobs = Vec::new();
-    for row in rows {
-        if let Ok(job) = row {
-            jobs.push(job);
-        }
+    for job in rows.flatten() {
+        jobs.push(job);
     }
     Ok(jobs)
 }

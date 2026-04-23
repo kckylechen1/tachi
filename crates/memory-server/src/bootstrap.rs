@@ -1,8 +1,9 @@
 use super::*;
 use serde::Serialize;
 
-const SETUP_API_KEYS: [(&str, &str); 4] = [
-    ("VOYAGE_API_KEY", "Voyage embeddings"),
+const SETUP_API_KEYS: [(&str, &str); 5] = [
+    ("VOYAGE_API_KEY", "Voyage embeddings (voyage-4)"),
+    ("VOYAGE_RERANK_API_KEY", "Voyage reranking (rerank-2.5) — optional"),
     ("SILICONFLOW_API_KEY", "SiliconFlow extraction"),
     ("MINIMAX_API_KEY", "MiniMax distill/summary"),
     ("REASONING_API_KEY", "GLM-5.1 reasoning lane"),
@@ -198,11 +199,10 @@ fn collect_memory_db_files(root: &std::path::Path, out: &mut Vec<PathBuf>, max_d
             continue;
         }
 
-        if path.is_dir() {
-            if max_depth > 0 {
+        if path.is_dir()
+            && max_depth > 0 {
                 collect_memory_db_files(&path, out, max_depth.saturating_sub(1));
             }
-        }
     }
 }
 
@@ -406,8 +406,7 @@ pub(crate) fn build_setup_report(
         })
         .collect::<Vec<_>>();
 
-    let agent_configs = vec![
-        (
+    let agent_configs = [(
             "amp",
             home.join("Library/Application Support/Amp/settings.json"),
         ),
@@ -416,8 +415,7 @@ pub(crate) fn build_setup_report(
         ("gemini", home.join(".gemini").join("mcp.json")),
         ("codex", home.join(".codex")),
         ("openclaw", home.join(".openclaw").join("openclaw.json")),
-        ("opencode", home.join(".opencode")),
-    ];
+        ("opencode", home.join(".opencode"))];
     let detected_agents = agent_configs
         .iter()
         .filter(|(_, path)| path.exists())

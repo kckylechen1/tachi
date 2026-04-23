@@ -333,7 +333,7 @@ pub(super) async fn handle_vault_init(
         }
 
         let salt = crypto::generate_salt();
-        let salt_b64 = B64.encode(&salt);
+        let salt_b64 = B64.encode(salt);
         let key = crypto::derive_key(&params.password, &salt)?;
         let verifier = crypto::create_verifier(&key)?;
         let now = Utc::now().to_rfc3339();
@@ -415,13 +415,13 @@ pub(super) async fn handle_vault_unlock(
 }
 
 pub(super) async fn handle_vault_lock(server: &MemoryServer) -> Result<String, String> {
-    let result = (|| {
+    let result = {
         clear_cached_vault_state(server);
         serde_json::to_string(&json!({
             "locked": true
         }))
         .map_err(|e| format!("serialize: {e}"))
-    })();
+    };
 
     record_vault_audit(
         server,

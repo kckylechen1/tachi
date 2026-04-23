@@ -498,6 +498,33 @@ async fn process_memory_rerank_job(
     Ok(updated)
 }
 
+/// Minimum coherent batch size — fewer than this and a topic/entity bucket is
+/// considered too thin to justify an LLM round-trip (avoids stitched hallucinations).
+const FOUNDRY_DISTILL_MIN_BATCH: usize = 3;
+
+/// Group memories by a coherence key (topic when available, otherwise the most
+/// frequent shared entity). Buckets smaller than [`FOUNDRY_DISTILL_MIN_BATCH`]
+/// are dropped — they would otherwise force the LLM to stitch unrelated facts
+/// into a single false summary (the v0.15.x "缝合怪" regression).
+fn coherent_distill_buckets(entries: Vec<MemoryEntry>) -> Vec<(String, Vec<MemoryEntry>)> {
+    let mut buckets: HashMap<String, Vec<MemoryEntry>> = HashMap::new();
+    for entry in entries {
+        let key = if !entry.topic.trim().is_empty() {
+            format!("topic:{}", entry.topic.trim())
+        } else if let Some(first_entity) = entry.entities.first() {
+            format!("entity:{}", first_entity)
+        } else {
+            // No coherence signal — skip rather than risk a stitched distill.
+            continue;
+        };
+        buckets.entry(key).or_default().push(entry);
+    }
+    buckets
+        .into_iter()
+        .filter(|(_, group)| group.len() >= FOUNDRY_DISTILL_MIN_BATCH)
+        .collect()
+}
+
 async fn process_memory_distill_job(
     server: &MemoryServer,
     item: &FoundryMaintenanceItem,
@@ -508,13 +535,23 @@ async fn process_memory_distill_job(
             .map_err(|e| format!("Failed to load recent memories for distill: {e}"))
     })?;
 
-    let source_entries = source_entries
+    let raw_entries = source_entries
         .into_iter()
         .filter(|entry| entry.source != FOUNDRY_DISTILL_SOURCE)
         .collect::<Vec<_>>();
-    if source_entries.is_empty() {
+    if raw_entries.is_empty() {
         return Ok(None);
     }
+
+    // Coherence guard: only distil memories that share a topic or entity.
+    // Pick the largest coherent bucket per job to keep behaviour 1:1 with the
+    // legacy contract (one distill output per job).
+    let mut buckets = coherent_distill_buckets(raw_entries);
+    if buckets.is_empty() {
+        return Ok(None);
+    }
+    buckets.sort_by(|a, b| b.1.len().cmp(&a.1.len()));
+    let (bucket_key, source_entries) = buckets.into_iter().next().expect("non-empty");
 
     let distill_text = server
         .llm
@@ -538,6 +575,7 @@ async fn process_memory_distill_job(
         json!({
             "source_memory_ids": source_entries.iter().map(|entry| entry.id.clone()).collect::<Vec<_>>(),
             "source_path_prefix": item.path_prefix,
+            "coherence_key": bucket_key,
             "job_id": item.job.id,
         }),
         "foundry_worker",

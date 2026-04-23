@@ -95,7 +95,7 @@ impl JsMemoryStore {
             }
         }
 
-        let mut store = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        let store = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         let results = store
             .search(&query, Some(opts))
             .map_err(|e| napi::Error::from_reason(e.to_string()))?;
