@@ -250,6 +250,6 @@ if [ "$SKIP_PLUGIN" -eq 0 ]; then
 fi
 echo ""
 echo "Next steps:"
-echo "  1. Configure API keys (VOYAGE_API_KEY, SILICONFLOW_API_KEY)"
+echo "  1. Configure API keys (VOYAGE_API_KEY, VOYAGE_RERANK_API_KEY [optional], SILICONFLOW_API_KEY, MINIMAX_API_KEY, REASONING_API_KEY)"
 echo "  2. Restart the OpenClaw gateway"
 echo "  3. Verify Tachi with: tachi --help"

@@ -53,7 +53,7 @@ pub(crate) async fn handle_hub_review(
     let review_status = normalize_review_status(&params.review_status)
         .ok_or_else(|| "review_status must be one of: pending, approved, rejected".to_string())?;
 
-    let enabled_override = params.enabled.or_else(|| match review_status {
+    let enabled_override = params.enabled.or(match review_status {
         "approved" => Some(true),
         "rejected" => Some(false),
         _ => None,

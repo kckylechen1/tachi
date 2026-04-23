@@ -1,0 +1,147 @@
+name: Build & Publish Homebrew Bottles
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version (without leading v)"
+        required: false
+
+jobs:
+  resolve-version:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve version
+        id: version
+        run: |
+          if [ "${GITHUB_EVENT_NAME}" = "workflow_dispatch" ] && [ -n "${{ inputs.version }}" ]; then
+            version="${{ inputs.version }}"
+          else
+            version="${GITHUB_REF_NAME#v}"
+          fi
+
+          server_version=$(python3 -c 'from pathlib import Path; import re; text = Path("crates/memory-server/Cargo.toml").read_text(); match = re.search(r"^version\s*=\s*\"([^\"]+)\"", text, re.MULTILINE); print(match.group(1) if match else "")')
+
+          if [ -z "$server_version" ]; then
+            echo "Could not find memory-server version in Cargo.toml."
+            exit 1
+          fi
+
+          if [ "$version" != "$server_version" ]; then
+            echo "Tag/workflow version ($version) does not match crates/memory-server/Cargo.toml ($server_version)."
+            exit 1
+          fi
+
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+  build-bottle:
+    needs: resolve-version
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-14
+            platform: arm64_sonoma
+          - runner: macos-15
+            platform: sonoma
+
+    runs-on: ${{ matrix.runner }}
+    name: Bottle - ${{ matrix.platform }}
+
+    steps:
+      - name: Check out tap repo
+        uses: actions/checkout@v4
+        with:
+          repository: kckylechen1/homebrew-tachi
+          token: ${{ secrets.HOMEBREW_TAP_GITHUB_TOKEN }}
+          path: tap
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Build bottle
+        run: brew install --build-bottle --formula tap/Formula/tachi.rb
+
+      - name: Create bottle
+        run: |
+          brew bottle --json --no-rebuild tachi
+          ls -la tachi--*.tar.gz tachi--*.json
+
+      - name: Upload bottle artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: bottle-${{ matrix.platform }}
+          path: |
+            tachi--*.tar.gz
+            tachi--*.json
+
+  publish-bottles:
+    needs: [resolve-version, build-bottle]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    env:
+      TAP_REPO: kckylechen1/homebrew-tachi
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all bottle artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: bottles
+
+      - name: Merge bottle manifests
+        run: |
+          jq -s '.' bottles/*/tachi--*.json > bottle-manifest.json
+          echo "=== Merged bottle manifest ==="
+          cat bottle-manifest.json
+
+      - name: Upload bottles to GitHub Release (tap repo)
+        uses: softprops/action-gh-release@v2
+        with:
+          repo: ${{ env.TAP_REPO }}
+          tag_name: tachi-${{ needs.resolve-version.outputs.version }}
+          files: bottles/*/tachi--*.tar.gz
+        env:
+          GITHUB_TOKEN: ${{ secrets.HOMEBREW_TAP_GITHUB_TOKEN }}
+
+      - name: Check out tap repo
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.TAP_REPO }}
+          token: ${{ secrets.HOMEBREW_TAP_GITHUB_TOKEN }}
+          path: tap
+
+      - name: Update formula with bottle block
+        run: |
+          python3 scripts/update_homebrew_formula.py \
+            tap/Formula/tachi.rb \
+            --version "${{ needs.resolve-version.outputs.version }}" \
+            --bottle-manifest bottle-manifest.json \
+            --bottle-root-url "https://github.com/${{ env.TAP_REPO }}/releases/download/tachi-${{ needs.resolve-version.outputs.version }}"
+
+      - name: Commit and push formula update
+        working-directory: tap
+        env:
+          VERSION: ${{ needs.resolve-version.outputs.version }}
+        run: |
+          if git diff --quiet; then
+            echo "Formula already up to date"
+            exit 0
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Formula/tachi.rb
+          git commit -m "bump tachi to v${VERSION} with bottles"
+          git push

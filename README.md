@@ -44,6 +44,15 @@
 
 **藏经阁** 弃平铺之法，取其**层峦叠嶂、如藏经阁之规制（层级化文件系统范式）**，辅以**经脉羁绊（图谱级因果关联）**。其底座由玄铁（Rust）百炼而成。不论化作 [MCP](https://modelcontextprotocol.io/) 法器独善其身，亦或寄魂于 OpenClaw 等奇巧宗门，皆可施展须臾即至之多系搜魂（亚毫秒级混合语义检索），且**皆不假外物（无需外部数据库）**。
 
+### 近次修补（v0.16.0）
+
+- **缝合怪斩立决**：`process_memory_distill_job` 引入 `coherent_distill_buckets`，按 `topic`/`entity` 分桶蒸馏，需满 3 条同源记忆方启炉。无主题无实体之记忆直接跳过，蒸馏成果带 `coherence_key` 印记。先前因路径前缀粗暴拼合而生之"缝合怪"幻识，自此绝迹。
+- **幻识硬清**：antigravity 与 global 两库下 47 条 `topic='foundry_distill'` 之 `/foundry/%` 幻造记录连同 FTS、edges 一并粉碎；不留备份。
+- **antigravity 大分流**：`scripts/migrate_antigravity_split.py` 将 808 条本不属藏经阁该宗的散记按归属拨付各项目库（hapi 501、quant 148、openclaw 55、tachi 36、sigil 35、global 22、hyperion 11），并新立 `quant`、`hyperion` 二库。
+- **`tachi-hub` 法器问世**：新独立只读 CLI（`tachi-hub list / show / packs / bindings / stats / doctor [--fix]`），不必启 MCP 即可巡视万宝楼与各 DB schema。brew 瓶罐同时分发。
+- **Tachi 用法宝典**：新增 `prompts/tachi_addendum.md`，三铁律 + 工具速查 + 命名约定 + 反模式，操作员手动 include 到各 Agent 的 root prompt。
+- **Vault 巡检**：`SETUP_API_KEYS` 增 `VOYAGE_RERANK_API_KEY` 占位，便于未来 rerank 接入。
+
 ### 近次修补（v0.15.1）
 
 - **搜魂更净**：`path_prefix` 今已直下 SQL 炉鼎，于向量与 FTS 两脉先行筛卷，免候选杂糅。

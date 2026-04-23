@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import json
 import pathlib
 import re
 import sys
@@ -32,6 +33,14 @@ def parse_args() -> argparse.Namespace:
         default=DEFAULT_FORMULA_CLASS,
         help=f"Formula class name used for diagnostics (default: {DEFAULT_FORMULA_CLASS})",
     )
+    parser.add_argument(
+        "--bottle-manifest",
+        help="Path to merged JSON manifest from brew bottle --json (enables bottle block)",
+    )
+    parser.add_argument(
+        "--bottle-root-url",
+        help="Base URL for bottle downloads (e.g. https://github.com/owner/repo/releases/download/tag)",
+    )
     return parser.parse_args()
 
 
@@ -53,6 +62,32 @@ def replace_or_fail(pattern: str, replacement: str, text: str, label: str) -> st
     return updated
 
 
+def build_bottle_block(root_url: str, platforms: dict[str, str], cellar: str = ":any_skip_relocation") -> str:
+    """Generate a bottle do...end block from platform sha256 hashes."""
+    lines = ["  bottle do"]
+    lines.append(f'    root_url "{root_url}"')
+    for platform in sorted(platforms):
+        sha = platforms[platform]
+        lines.append(f'    sha256 cellar: {cellar}, {platform}: "{sha}"')
+    lines.append("  end")
+    return "\n".join(lines)
+
+
+def update_bottle_block(text: str, bottle_block: str) -> str:
+    """Insert or replace the bottle do...end block in the formula."""
+    # Replace existing bottle block if present
+    existing = re.search(r"  bottle do\n.*?  end\n?", text, re.DOTALL)
+    if existing:
+        return text[: existing.start()] + bottle_block + "\n" + text[existing.end() :]
+
+    # Insert before def install
+    insert_point = re.search(r"  def install\b", text)
+    if insert_point:
+        return text[: insert_point.start()] + bottle_block + "\n\n" + text[insert_point.start() :]
+
+    raise ValueError("Could not find insertion point for bottle block (no def install found)")
+
+
 def main() -> int:
     args = parse_args()
     formula_path = pathlib.Path(args.formula)
@@ -64,14 +99,33 @@ def main() -> int:
     tarball_url = f"https://github.com/{args.repo}/archive/refs/tags/{tag}.tar.gz"
     sha256 = download_sha256(tarball_url)
 
-    original = formula_path.read_text()
-    updated = original
+    updated = formula_path.read_text()
     updated = replace_or_fail(
         r'^\s*url ".*"$', f'  url "{tarball_url}"', updated, "url"
     )
     updated = replace_or_fail(
         r'^\s*sha256 ".*"$', f'  sha256 "{sha256}"', updated, "sha256"
     )
+
+    # Optional: inject bottle block
+    if args.bottle_manifest and args.bottle_root_url:
+        with open(args.bottle_manifest) as f:
+            manifest = json.load(f)
+
+        # Extract per-platform sha256 from merged manifest array
+        platforms: dict[str, str] = {}
+        cellar = ":any_skip_relocation"
+        for entry in manifest:
+            for _formula_name, info in entry.items():
+                if isinstance(info, dict) and "tags" in info:
+                    cellar = info.get("cellar", ":any_skip_relocation")
+                    for platform_tag, tag_info in info["tags"].items():
+                        platforms[platform_tag] = tag_info["sha256"]
+
+        if platforms:
+            bottle_block = build_bottle_block(args.bottle_root_url, platforms, cellar)
+            updated = update_bottle_block(updated, bottle_block)
+            print(f"  bottle platforms: {', '.join(sorted(platforms))}")
 
     formula_path.write_text(updated)
 

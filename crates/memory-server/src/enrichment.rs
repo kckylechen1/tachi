@@ -71,7 +71,7 @@ impl MemoryServer {
 
     /// Flush a batch: batch-embed all texts needing embedding, then update DB.
     pub(super) async fn flush_enrichment_batch(&self, batch: &mut Vec<EnrichmentItem>) {
-        let items: Vec<EnrichmentItem> = batch.drain(..).collect();
+        let items: Vec<EnrichmentItem> = std::mem::take(batch);
         let batch_size = items.len();
         eprintln!("[enrichment-batcher] flushing batch of {batch_size} items");
 

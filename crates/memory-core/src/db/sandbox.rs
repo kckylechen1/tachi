@@ -93,9 +93,8 @@ fn path_matches_pattern(path: &str, pattern: &str) -> bool {
     if let Some(prefix) = pattern.strip_suffix("/*") {
         // Wildcard: matches prefix and any sub-paths
         path == prefix || path.starts_with(&format!("{}/", prefix))
-    } else if pattern.ends_with('*') {
+    } else if let Some(prefix) = pattern.strip_suffix('*') {
         // Glob-style: "/foo*" matches anything starting with "/foo"
-        let prefix = &pattern[..pattern.len() - 1];
         path.starts_with(prefix)
     } else {
         // Exact match or prefix match
