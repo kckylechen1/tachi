@@ -50,6 +50,7 @@
 - **幻识硬清**：antigravity 与 global 两库下 47 条 `topic='foundry_distill'` 之 `/foundry/%` 幻造记录连同 FTS、edges 一并粉碎；不留备份。
 - **antigravity 大分流**：`scripts/migrate_antigravity_split.py` 将 808 条本不属藏经阁该宗的散记按归属拨付各项目库（hapi 501、quant 148、openclaw 55、tachi 36、sigil 35、global 22、hyperion 11），并新立 `quant`、`hyperion` 二库。
 - **`tachi-hub` 法器问世**：新独立只读 CLI（`tachi-hub list / show / packs / bindings / stats / doctor [--fix]`），不必启 MCP 即可巡视万宝楼与各 DB schema。brew 瓶罐同时分发。
+- **补完分发链**：brew formula 现会同时安装 `tachi` 与 `tachi-hub`；bottle workflow 亦已改正本地 formula 路径，不再误判成 `tap/formula` 假仓库。
 - **Tachi 用法宝典**：新增 `prompts/tachi_addendum.md`，三铁律 + 工具速查 + 命名约定 + 反模式，操作员手动 include 到各 Agent 的 root prompt。
 - **Vault 巡检**：`SETUP_API_KEYS` 增 `VOYAGE_RERANK_API_KEY` 占位，便于未来 rerank 接入。
 

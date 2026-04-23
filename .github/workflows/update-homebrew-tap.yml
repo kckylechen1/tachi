@@ -68,14 +68,14 @@ jobs:
 
       - name: Update formula URL and sha256
         run: |
-          python scripts/update_homebrew_formula.py "$FORMULA_PATH" --version "${{ steps.version.outputs.version }}"
+          python3 scripts/update_homebrew_formula.py "$FORMULA_PATH" --version "${{ steps.version.outputs.version }}"
 
       - name: Commit and push formula update
         working-directory: tap
         env:
           VERSION: ${{ steps.version.outputs.version }}
         run: |
-          if git diff --quiet; then
+          if git diff --quiet -- Formula/tachi.rb; then
             echo "Formula already up to date"
             exit 0
           fi

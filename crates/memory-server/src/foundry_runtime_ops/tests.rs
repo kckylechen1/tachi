@@ -2,7 +2,10 @@ use super::handlers::{
     build_bracket_self_evolution_id, classify_bracket_self_evolution,
     extract_bracket_self_evolution_notes,
 };
-use super::maintenance::memory_claim_signature;
+use super::maintenance::{
+    coherence_bucket_key, coherent_distill_buckets, memory_claim_signature,
+    scheduled_distill_group_key,
+};
 use super::recall::parse_session_capture_response;
 use super::*;
 
@@ -212,4 +215,76 @@ fn forget_sweep_keeps_newest_distill_entries() {
 
     assert_eq!(entries[0].id, "new");
     assert_eq!(entries[1].id, "old");
+}
+
+#[test]
+fn coherence_bucket_key_prefers_topic_then_entity() {
+    assert_eq!(
+        coherence_bucket_key("strategy", &["alpha".to_string()]),
+        Some("topic:strategy".to_string())
+    );
+    assert_eq!(
+        coherence_bucket_key("", &["alpha".to_string(), "beta".to_string()]),
+        Some("entity:alpha".to_string())
+    );
+    assert_eq!(coherence_bucket_key("", &[]), None);
+}
+
+#[test]
+fn scheduled_distill_group_key_separates_topics_with_same_root() {
+    assert_eq!(
+        scheduled_distill_group_key("/hapi/changelog/entry-1", "topic:changelog"),
+        "/hapi#topic:changelog"
+    );
+    assert_ne!(
+        scheduled_distill_group_key("/hapi/changelog/entry-1", "topic:changelog"),
+        scheduled_distill_group_key("/hapi/strategy/entry-1", "topic:strategy")
+    );
+    assert_ne!(
+        scheduled_distill_group_key("/hapi/changelog/entry-1", "topic:changelog"),
+        scheduled_distill_group_key("/hapi/changelog/entry-2", "topic:release")
+    );
+}
+
+#[test]
+fn coherent_distill_buckets_keep_unrelated_topics_apart() {
+    let mut entries = Vec::new();
+    for (idx, topic) in ["changelog", "changelog", "changelog", "strategy", "strategy", "strategy"]
+        .into_iter()
+        .enumerate()
+    {
+        entries.push(MemoryEntry {
+            id: format!("m-{idx}"),
+            path: format!("/hapi/{topic}/m-{idx}"),
+            summary: topic.to_string(),
+            text: topic.to_string(),
+            importance: 0.5,
+            timestamp: format!("2026-04-23T00:00:0{idx}Z"),
+            category: "fact".to_string(),
+            topic: topic.to_string(),
+            keywords: vec![],
+            persons: vec![],
+            entities: vec![format!("entity-{topic}")],
+            location: "".to_string(),
+            source: "manual".to_string(),
+            scope: "project".to_string(),
+            archived: false,
+            access_count: 0,
+            last_access: None,
+            revision: 1,
+            metadata: json!({}),
+            vector: None,
+            retention_policy: None,
+            domain: None,
+        });
+    }
+
+    let mut buckets = coherent_distill_buckets(entries);
+    buckets.sort_by(|a, b| a.0.cmp(&b.0));
+
+    assert_eq!(buckets.len(), 2);
+    assert_eq!(buckets[0].0, "topic:changelog");
+    assert_eq!(buckets[0].1.len(), 3);
+    assert_eq!(buckets[1].0, "topic:strategy");
+    assert_eq!(buckets[1].1.len(), 3);
 }

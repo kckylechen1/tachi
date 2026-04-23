@@ -152,7 +152,7 @@ pub(crate) fn enqueue_foundry_capture_maintenance(
     )
 }
 
-fn scheduled_distill_group_key(path: &str) -> String {
+fn scheduled_distill_path_prefix(path: &str) -> String {
     let mut segments = path.trim_matches('/').split('/').filter(|s| !s.is_empty());
     match segments.next() {
         Some(segment) => format!("/{segment}"),
@@ -160,10 +160,31 @@ fn scheduled_distill_group_key(path: &str) -> String {
     }
 }
 
+pub(super) fn coherence_bucket_key(topic: &str, entities: &[String]) -> Option<String> {
+    let topic = topic.trim();
+    if !topic.is_empty() {
+        return Some(format!("topic:{topic}"));
+    }
+
+    entities
+        .iter()
+        .map(|entity| entity.trim())
+        .find(|entity| !entity.is_empty())
+        .map(|entity| format!("entity:{entity}"))
+}
+
+pub(super) fn scheduled_distill_group_key(path: &str, coherence_key: &str) -> String {
+    format!("{}#{coherence_key}", scheduled_distill_path_prefix(path))
+}
+
 /// Scan for project memories that have not yet been included in a distill output
-/// and enqueue distill jobs for sufficiently large top-level groups.
+/// and enqueue distill jobs for sufficiently large coherent groups.
 pub(crate) async fn schedule_pending_distill_jobs(server: &MemoryServer) -> Result<usize, String> {
-    const MIN_GROUP_SIZE: usize = 4;
+    struct ScheduledDistillGroup {
+        path_prefix: String,
+        coherence_key: String,
+        memory_ids: Vec<String>,
+    }
 
     if !server.has_project_db() {
         return Ok(0);
@@ -195,36 +216,58 @@ pub(crate) async fn schedule_pending_distill_jobs(server: &MemoryServer) -> Resu
         let mut pending_groups = HashSet::new();
         let mut stmt = conn
             .prepare(
-                "SELECT path_prefix
+                "SELECT path_prefix, metadata
                  FROM foundry_jobs
                  WHERE kind = 'memory_distill' AND status IN ('queued', 'running')",
             )
             .map_err(|e| format!("prepare pending distill job query: {e}"))?;
         let rows = stmt
-            .query_map([], |row| row.get::<_, String>(0))
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
             .map_err(|e| format!("query pending distill jobs: {e}"))?;
         for row in rows {
-            pending_groups.insert(row.map_err(|e| format!("read pending distill row: {e}"))?);
+            let (path_prefix, metadata_raw) =
+                row.map_err(|e| format!("read pending distill row: {e}"))?;
+            let metadata =
+                serde_json::from_str::<serde_json::Value>(&metadata_raw).unwrap_or_else(|_| json!({}));
+            let coherence_key = metadata
+                .get("job")
+                .and_then(|job| job.get("coherence_key"))
+                .and_then(|value| value.as_str());
+            if let Some(coherence_key) = coherence_key {
+                pending_groups.insert(scheduled_distill_group_key(&path_prefix, coherence_key));
+            } else {
+                pending_groups.insert(path_prefix);
+            }
         }
 
         let mut unprocessed = Vec::new();
         let mut stmt = conn
             .prepare(
-                "SELECT id, path
+                "SELECT id, path, topic, entities
                  FROM memories
-                 WHERE archived = 0 AND source != ?1
-                 ORDER BY timestamp ASC",
+                  WHERE archived = 0 AND source != ?1
+                  ORDER BY timestamp ASC",
             )
             .map_err(|e| format!("prepare candidate memory query: {e}"))?;
         let rows = stmt
             .query_map([FOUNDRY_DISTILL_SOURCE], |row| {
-                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                ))
             })
             .map_err(|e| format!("query candidate memories: {e}"))?;
         for row in rows {
-            let (memory_id, path) = row.map_err(|e| format!("read candidate memory row: {e}"))?;
+            let (memory_id, path, topic, entities_raw) =
+                row.map_err(|e| format!("read candidate memory row: {e}"))?;
             if !processed_ids.contains(&memory_id) {
-                unprocessed.push((memory_id, path));
+                let entities =
+                    serde_json::from_str::<Vec<String>>(&entities_raw).unwrap_or_default();
+                unprocessed.push((memory_id, path, topic, entities));
             }
         }
 
@@ -235,20 +278,32 @@ pub(crate) async fn schedule_pending_distill_jobs(server: &MemoryServer) -> Resu
         return Ok(0);
     }
 
-    let mut grouped_ids: HashMap<String, Vec<String>> = HashMap::new();
-    for (memory_id, path) in unprocessed_memories {
-        let group_key = scheduled_distill_group_key(&path);
-        if pending_groups.contains(&group_key) {
+    let mut grouped_ids: HashMap<String, ScheduledDistillGroup> = HashMap::new();
+    for (memory_id, path, topic, entities) in unprocessed_memories {
+        let Some(coherence_key) = coherence_bucket_key(&topic, &entities) else {
+            continue;
+        };
+        let path_prefix = scheduled_distill_path_prefix(&path);
+        let group_key = scheduled_distill_group_key(&path_prefix, &coherence_key);
+        if pending_groups.contains(&group_key) || pending_groups.contains(&path_prefix) {
             continue;
         }
-        grouped_ids.entry(group_key).or_default().push(memory_id);
+        grouped_ids
+            .entry(group_key)
+            .or_insert_with(|| ScheduledDistillGroup {
+                path_prefix: path_prefix.clone(),
+                coherence_key: coherence_key.clone(),
+                memory_ids: Vec::new(),
+            })
+            .memory_ids
+            .push(memory_id);
     }
 
     let scheduler_agent_id = foundry_requested_by(server).unwrap_or_else(|| "tachi_scheduler".into());
     let mut jobs_scheduled = 0usize;
 
-    for (path_prefix, memory_ids) in grouped_ids {
-        if memory_ids.len() < MIN_GROUP_SIZE {
+    for (_, group) in grouped_ids {
+        if group.memory_ids.len() < FOUNDRY_DISTILL_MIN_BATCH {
             continue;
         }
 
@@ -256,11 +311,12 @@ pub(crate) async fn schedule_pending_distill_jobs(server: &MemoryServer) -> Resu
             server,
             memory_core::FoundryJobKind::MemoryDistill,
             &scheduler_agent_id,
-            &path_prefix,
-            &memory_ids,
+            &group.path_prefix,
+            &group.memory_ids,
             json!({
                 "kind": "memory_distill",
                 "window": FOUNDRY_DISTILL_WINDOW,
+                "coherence_key": group.coherence_key,
                 "scheduler": "bootstrap_distill_interval",
             }),
         );
@@ -269,8 +325,8 @@ pub(crate) async fn schedule_pending_distill_jobs(server: &MemoryServer) -> Resu
             job,
             target_db: DbScope::Project,
             named_project: None,
-            path_prefix,
-            memory_ids,
+            path_prefix: group.path_prefix,
+            memory_ids: group.memory_ids,
         })?;
         jobs_scheduled += 1;
     }
@@ -506,14 +562,10 @@ const FOUNDRY_DISTILL_MIN_BATCH: usize = 3;
 /// frequent shared entity). Buckets smaller than [`FOUNDRY_DISTILL_MIN_BATCH`]
 /// are dropped — they would otherwise force the LLM to stitch unrelated facts
 /// into a single false summary (the v0.15.x "缝合怪" regression).
-fn coherent_distill_buckets(entries: Vec<MemoryEntry>) -> Vec<(String, Vec<MemoryEntry>)> {
+pub(super) fn coherent_distill_buckets(entries: Vec<MemoryEntry>) -> Vec<(String, Vec<MemoryEntry>)> {
     let mut buckets: HashMap<String, Vec<MemoryEntry>> = HashMap::new();
     for entry in entries {
-        let key = if !entry.topic.trim().is_empty() {
-            format!("topic:{}", entry.topic.trim())
-        } else if let Some(first_entity) = entry.entities.first() {
-            format!("entity:{}", first_entity)
-        } else {
+        let Some(key) = coherence_bucket_key(&entry.topic, &entry.entities) else {
             // No coherence signal — skip rather than risk a stitched distill.
             continue;
         };
@@ -530,18 +582,33 @@ async fn process_memory_distill_job(
     item: &FoundryMaintenanceItem,
 ) -> Result<Option<String>, String> {
     let source_entries = with_foundry_store_read(server, item, |store| {
-        store
-            .list_by_path(&item.path_prefix, FOUNDRY_DISTILL_WINDOW, false)
-            .map_err(|e| format!("Failed to load recent memories for distill: {e}"))
+        let mut entries = Vec::new();
+        for memory_id in &item.memory_ids {
+            let maybe_entry = store
+                .get(memory_id)
+                .map_err(|e| format!("Failed to load memory {memory_id} for distill: {e}"))?;
+            if let Some(entry) = maybe_entry {
+                entries.push(entry);
+            }
+        }
+        Ok(entries)
     })?;
 
     let raw_entries = source_entries
         .into_iter()
-        .filter(|entry| entry.source != FOUNDRY_DISTILL_SOURCE)
+        .filter(|entry| !entry.archived && entry.source != FOUNDRY_DISTILL_SOURCE)
         .collect::<Vec<_>>();
     if raw_entries.is_empty() {
         return Ok(None);
     }
+
+    let preferred_coherence_key = item
+        .job
+        .metadata
+        .get("job")
+        .and_then(|job| job.get("coherence_key"))
+        .and_then(|value| value.as_str())
+        .map(str::to_string);
 
     // Coherence guard: only distil memories that share a topic or entity.
     // Pick the largest coherent bucket per job to keep behaviour 1:1 with the
@@ -550,8 +617,17 @@ async fn process_memory_distill_job(
     if buckets.is_empty() {
         return Ok(None);
     }
-    buckets.sort_by(|a, b| b.1.len().cmp(&a.1.len()));
-    let (bucket_key, source_entries) = buckets.into_iter().next().expect("non-empty");
+    let (bucket_key, source_entries) = if let Some(preferred_key) = preferred_coherence_key {
+        if let Some(index) = buckets.iter().position(|(key, _)| key == &preferred_key) {
+            buckets.swap_remove(index)
+        } else {
+            buckets.sort_by(|a, b| b.1.len().cmp(&a.1.len()));
+            buckets.into_iter().next().expect("non-empty")
+        }
+    } else {
+        buckets.sort_by(|a, b| b.1.len().cmp(&a.1.len()));
+        buckets.into_iter().next().expect("non-empty")
+    };
 
     let distill_text = server
         .llm

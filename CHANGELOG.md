@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.16.1] - 2026-04-23
+
+### Fixed
+- **Distill scheduler/executor drift**: scheduled distill jobs now key on `/<root>#<coherence_key>` instead of only the top-level path segment, and the worker only processes the exact `memory_ids` selected by the scheduler. This closes the gap where a queued `/hapi` job could later re-scan the whole path window and distill a different bucket than the one originally chosen.
+- **Homebrew release chain**: bottle builds now install the formula via an explicit local file path (`./tap/Formula/tachi.rb`) instead of a path that Homebrew misparsed as `tap/formula`, and both tap-update workflows now only diff `Formula/tachi.rb` before committing.
+- **`tachi-hub` formula packaging**: `scripts/update_homebrew_formula.py` now upgrades the tap formula structure as part of every release, so Homebrew installs and tests both `tachi` and `tachi-hub` instead of leaving the new binary out of the bottle.
+- **License metadata alignment**: the repo is AGPLv3, so crate manifests and the `@chaoxlabs/tachi-node` / OpenClaw package metadata now declare `AGPL-3.0-only` instead of stale `MIT` values.
+
 ## [0.16.0] - 2026-04-23
 
 ### Fixed

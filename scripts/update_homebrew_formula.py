@@ -88,6 +88,78 @@ def update_bottle_block(text: str, bottle_block: str) -> str:
     raise ValueError("Could not find insertion point for bottle block (no def install found)")
 
 
+def ensure_tachi_hub_install(text: str) -> str:
+    build_pattern = (
+        r'system "cargo", "build", "--release", "--locked", "-p", "memory-server",\n'
+        r'\s+"--target-dir", buildpath/"target"'
+    )
+    build_replacement = (
+        'system "cargo", "build", "--release", "--locked", "-p", "memory-server",\n'
+        '           "--bins",\n'
+        '           "--target-dir", buildpath/"target"'
+    )
+    updated, build_count = re.subn(build_pattern, build_replacement, text, count=1)
+    if build_count != 1 and '"--bins"' not in text:
+        raise ValueError("Could not update cargo build step for tachi-hub")
+    text = updated
+
+    text = text.replace(
+        'bin.install buildpath/"target/release/tachi_hub" => "tachi-hub"',
+        'bin.install buildpath/"target/release/tachi-hub" => "tachi-hub"',
+    )
+
+    if 'bin.install buildpath/"target/release/tachi-hub" => "tachi-hub"' not in text:
+        install_line = '    bin.install buildpath/"target/release/memory-server" => "tachi"'
+        replacement = (
+            install_line
+            + '\n'
+            + '    bin.install buildpath/"target/release/tachi-hub" => "tachi-hub"'
+        )
+        text = replace_or_fail(
+            r'^\s*bin\.install buildpath/"target/release/memory-server" => "tachi"$',
+            replacement,
+            text,
+            "tachi-hub bin install",
+        )
+
+    if 'shell_output("#{bin}/tachi-hub --help")' not in text:
+        hook = '    assert_match "memory + Hub MCP server", shell_output("#{bin}/tachi --help")'
+        replacement = (
+            hook
+            + '\n'
+            + '    assert_match version.to_s, shell_output("#{bin}/tachi-hub --version")\n'
+            + '    assert_match "Inspect Tachi Hub registry", shell_output("#{bin}/tachi-hub --help")'
+        )
+        text = replace_or_fail(
+            r'^\s*assert_match "memory \+ Hub MCP server", shell_output\("#\{bin\}/tachi --help"\)$',
+            replacement,
+            text,
+            "tachi-hub formula test",
+        )
+
+    if '#{opt_bin}/tachi-hub' not in text:
+        hook = '        #{opt_bin}/tachi'
+        replacement = hook + '\n        #{opt_bin}/tachi-hub'
+        text = replace_or_fail(
+            r'^\s*#\{opt_bin\}/tachi$',
+            replacement,
+            text,
+            "tachi-hub caveat path",
+        )
+
+    if 'tachi-hub stats' not in text:
+        hook = '        tachi --no-project-db stats'
+        replacement = hook + '\n        tachi-hub stats'
+        text = replace_or_fail(
+            r'^\s*tachi --no-project-db stats$',
+            replacement,
+            text,
+            "tachi-hub caveat smoke test",
+        )
+
+    return text
+
+
 def main() -> int:
     args = parse_args()
     formula_path = pathlib.Path(args.formula)
@@ -106,6 +178,7 @@ def main() -> int:
     updated = replace_or_fail(
         r'^\s*sha256 ".*"$', f'  sha256 "{sha256}"', updated, "sha256"
     )
+    updated = ensure_tachi_hub_install(updated)
 
     # Optional: inject bottle block
     if args.bottle_manifest and args.bottle_root_url:
