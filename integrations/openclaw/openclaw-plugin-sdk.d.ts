@@ -3,6 +3,18 @@
  * Replace with the official SDK types when available.
  */
 declare module "openclaw/plugin-sdk" {
+  type CoreAgentHookEvent = "before_agent_start" | "agent_end";
+  type RuntimeHookEvent =
+    | "llm_input"
+    | "llm_output"
+    | "after_tool_call"
+    | "before_compaction"
+    | "after_compaction"
+    | "tool_result_persist"
+    | "subagent_spawned"
+    | "subagent_ended"
+    | "session_end";
+
   export interface OpenClawPluginApi {
     pluginConfig: unknown;
     logger: {
@@ -28,7 +40,7 @@ declare module "openclaw/plugin-sdk" {
       }>;
     }): void;
     on(
-      event: "before_agent_start" | "agent_end",
+      event: CoreAgentHookEvent | RuntimeHookEvent,
       handler: (event: any, ctx: any) => Promise<any>,
     ): void;
     registerService(service: {

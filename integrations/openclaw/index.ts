@@ -276,7 +276,7 @@ export const memoryHybridBridgePlugin = {
     "Advanced structured memory with LLM extraction and hybrid retrieval (vector/lexical/symbolic)",
 
   register(api: OpenClawPluginApi) {
-    const runtimeApi = api as any;
+    const runtimeApi = api;
     const config = bridgeConfigSchema.parse(api.pluginConfig);
     const configuredDbPath = resolveConfigPath(api, config.dbPath);
     const pluginDataDir = path.dirname(configuredDbPath);
