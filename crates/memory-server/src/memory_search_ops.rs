@@ -17,7 +17,11 @@ pub(super) async fn handle_save_memory(
     let id = params
         .id
         .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-    let timestamp = Utc::now().to_rfc3339();
+    let timestamp = params
+        .timestamp
+        .clone()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| Utc::now().to_rfc3339());
     let requested_scope = params.scope.clone();
     let named_project = params.project.clone();
     let (target_db, warning) = if named_project.is_some() {
@@ -34,7 +38,7 @@ pub(super) async fn handle_save_memory(
     let topic = params.topic;
     let metadata = crate::provenance::inject_provenance(
         server,
-        json!({}),
+        params.metadata.unwrap_or_else(|| json!({})),
         "save_memory",
         "memory_write",
         Some(requested_scope.as_str()),

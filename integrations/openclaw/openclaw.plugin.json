@@ -32,6 +32,12 @@
         "items": {
           "type": "string"
         }
+      },
+      "sharedMemoryAliases": {
+        "type": "object",
+        "additionalProperties": {
+          "type": "string"
+        }
       }
     }
   }

@@ -1549,6 +1549,8 @@ async fn save_memory_includes_provenance_for_registered_agent() {
             project: None,
             retention_policy: None,
             domain: None,
+            timestamp: None,
+            metadata: None,
         }))
         .await
         .expect("save_memory should succeed");
@@ -4557,6 +4559,8 @@ async fn save_memory_clamps_importance_into_valid_range() {
             project: None,
             retention_policy: None,
             domain: None,
+            timestamp: None,
+            metadata: None,
         }))
         .await
         .expect("save_memory should succeed");

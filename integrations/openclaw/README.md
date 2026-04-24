@@ -52,10 +52,13 @@ curl -fsSL https://raw.githubusercontent.com/kckylechen1/tachi/main/scripts/inst
 
 | 变量 | 必填 | 说明 |
 |------|------|------|
-| `TACHI_BIN` / `OPENCLAW_MEMORY_SERVER_BIN` | 否 | 显式指定 `tachi` / `memory-server` 二进制路径，优先于 PATH |
+| `TACHI_BIN` / `OPENCLAW_MEMORY_SERVER_BIN` | 否 | 显式指定 `tachi` / `memory-server` 二进制路径；未设置时会优先使用 Homebrew 安装，其次才回退到本地构建与 PATH |
 | `TACHI_OPENCLAW_EXPERIMENTAL_TACHI_TOOLS` | 否 | 设为 `1` / `true` 时，重新暴露 `memory_delete`、`compact_context` 与一组直通 Tachi 的 passthrough tools |
 | `MEMORY_BRIDGE_CAPTURE_MIN_CHARS` | 否 | 自动捕获最小字符数阈值 |
 | `MEMORY_BRIDGE_CAPTURE_TRIGGERS` | 否 | 自动捕获关键词列表 |
+
+默认每个 OpenClaw agent 使用独立记忆库与独立 `/openclaw/agent-<id>` 命名空间。
+当前默认共享规则只有一条：`ops -> main`，即 ops 与 yaya/main 共享同一套记忆。
 
 完整列表见 [`.env.example`](./.env.example)。
 

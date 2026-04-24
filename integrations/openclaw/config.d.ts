@@ -37,6 +37,7 @@ export type BridgeConfig = {
     captureMinChars: number;
     captureTriggerKeywords: string[];
     selfEvolutionAgents: string[];
+    sharedMemoryAliases: Record<string, string>;
     weights: {
         semantic: number;
         fts: number;

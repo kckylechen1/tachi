@@ -204,6 +204,14 @@ pub(crate) struct SaveMemoryParams {
     /// NULL means no domain scoping.
     #[serde(default)]
     pub domain: Option<String>,
+
+    /// Optional timestamp override.
+    #[serde(default)]
+    pub timestamp: Option<String>,
+
+    /// Arbitrary metadata payload merged before provenance injection.
+    #[serde(default)]
+    pub metadata: Option<serde_json::Value>,
 }
 
 // ─── Search ─────────────────────────────────────────────────────────────────

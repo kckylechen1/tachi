@@ -11,7 +11,6 @@ const REQUIRED_TOOLS = [
     "search_memory",
     "get_memory",
     "memory_graph",
-    "delete_memory",
     "memory_stats",
     "list_memories",
 ];
@@ -125,6 +124,7 @@ export class MemoryMcpClient {
     transport = null;
     connecting = null;
     availableTools = new Set();
+    static CLIENT_VERSION = "0.16.1";
     constructor(dbPath, logger) {
         this.dbPath = dbPath;
         this.logger = logger;
@@ -136,10 +136,18 @@ export class MemoryMcpClient {
         this.logger?.warn?.(`memory-hybrid-bridge[mcp]: ${message}`);
     }
     resolveServerCommand() {
-        // Priority: TACHI_BIN > OPENCLAW_MEMORY_SERVER_BIN > local build > PATH (tachi, then memory-server)
+        // Priority: TACHI_BIN > OPENCLAW_MEMORY_SERVER_BIN > Homebrew install > local build > PATH (tachi, then memory-server)
         const fromEnv = (process.env.TACHI_BIN || process.env.OPENCLAW_MEMORY_SERVER_BIN)?.trim();
         if (fromEnv) {
             return fromEnv;
+        }
+        const packagedCandidates = process.platform === "darwin"
+            ? ["/opt/homebrew/opt/tachi/bin/tachi", "/usr/local/opt/tachi/bin/tachi"]
+            : [];
+        for (const candidate of packagedCandidates) {
+            if (fs.existsSync(candidate)) {
+                return candidate;
+            }
         }
         const moduleDir = path.dirname(fileURLToPath(import.meta.url));
         const localBinary = path.resolve(moduleDir, "../../target/release/memory-server");
@@ -193,22 +201,27 @@ export class MemoryMcpClient {
         });
         const client = new Client({
             name: "memory-hybrid-bridge",
-            version: "0.14.0",
+            version: MemoryMcpClient.CLIENT_VERSION,
         }, {});
-        await client.connect(transport);
-        const listed = await client.listTools();
-        const names = new Set(listed.tools.map((tool) => tool.name));
-        for (const required of REQUIRED_TOOLS) {
-            if (!names.has(required)) {
-                await client.close().catch(() => { });
-                await transport.close().catch(() => { });
-                throw new Error(`required MCP tool missing: ${required}`);
+        try {
+            await client.connect(transport);
+            const listed = await client.listTools();
+            const names = new Set(listed.tools.map((tool) => tool.name));
+            for (const required of REQUIRED_TOOLS) {
+                if (!names.has(required)) {
+                    throw new Error(`required MCP tool missing: ${required}`);
+                }
             }
+            this.client = client;
+            this.transport = transport;
+            this.availableTools = names;
+            return client;
         }
-        this.client = client;
-        this.transport = transport;
-        this.availableTools = names;
-        return client;
+        catch (error) {
+            await client.close().catch(() => { });
+            await transport.close().catch(() => { });
+            throw error;
+        }
     }
     async getClient() {
         if (this.client) {
@@ -289,6 +302,8 @@ export class MemoryMcpClient {
             vector: entry.vector,
             force: true,
             auto_link: false,
+            timestamp: entry.timestamp,
+            metadata: entry.metadata,
         });
     }
     async getMemory(id) {
@@ -417,6 +432,9 @@ export class MemoryMcpClient {
         return out;
     }
     async deleteMemory(id) {
+        if (!this.availableTools.has("delete_memory")) {
+            throw new Error("delete_memory tool is unavailable");
+        }
         const payload = await this.callJson("delete_memory", { id });
         if (!isRecord(payload)) {
             return false;

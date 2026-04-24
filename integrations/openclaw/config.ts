@@ -53,6 +53,7 @@ export type BridgeConfig = {
   captureMinChars: number;
   captureTriggerKeywords: string[];
   selfEvolutionAgents: string[];
+  sharedMemoryAliases: Record<string, string>;
   weights: { semantic: number; fts: number; symbolic: number; decay: number };
 };
 
@@ -82,6 +83,9 @@ export const defaultConfig: BridgeConfig = {
     .map((s) => s.trim())
     .filter(Boolean),
   selfEvolutionAgents: ["jayne"],
+  sharedMemoryAliases: {
+    ops: "main",
+  },
   weights: {
     semantic: 0.4,
     fts: 0.3,
@@ -94,18 +98,51 @@ export const bridgeConfigSchema = {
   parse(value: unknown): BridgeConfig {
     // Start with defaults, merge any overrides from plugin config
     const overrides = (value && typeof value === "object" ? value : {}) as Partial<BridgeConfig>;
+    const rawTopK = Number(overrides.topK ?? defaultConfig.topK);
+    const rawCaptureMinChars = Number(overrides.captureMinChars ?? defaultConfig.captureMinChars);
+    const rawWeights: Partial<BridgeConfig["weights"]> = overrides.weights || {};
+
+    const sharedMemoryAliases =
+      overrides.sharedMemoryAliases && typeof overrides.sharedMemoryAliases === "object"
+        ? {
+            ...defaultConfig.sharedMemoryAliases,
+            ...Object.fromEntries(
+              Object.entries(overrides.sharedMemoryAliases)
+                .filter(
+                  (entry): entry is [string, string] =>
+                    typeof entry[0] === "string" && typeof entry[1] === "string",
+                )
+                .map(([fromAgent, toAgent]) => [fromAgent.trim().toLowerCase(), toAgent.trim().toLowerCase()])
+                .filter(([fromAgent, toAgent]) => Boolean(fromAgent) && Boolean(toAgent)),
+            ),
+          }
+        : defaultConfig.sharedMemoryAliases;
+
+    const clampWeight = (value: unknown, fallback: number) => {
+      const parsed = Number(value);
+      return Number.isFinite(parsed) ? parsed : fallback;
+    };
+
     return {
       ...defaultConfig,
       ...overrides,
+      topK: Number.isInteger(rawTopK) && rawTopK > 0 ? rawTopK : defaultConfig.topK,
+      captureMinChars:
+        Number.isFinite(rawCaptureMinChars) && rawCaptureMinChars > 0
+          ? rawCaptureMinChars
+          : defaultConfig.captureMinChars,
       selfEvolutionAgents: Array.isArray(overrides.selfEvolutionAgents)
         ? overrides.selfEvolutionAgents
             .filter((value): value is string => typeof value === "string")
             .map((value) => value.trim())
             .filter(Boolean)
         : defaultConfig.selfEvolutionAgents,
+      sharedMemoryAliases,
       weights: {
-        ...defaultConfig.weights,
-        ...(overrides.weights || {}),
+        semantic: clampWeight(rawWeights.semantic, defaultConfig.weights.semantic),
+        fts: clampWeight(rawWeights.fts, defaultConfig.weights.fts),
+        symbolic: clampWeight(rawWeights.symbolic, defaultConfig.weights.symbolic),
+        decay: clampWeight(rawWeights.decay, defaultConfig.weights.decay),
       },
     };
   },

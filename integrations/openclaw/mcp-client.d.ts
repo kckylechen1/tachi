@@ -63,6 +63,7 @@ export declare class MemoryMcpClient {
     private transport;
     private connecting;
     private availableTools;
+    private static readonly CLIENT_VERSION;
     constructor(dbPath: string, logger?: LoggerLike | undefined);
     private logInfo;
     private logWarn;

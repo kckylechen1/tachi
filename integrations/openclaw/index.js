@@ -99,7 +99,7 @@ function extractSelfEvolutionInsights(messages) {
     }
     return insights;
 }
-function buildSelfEvolutionMemory(agentId, sessionKey, insight, insightIndex, timestamp) {
+function buildSelfEvolutionMemory(agentId, memoryNamespaceAgentId, sessionKey, insight, insightIndex, timestamp) {
     const category = classifySelfEvolution(insight.note);
     const isJayne = agentId === "jayne";
     return {
@@ -120,7 +120,7 @@ function buildSelfEvolutionMemory(agentId, sessionKey, insight, insightIndex, ti
         entities: category === "preference" && isJayne ? ["Kyle preference"] : [],
         topic: isJayne ? "jayne_self_evolution" : "agent_self_evolution",
         scope: "project",
-        path: `/openclaw/agent-${agentId}/self-evolution`,
+        path: `/openclaw/agent-${memoryNamespaceAgentId}/self-evolution`,
         category,
         importance: insight.anchored ? 0.92 : 0.88,
         access_count: 0,
@@ -218,6 +218,16 @@ export const memoryHybridBridgePlugin = {
         const agentRuns = new Map();
         const subagentRuns = new Map();
         const spawnCounts = new Map();
+        function resolveAgentId(agentId) {
+            return (agentId || "main").trim().toLowerCase() || "main";
+        }
+        function resolveMemoryAgentId(agentId) {
+            const normalizedAgentId = resolveAgentId(agentId);
+            return config.sharedMemoryAliases[normalizedAgentId] || normalizedAgentId;
+        }
+        function openClawPathRoot(agentId) {
+            return `/openclaw/agent-${resolveMemoryAgentId(agentId)}`;
+        }
         function resolveScope(context, event) {
             return (context?.sessionKey ||
                 context?.sessionId ||
@@ -259,7 +269,7 @@ export const memoryHybridBridgePlugin = {
             await writeJsonFile(auditPaths(scope).todo, todos);
         }
         function resolveAgentDbPath(agentId) {
-            const normalizedAgentId = (agentId || "main").trim() || "main";
+            const normalizedAgentId = resolveMemoryAgentId(agentId);
             const baseDir = path.dirname(configuredDbPath);
             const dbName = path.basename(configuredDbPath) || "memory.db";
             return path.resolve(baseDir, `agents/${normalizedAgentId}/${dbName}`);
@@ -301,10 +311,11 @@ export const memoryHybridBridgePlugin = {
             return { available: true, hits: result.value };
         }
         async function performRecall(query, agentId) {
+            const memoryAgentId = resolveMemoryAgentId(agentId);
             const result = await runWithClient("recall_context", async (client) => await client.recallContext(query, {
                 top_k: config.topK,
                 candidate_multiplier: 1,
-                agent_id: agentId,
+                agent_id: memoryAgentId,
                 exclude_topics: ["imsg_conversation"],
             }), agentId);
             return result.ok ? result.value : null;
@@ -319,7 +330,7 @@ export const memoryHybridBridgePlugin = {
                     description: "Arguments forwarded directly to the underlying Tachi MCP tool.",
                 }),
                 async execute(_toolCallId, params, _signal, context) {
-                    const agentId = context?.agentId || "main";
+                    const agentId = resolveAgentId(context?.agentId);
                     const result = await runWithClient(tachiToolName, async (client) => await client.callTool(tachiToolName, params || {}), agentId);
                     return result.ok
                         ? formatJsonTextResult(result.value)
@@ -381,7 +392,7 @@ export const memoryHybridBridgePlugin = {
             }),
             async execute(_toolCallId, params, _signal, context) {
                 const { query, maxResults, minScore } = params;
-                const agentId = context?.agentId || "main";
+                const agentId = resolveAgentId(context?.agentId);
                 const result = await performSearch(query, maxResults ?? config.topK, agentId);
                 if (!result.available) {
                     return formatSearchResults(result);
@@ -406,7 +417,7 @@ export const memoryHybridBridgePlugin = {
             async execute(_toolCallId, params, _signal, context) {
                 const rawPath = params.path;
                 const entryId = rawPath.replace(/^(?:shadow-store|memory)\//, "");
-                const agentId = context?.agentId || "main";
+                const agentId = resolveAgentId(context?.agentId);
                 const result = await runWithClient("get_memory", async (client) => await client.getMemory(entryId), agentId);
                 if (!result.ok) {
                     return textResult("Tachi MCP client unavailable.", {
@@ -452,13 +463,13 @@ export const memoryHybridBridgePlugin = {
             }),
             async execute(_toolCallId, params, _signal, context) {
                 const { text, summary, topic, path: memoryPath, importance, keywords, category } = params;
-                const agentId = context?.agentId || "main";
+                const agentId = resolveAgentId(context?.agentId);
                 const result = await runWithClient("save_memory", async (client) => {
                     await client.saveMemory({
                         id: makeMemoryId(),
                         text,
                         summary: summary ?? text.slice(0, 96),
-                        path: memoryPath || `/openclaw/agent-${agentId}`,
+                        path: memoryPath || openClawPathRoot(agentId),
                         importance: importance ?? 0.7,
                         category: (category || "fact"),
                         topic: topic || "manual_memory",
@@ -491,7 +502,7 @@ export const memoryHybridBridgePlugin = {
             }),
             async execute(_toolCallId, params, _signal, context) {
                 const { memory_id, query, top_k, depth } = params;
-                const agentId = context?.agentId || "main";
+                const agentId = resolveAgentId(context?.agentId);
                 const result = await runWithClient("memory_graph", async (client) => await client.memoryGraph({
                     memory_id,
                     query,
@@ -516,7 +527,7 @@ export const memoryHybridBridgePlugin = {
                 async execute(_toolCallId, params, _signal, context) {
                     const rawPath = params.path;
                     const entryId = rawPath.replace(/^(?:shadow-store|memory)\//, "");
-                    const agentId = context?.agentId || "main";
+                    const agentId = resolveAgentId(context?.agentId);
                     const result = await runWithClient("delete_memory", async (client) => await client.deleteMemory(entryId), agentId);
                     return result.ok
                         ? formatJsonTextResult({ deleted: result.value, id: entryId })
@@ -542,7 +553,7 @@ export const memoryHybridBridgePlugin = {
                     persist: Type.Optional(Type.Boolean()),
                 }),
                 async execute(_toolCallId, params, _signal, context) {
-                    const agentId = context?.agentId || "main";
+                    const agentId = resolveAgentId(context?.agentId);
                     const payload = params;
                     const result = await runWithClient("compact_context", async (client) => await client.compactContext({
                         agent_id: agentId,
@@ -627,7 +638,7 @@ export const memoryHybridBridgePlugin = {
         api.on("before_agent_start", async (event, context) => {
             const query = event.prompt;
             const scope = resolveScope(context, event);
-            const agentId = context?.agentId || "main";
+            const agentId = resolveAgentId(context?.agentId);
             const key = `${agentId}:${scope}`;
             agentRuns.set(key, { startedAt: Date.now(), prompt: query });
             await appendRunAudit(scope, {
@@ -649,7 +660,7 @@ export const memoryHybridBridgePlugin = {
             const scope = resolveScope(context, event);
             await appendUsage(scope, {
                 type: "llm_input",
-                agentId: context?.agentId || "main",
+                agentId: resolveAgentId(context?.agentId),
                 sessionKey: context?.sessionKey || null,
                 runId: event?.runId || null,
                 model: event?.model || null,
@@ -660,7 +671,7 @@ export const memoryHybridBridgePlugin = {
             const scope = resolveScope(context, event);
             await appendUsage(scope, {
                 type: "llm_output",
-                agentId: context?.agentId || "main",
+                agentId: resolveAgentId(context?.agentId),
                 sessionKey: context?.sessionKey || null,
                 runId: event?.runId || null,
                 model: event?.model || null,
@@ -673,7 +684,7 @@ export const memoryHybridBridgePlugin = {
             const toolName = event?.toolName || event?.name || "unknown";
             await appendTooluse(scope, {
                 type: "after_tool_call",
-                agentId: context?.agentId || "main",
+                agentId: resolveAgentId(context?.agentId),
                 sessionKey: context?.sessionKey || null,
                 toolName,
                 success: event?.success ?? null,
@@ -686,7 +697,7 @@ export const memoryHybridBridgePlugin = {
             const scope = resolveScope(context, event);
             await appendCompaction(scope, {
                 type: "before_compaction",
-                agentId: context?.agentId || "main",
+                agentId: resolveAgentId(context?.agentId),
                 sessionKey: context?.sessionKey || null,
                 windowId: event?.window_id || event?.windowId || null,
                 messageCount: Array.isArray(event?.messages) ? event.messages.length : null,
@@ -696,7 +707,7 @@ export const memoryHybridBridgePlugin = {
             const scope = resolveScope(context, event);
             await appendCompaction(scope, {
                 type: "after_compaction",
-                agentId: context?.agentId || "main",
+                agentId: resolveAgentId(context?.agentId),
                 sessionKey: context?.sessionKey || null,
                 windowId: event?.window_id || event?.windowId || null,
                 compactedTextLength: typeof event?.compacted_text === "string" ? event.compacted_text.length : null,
@@ -710,7 +721,7 @@ export const memoryHybridBridgePlugin = {
             const scope = resolveScope(context, event);
             await appendCompaction(scope, {
                 type: "tool_result_persist",
-                agentId: context?.agentId || "main",
+                agentId: resolveAgentId(context?.agentId),
                 sessionKey: context?.sessionKey || null,
                 toolName: event?.toolName,
                 message: event?.message || null,
@@ -723,7 +734,7 @@ export const memoryHybridBridgePlugin = {
             spawnCounts.set(scope, (spawnCounts.get(scope) || 0) + 1);
             await appendRunAudit(scope, {
                 type: "subagent_spawned",
-                agentId: context?.agentId || "main",
+                agentId: resolveAgentId(context?.agentId),
                 childSessionKey: childKey,
                 label: event?.label || null,
                 sessionKey: context?.sessionKey || null,
@@ -738,19 +749,34 @@ export const memoryHybridBridgePlugin = {
             }
             await appendRunAudit(scope, {
                 type: "subagent_ended",
-                agentId: context?.agentId || "main",
+                agentId: resolveAgentId(context?.agentId),
                 childSessionKey: childKey || null,
                 durationMs: started ? Math.max(0, Date.now() - started.startedAt) : null,
                 outcome: event?.outcome || null,
                 sessionKey: context?.sessionKey || null,
             });
         });
+        async function finalizeAgentRun(scope, agentId, context, success, captured) {
+            const key = `${agentId}:${scope}`;
+            const started = agentRuns.get(key);
+            agentRuns.delete(key);
+            await appendRunAudit(scope, {
+                type: "agent_end",
+                agentId,
+                sessionKey: context?.sessionKey || null,
+                success,
+                durationMs: started ? Math.max(0, Date.now() - started.startedAt) : null,
+                captured,
+            });
+        }
         api.on("agent_end", async (event, context) => {
+            const agentId = resolveAgentId(context?.agentId);
+            const memoryAgentId = resolveMemoryAgentId(agentId);
+            const scope = resolveScope(context, event);
             if (!event?.success || !Array.isArray(event?.messages) || event.messages.length === 0) {
+                await finalizeAgentRun(scope, agentId, context, Boolean(event?.success), null);
                 return;
             }
-            const agentId = context?.agentId || "main";
-            const scope = resolveScope(context, event);
             const conversationId = context?.sessionKey || event?.conversationId || event?.sessionId || `openclaw:${agentId}`;
             const turnId = event?.turnId || event?.runId || `agent_end:${Date.now()}`;
             const selfEvolutionAgents = new Set(config.selfEvolutionAgents.map((value) => value.toLowerCase()));
@@ -760,7 +786,7 @@ export const memoryHybridBridgePlugin = {
                     let saved = 0;
                     for (const [insightIndex, insight] of insights.entries()) {
                         const result = await runWithClient("save_memory", async (client) => {
-                            await client.saveMemory(buildSelfEvolutionMemory(agentId, conversationId, insight, insightIndex, new Date().toISOString()));
+                            await client.saveMemory(buildSelfEvolutionMemory(agentId, memoryAgentId, conversationId, insight, insightIndex, new Date().toISOString()));
                             return { ok: true };
                         }, agentId);
                         if (result.ok) {
@@ -788,36 +814,31 @@ export const memoryHybridBridgePlugin = {
             const combinedChars = recentMessages.reduce((total, message) => total + message.content.length, 0);
             const hasKeywordTrigger = hasCaptureTrigger(recentMessages, config.captureTriggerKeywords);
             if (recentMessages.length === 0 || (combinedChars < config.captureMinChars && !hasKeywordTrigger)) {
+                await finalizeAgentRun(scope, agentId, context, Boolean(event?.success), {
+                    status: "skipped",
+                    reason: recentMessages.length === 0 ? "empty_messages" : "below_capture_threshold",
+                    captured: 0,
+                });
                 return;
             }
             const result = await runWithClient("capture_session", async (client) => await client.captureSession({
                 conversation_id: conversationId,
                 turn_id: turnId,
-                agent_id: agentId,
+                agent_id: memoryAgentId,
                 messages: recentMessages,
-                path_prefix: `/openclaw/agent-${agentId}`,
+                path_prefix: openClawPathRoot(agentId),
                 scope: "project",
             }), agentId);
             if (!result.ok) {
                 api.logger.warn("tachi: capture_session skipped in degraded mode");
             }
-            const key = `${agentId}:${scope}`;
-            const started = agentRuns.get(key);
-            agentRuns.delete(key);
-            await appendRunAudit(scope, {
-                type: "agent_end",
-                agentId,
-                sessionKey: context?.sessionKey || null,
-                success: Boolean(event?.success),
-                durationMs: started ? Math.max(0, Date.now() - started.startedAt) : null,
-                captured: result.ok ? result.value : null,
-            });
+            await finalizeAgentRun(scope, agentId, context, Boolean(event?.success), result.ok ? result.value : null);
         });
         runtimeApi.on("session_end", async (event, context) => {
             const scope = resolveScope(context, event);
             await appendRunAudit(scope, {
                 type: "session_end",
-                agentId: context?.agentId || "main",
+                agentId: resolveAgentId(context?.agentId),
                 sessionKey: context?.sessionKey || null,
                 sessionId: context?.sessionId || null,
             });
