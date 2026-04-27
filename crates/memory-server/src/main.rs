@@ -14,6 +14,7 @@ mod foundry_ops;
 mod foundry_runtime_ops;
 mod ghost_ops;
 mod graph_state_ops;
+mod handoff_ops;
 mod hub_helpers;
 mod hub_ops;
 mod kanban;
@@ -64,6 +65,7 @@ use crate::ghost_ops::{
 use crate::graph_state_ops::{
     handle_add_edge, handle_get_edges, handle_get_state, handle_memory_graph, handle_set_state,
 };
+use crate::handoff_ops::{handle_handoff_check, handle_handoff_leave};
 use crate::hub_helpers::{
     build_skill_tool_from_cap, capability_callable, capability_visibility_for_cap,
     make_text_tool_result, review_status_allows_call, should_expose_mcp_tools,
@@ -1248,95 +1250,7 @@ impl MemoryServer {
         &self,
         Parameters(params): Parameters<HandoffLeaveParams>,
     ) -> Result<String, String> {
-        let from_agent = {
-            let guard = self.agent_profile.read().unwrap_or_else(|e| e.into_inner());
-            guard
-                .as_ref()
-                .map(|p| p.agent_id.clone())
-                .unwrap_or_else(|| "anonymous".to_string())
-        };
-
-        let memo = HandoffMemo {
-            id: uuid::Uuid::new_v4().to_string(),
-            from_agent: from_agent.clone(),
-            target_agent: params.target_agent,
-            summary: params.summary,
-            next_steps: params.next_steps,
-            context: params.context,
-            created_at: Utc::now().to_rfc3339(),
-            acknowledged: false,
-        };
-
-        let memo_id = memo.id.clone();
-        let mut memos = self.handoff_memos.lock().unwrap_or_else(|e| e.into_inner());
-
-        // Also persist to memory for cross-restart durability
-        let memo_json = serde_json::to_string(&memo).map_err(|e| format!("serialize: {e}"))?;
-        let metadata = crate::provenance::inject_provenance(
-            self,
-            serde_json::json!({"handoff_memo_id": memo_id.clone()}),
-            "handoff_leave",
-            "handoff_memo",
-            Some("general"),
-            DbScope::Global,
-            serde_json::json!({
-                "from_agent": from_agent.clone(),
-                "target_agent": memo.target_agent.clone(),
-                "next_steps_count": memo.next_steps.len(),
-            }),
-        );
-
-        let entry = MemoryEntry {
-            id: format!("handoff:{}", memo_id),
-            text: format!(
-                "[Handoff from {}] {}\n\nNext steps:\n{}",
-                from_agent,
-                memo.summary,
-                memo.next_steps
-                    .iter()
-                    .enumerate()
-                    .map(|(i, s)| format!("{}. {}", i + 1, s))
-                    .collect::<Vec<_>>()
-                    .join("\n")
-            ),
-            category: "handoff".to_string(),
-            importance: 0.9,
-            summary: format!("Handoff from {}", from_agent),
-            path: "/handoff".to_string(),
-            timestamp: chrono::Utc::now().to_rfc3339(),
-            topic: "agent-handoff".to_string(),
-            keywords: vec!["handoff".to_string(), from_agent.clone()],
-            persons: vec![],
-            entities: vec![from_agent.clone()],
-            location: String::new(),
-            source: "extraction".to_string(),
-            scope: "general".to_string(),
-            archived: false,
-            access_count: 0,
-            last_access: None,
-            revision: 1,
-            vector: None,
-            metadata,
-            retention_policy: None,
-            domain: None,
-        };
-        self.with_global_store(|store| store.upsert(&entry).map_err(|e| format!("{e}")))?;
-
-        memos.push(memo);
-
-        // Keep only last 50 memos
-        if memos.len() > 50 {
-            let drain_count = memos.len() - 50;
-            memos.drain(..drain_count);
-        }
-
-        serde_json::to_string(&json!({
-            "status": "memo_left",
-            "memo_id": memo_id,
-            "from_agent": from_agent,
-            "memo": memo_json,
-        }))
-        .map_err(|e| format!("serialize: {e}"))
+        handle_handoff_leave(self, params).await
     }
 
     #[tool(
@@ -1346,47 +1260,7 @@ impl MemoryServer {
         &self,
         Parameters(params): Parameters<HandoffCheckParams>,
     ) -> Result<String, String> {
-        let mut memos = self.handoff_memos.lock().unwrap_or_else(|e| e.into_inner());
-
-        let matching: Vec<&HandoffMemo> = memos
-            .iter()
-            .filter(|m| {
-                if m.acknowledged {
-                    return false;
-                }
-                match (&params.agent_id, &m.target_agent) {
-                    (_, None) => true, // Memo for any agent
-                    (Some(my_id), Some(target)) => my_id == target,
-                    (None, _) => true, // No filter, return all
-                }
-            })
-            .collect();
-
-        let result = serde_json::to_string(&json!({
-            "pending_memos": matching.len(),
-            "memos": matching,
-        }))
-        .map_err(|e| format!("serialize: {e}"))?;
-
-        // Mark as acknowledged if requested
-        if params.acknowledge {
-            let agent_filter = params.agent_id.as_deref();
-            for memo in memos.iter_mut() {
-                if memo.acknowledged {
-                    continue;
-                }
-                let matches = match (&agent_filter, &memo.target_agent) {
-                    (_, None) => true,
-                    (Some(my_id), Some(target)) => *my_id == *target,
-                    (None, _) => true,
-                };
-                if matches {
-                    memo.acknowledged = true;
-                }
-            }
-        }
-
-        Ok(result)
+        handle_handoff_check(self, params).await
     }
 
     // ─── Ghost Whispers (Inter-Agent Pub/Sub) ────────────────────────────────
