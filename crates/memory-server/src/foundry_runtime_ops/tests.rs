@@ -4,7 +4,7 @@ use super::handlers::{
 };
 use super::maintenance::{
     coherence_bucket_key, coherent_distill_buckets, memory_claim_signature,
-    scheduled_distill_group_key,
+    scheduled_distill_group_key, scheduled_distill_path_prefix,
 };
 use super::recall::parse_session_capture_response;
 use super::*;
@@ -224,6 +224,10 @@ fn coherence_bucket_key_prefers_topic_then_entity() {
         Some("topic:strategy".to_string())
     );
     assert_eq!(
+        coherence_bucket_key("Architecture", &["alpha".to_string()]),
+        Some("entity:alpha".to_string())
+    );
+    assert_eq!(
         coherence_bucket_key("", &["alpha".to_string(), "beta".to_string()]),
         Some("entity:alpha".to_string())
     );
@@ -231,10 +235,30 @@ fn coherence_bucket_key_prefers_topic_then_entity() {
 }
 
 #[test]
+fn scheduled_distill_path_prefix_keeps_second_level_project_namespace() {
+    assert_eq!(
+        scheduled_distill_path_prefix("/project/API_配额/m-1"),
+        "/project/API_配额"
+    );
+    assert_eq!(
+        scheduled_distill_path_prefix("/kanban/antigravity/codex"),
+        "/kanban/antigravity/codex"
+    );
+    assert_eq!(
+        scheduled_distill_path_prefix("/wiki/debug/tachi/hub-call"),
+        "/wiki/debug/tachi"
+    );
+}
+
+#[test]
 fn scheduled_distill_group_key_separates_topics_with_same_root() {
     assert_eq!(
         scheduled_distill_group_key("/hapi/changelog/entry-1", "topic:changelog"),
         "/hapi#topic:changelog"
+    );
+    assert_eq!(
+        scheduled_distill_group_key("/project/API_配额/entry-1", "topic:quota"),
+        "/project/API_配额#topic:quota"
     );
     assert_ne!(
         scheduled_distill_group_key("/hapi/changelog/entry-1", "topic:changelog"),
@@ -249,9 +273,16 @@ fn scheduled_distill_group_key_separates_topics_with_same_root() {
 #[test]
 fn coherent_distill_buckets_keep_unrelated_topics_apart() {
     let mut entries = Vec::new();
-    for (idx, topic) in ["changelog", "changelog", "changelog", "strategy", "strategy", "strategy"]
-        .into_iter()
-        .enumerate()
+    for (idx, topic) in [
+        "launch-signal",
+        "launch-signal",
+        "launch-signal",
+        "risk-signal",
+        "risk-signal",
+        "risk-signal",
+    ]
+    .into_iter()
+    .enumerate()
     {
         entries.push(MemoryEntry {
             id: format!("m-{idx}"),
@@ -283,8 +314,46 @@ fn coherent_distill_buckets_keep_unrelated_topics_apart() {
     buckets.sort_by(|a, b| a.0.cmp(&b.0));
 
     assert_eq!(buckets.len(), 2);
-    assert_eq!(buckets[0].0, "topic:changelog");
+    assert_eq!(buckets[0].0, "/hapi#topic:launch-signal");
     assert_eq!(buckets[0].1.len(), 3);
-    assert_eq!(buckets[1].0, "topic:strategy");
+    assert_eq!(buckets[1].0, "/hapi#topic:risk-signal");
     assert_eq!(buckets[1].1.len(), 3);
+}
+
+#[test]
+fn coherent_distill_buckets_drop_generic_topics_without_shared_entity() {
+    let entries = [
+        ("api", "/project/API_配额", "Architecture", "quota"),
+        ("bug", "/project/Bug_Fix", "Architecture", "qwen"),
+        ("dex", "/project/Dexter_Stability", "Architecture", "dexter"),
+    ]
+    .into_iter()
+    .enumerate()
+    .map(|(idx, (text, path, topic, entity))| MemoryEntry {
+        id: format!("generic-{idx}"),
+        path: path.to_string(),
+        summary: text.to_string(),
+        text: text.to_string(),
+        importance: 0.5,
+        timestamp: format!("2026-04-23T00:01:0{idx}Z"),
+        category: "fact".to_string(),
+        topic: topic.to_string(),
+        keywords: vec![],
+        persons: vec![],
+        entities: vec![entity.to_string()],
+        location: "".to_string(),
+        source: "manual".to_string(),
+        scope: "project".to_string(),
+        archived: false,
+        access_count: 0,
+        last_access: None,
+        revision: 1,
+        metadata: json!({}),
+        vector: None,
+        retention_policy: None,
+        domain: None,
+    })
+    .collect::<Vec<_>>();
+
+    assert!(coherent_distill_buckets(entries).is_empty());
 }

@@ -152,17 +152,45 @@ pub(crate) fn enqueue_foundry_capture_maintenance(
     )
 }
 
-fn scheduled_distill_path_prefix(path: &str) -> String {
-    let mut segments = path.trim_matches('/').split('/').filter(|s| !s.is_empty());
-    match segments.next() {
-        Some(segment) => format!("/{segment}"),
-        None => "/".to_string(),
+pub(super) fn scheduled_distill_path_prefix(path: &str) -> String {
+    let segments = path
+        .trim_matches('/')
+        .split('/')
+        .filter(|s| !s.is_empty())
+        .collect::<Vec<_>>();
+    match segments.as_slice() {
+        [] => "/".to_string(),
+        ["project", second, ..] => format!("/project/{second}"),
+        ["kanban", from, to, ..] => format!("/kanban/{from}/{to}"),
+        ["kanban", from] => format!("/kanban/{from}"),
+        ["wiki", kind, domain, ..] => format!("/wiki/{kind}/{domain}"),
+        ["wiki", kind] => format!("/wiki/{kind}"),
+        [first, ..] => format!("/{first}"),
     }
+}
+
+fn is_generic_distill_topic(topic: &str) -> bool {
+    matches!(
+        topic.trim().to_ascii_lowercase().as_str(),
+        "" | "unknown"
+            | "general"
+            | "other"
+            | "misc"
+            | "architecture"
+            | "bug fix"
+            | "bug fixes"
+            | "bugfix"
+            | "testing"
+            | "test"
+            | "changelog"
+            | "roadmap"
+            | "todo"
+    )
 }
 
 pub(super) fn coherence_bucket_key(topic: &str, entities: &[String]) -> Option<String> {
     let topic = topic.trim();
-    if !topic.is_empty() {
+    if !topic.is_empty() && !is_generic_distill_topic(topic) {
         return Some(format!("topic:{topic}"));
     }
 
@@ -175,6 +203,52 @@ pub(super) fn coherence_bucket_key(topic: &str, entities: &[String]) -> Option<S
 
 pub(super) fn scheduled_distill_group_key(path: &str, coherence_key: &str) -> String {
     format!("{}#{coherence_key}", scheduled_distill_path_prefix(path))
+}
+
+fn distill_metadata_is_trusted(metadata: &serde_json::Value) -> bool {
+    let has_coherence_key = metadata
+        .get("coherence_key")
+        .and_then(|value| value.as_str())
+        .is_some_and(|value| !value.trim().is_empty());
+    if !has_coherence_key {
+        return false;
+    }
+
+    let has_bad_flag = metadata
+        .get("quality_flags")
+        .and_then(|value| value.as_array())
+        .into_iter()
+        .flatten()
+        .filter_map(|value| value.as_str())
+        .any(|flag| {
+            matches!(
+                flag,
+                "legacy" | "suspect" | "incoherent" | "legacy_incoherent_distill"
+            )
+        });
+    !has_bad_flag
+}
+
+fn source_namespace_count(entries: &[MemoryEntry]) -> usize {
+    entries
+        .iter()
+        .map(|entry| scheduled_distill_path_prefix(&entry.path))
+        .collect::<HashSet<_>>()
+        .len()
+}
+
+fn distill_quality_flags(entries: &[MemoryEntry]) -> Vec<String> {
+    let mut flags = Vec::new();
+    if entries.len() < FOUNDRY_DISTILL_MIN_BATCH {
+        flags.push("min_batch_not_met".to_string());
+    }
+    if source_namespace_count(entries) > 1 {
+        flags.push("mixed_namespace".to_string());
+    }
+    if flags.is_empty() {
+        return flags;
+    }
+    flags
 }
 
 /// Scan for project memories that have not yet been included in a distill output
@@ -204,13 +278,15 @@ pub(crate) async fn schedule_pending_distill_jobs(server: &MemoryServer) -> Resu
             let metadata_raw = row.map_err(|e| format!("read distill metadata row: {e}"))?;
             let metadata = serde_json::from_str::<serde_json::Value>(&metadata_raw)
                 .unwrap_or_else(|_| json!({}));
-            let source_ids = metadata
-                .get("source_memory_ids")
-                .and_then(|value| value.as_array())
-                .into_iter()
-                .flatten()
-                .filter_map(|value| value.as_str());
-            processed_ids.extend(source_ids.map(ToOwned::to_owned));
+            if distill_metadata_is_trusted(&metadata) {
+                let source_ids = metadata
+                    .get("source_memory_ids")
+                    .and_then(|value| value.as_array())
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|value| value.as_str());
+                processed_ids.extend(source_ids.map(ToOwned::to_owned));
+            }
         }
 
         let mut pending_groups = HashSet::new();
@@ -229,8 +305,8 @@ pub(crate) async fn schedule_pending_distill_jobs(server: &MemoryServer) -> Resu
         for row in rows {
             let (path_prefix, metadata_raw) =
                 row.map_err(|e| format!("read pending distill row: {e}"))?;
-            let metadata =
-                serde_json::from_str::<serde_json::Value>(&metadata_raw).unwrap_or_else(|_| json!({}));
+            let metadata = serde_json::from_str::<serde_json::Value>(&metadata_raw)
+                .unwrap_or_else(|_| json!({}));
             let coherence_key = metadata
                 .get("job")
                 .and_then(|job| job.get("coherence_key"))
@@ -299,7 +375,8 @@ pub(crate) async fn schedule_pending_distill_jobs(server: &MemoryServer) -> Resu
             .push(memory_id);
     }
 
-    let scheduler_agent_id = foundry_requested_by(server).unwrap_or_else(|| "tachi_scheduler".into());
+    let scheduler_agent_id =
+        foundry_requested_by(server).unwrap_or_else(|| "tachi_scheduler".into());
     let mut jobs_scheduled = 0usize;
 
     for (_, group) in grouped_ids {
@@ -562,18 +639,24 @@ const FOUNDRY_DISTILL_MIN_BATCH: usize = 3;
 /// frequent shared entity). Buckets smaller than [`FOUNDRY_DISTILL_MIN_BATCH`]
 /// are dropped — they would otherwise force the LLM to stitch unrelated facts
 /// into a single false summary (the v0.15.x "缝合怪" regression).
-pub(super) fn coherent_distill_buckets(entries: Vec<MemoryEntry>) -> Vec<(String, Vec<MemoryEntry>)> {
+pub(super) fn coherent_distill_buckets(
+    entries: Vec<MemoryEntry>,
+) -> Vec<(String, Vec<MemoryEntry>)> {
     let mut buckets: HashMap<String, Vec<MemoryEntry>> = HashMap::new();
     for entry in entries {
         let Some(key) = coherence_bucket_key(&entry.topic, &entry.entities) else {
             // No coherence signal — skip rather than risk a stitched distill.
             continue;
         };
-        buckets.entry(key).or_default().push(entry);
+        let namespace = scheduled_distill_path_prefix(&entry.path);
+        buckets
+            .entry(format!("{namespace}#{key}"))
+            .or_default()
+            .push(entry);
     }
     buckets
         .into_iter()
-        .filter(|(_, group)| group.len() >= FOUNDRY_DISTILL_MIN_BATCH)
+        .filter(|(_, group)| distill_quality_flags(group).is_empty())
         .collect()
 }
 
@@ -618,7 +701,11 @@ async fn process_memory_distill_job(
         return Ok(None);
     }
     let (bucket_key, source_entries) = if let Some(preferred_key) = preferred_coherence_key {
-        if let Some(index) = buckets.iter().position(|(key, _)| key == &preferred_key) {
+        let preferred_bucket_key = format!("{}#{preferred_key}", item.path_prefix);
+        if let Some(index) = buckets
+            .iter()
+            .position(|(key, _)| key == &preferred_bucket_key || key == &preferred_key)
+        {
             buckets.swap_remove(index)
         } else {
             buckets.sort_by(|a, b| b.1.len().cmp(&a.1.len()));
@@ -628,6 +715,16 @@ async fn process_memory_distill_job(
         buckets.sort_by(|a, b| b.1.len().cmp(&a.1.len()));
         buckets.into_iter().next().expect("non-empty")
     };
+
+    let quality_flags = distill_quality_flags(&source_entries);
+    if !quality_flags.is_empty() {
+        return Ok(None);
+    }
+
+    let (namespace_key, coherence_key) = bucket_key
+        .split_once('#')
+        .map(|(namespace, coherence)| (namespace.to_string(), coherence.to_string()))
+        .unwrap_or_else(|| (item.path_prefix.clone(), bucket_key.clone()));
 
     let distill_text = server
         .llm
@@ -651,7 +748,10 @@ async fn process_memory_distill_job(
         json!({
             "source_memory_ids": source_entries.iter().map(|entry| entry.id.clone()).collect::<Vec<_>>(),
             "source_path_prefix": item.path_prefix,
-            "coherence_key": bucket_key,
+            "namespace_key": namespace_key,
+            "coherence_key": coherence_key,
+            "bucket_key": bucket_key,
+            "quality_flags": quality_flags,
             "job_id": item.job.id,
         }),
         "foundry_worker",
@@ -790,7 +890,13 @@ async fn handle_foundry_maintenance_item(
             .map(|_| memory_core::FoundryJobStatus::Completed),
         memory_core::FoundryJobKind::MemoryDistill => process_memory_distill_job(server, item)
             .await
-            .map(|_| memory_core::FoundryJobStatus::Completed),
+            .map(|memory_id| {
+                if memory_id.is_some() {
+                    memory_core::FoundryJobStatus::Completed
+                } else {
+                    memory_core::FoundryJobStatus::Skipped
+                }
+            }),
         memory_core::FoundryJobKind::ForgetSweep => {
             process_forget_sweep_job(server, item).map(|_| memory_core::FoundryJobStatus::Completed)
         }
