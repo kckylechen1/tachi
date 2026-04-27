@@ -218,6 +218,18 @@ pub(crate) fn is_bigmodel_remote_mcp(def: &serde_json::Value) -> bool {
         .unwrap_or(false)
 }
 
+/// Returns true for remote HTTP-based MCP servers (streamable-http, sse, http transport).
+/// These servers use raw HTTP JSON-RPC instead of rmcp's transport layer to avoid
+/// argument serialization issues in rmcp's streamable-http client.
+pub(crate) fn is_remote_http_mcp(def: &serde_json::Value) -> bool {
+    let transport = def
+        .get("transport")
+        .and_then(|v| v.as_str())
+        .unwrap_or("stdio");
+    let has_url = def.get("url").and_then(|v| v.as_str()).is_some();
+    matches!(transport, "streamable-http" | "sse" | "http") && has_url
+}
+
 fn parse_sse_payload(body: &str) -> Result<serde_json::Value, String> {
     let mut data_lines = Vec::new();
     for line in body.lines() {
@@ -364,16 +376,15 @@ impl MemoryServer {
 
         let session_id = init_headers
             .get("mcp-session-id")
-            .and_then(|value| value.to_str().ok())
-            .ok_or_else(|| {
-                rmcp::ErrorData::internal_error("remote MCP missing mcp-session-id", None)
-            })?;
+            .and_then(|value| value.to_str().ok());
 
         let mut session_headers = headers.clone();
-        let session_header = HeaderValue::from_str(session_id).map_err(|e| {
-            rmcp::ErrorData::internal_error(format!("invalid session header: {e}"), None)
-        })?;
-        session_headers.insert(HeaderName::from_static("mcp-session-id"), session_header);
+        if let Some(sid) = session_id {
+            let session_header = HeaderValue::from_str(sid).map_err(|e| {
+                rmcp::ErrorData::internal_error(format!("invalid session header: {e}"), None)
+            })?;
+            session_headers.insert(HeaderName::from_static("mcp-session-id"), session_header);
+        }
 
         client
             .post(url)

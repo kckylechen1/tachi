@@ -276,7 +276,9 @@ impl MemoryServer {
         }
         let cap_def: serde_json::Value = serde_json::from_str(&cap.definition)
             .map_err(|e| rmcp::ErrorData::internal_error(format!("bad definition: {e}"), None))?;
-        if crate::mcp_connection::is_bigmodel_remote_mcp(&cap_def) {
+        if crate::mcp_connection::is_bigmodel_remote_mcp(&cap_def)
+            || crate::mcp_connection::is_remote_http_mcp(&cap_def)
+        {
             let result = self
                 .proxy_call_bigmodel_mcp(&server_id, &cap_def, tool_name, arguments.clone())
                 .await?;
