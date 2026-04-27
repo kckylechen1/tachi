@@ -161,6 +161,20 @@ pub(crate) enum ManifestAction {
     Init,
     /// Re-run doctor scan and update the manifest in place
     Refresh,
+    /// Resolve a path or scope hint against the manifest (diagnostic)
+    Resolve {
+        /// Path or scope hint (e.g. "global", "project:hyperion", "/abs/path/memory.db")
+        target: String,
+    },
+    /// Plan or apply a sweep of unowned placeholder/backup DB files (dry-run by default)
+    Sweep {
+        /// Actually move files to quarantine (default: dry-run)
+        #[arg(long)]
+        apply: bool,
+        /// Output JSON instead of human text
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Subcommand, Debug, Clone)]

@@ -1035,6 +1035,71 @@ async fn run_manifest_command(
             );
             Ok(())
         }
+        ManifestAction::Resolve { target } => {
+            let m = crate::manifest::Manifest::load_or_empty(&manifest_path);
+            // Try exact path first.
+            if let Some(e) = m.lookup(&target) {
+                println!(
+                    "[exact] {} role={:?} owner={} writable={} schema={} last={}",
+                    e.path, e.role, e.owner, e.allow_write, e.schema_kind, e.last_classification
+                );
+                return Ok(());
+            }
+            // Else interpret as a scope hint.
+            let matches: Vec<_> = m
+                .dbs
+                .iter()
+                .filter(|e| e.scope_hint == target || e.owner == target)
+                .collect();
+            if matches.is_empty() {
+                println!(
+                    "no manifest entry matches '{target}' (try `tachi manifest show` to list, or `tachi doctor` to refresh)"
+                );
+            } else {
+                for e in matches {
+                    println!(
+                        "[scope] {} role={:?} owner={} writable={} schema={} last={}",
+                        e.path, e.role, e.owner, e.allow_write, e.schema_kind, e.last_classification
+                    );
+                }
+            }
+            Ok(())
+        }
+        ManifestAction::Sweep { apply, json } => {
+            let roots = crate::doctor::default_scan_roots(home, git_root.map(|p| p.as_path()));
+            let quarantine_dir = app_home.join("quarantine");
+            let opts = crate::doctor::ScanOptions { auto_fix: false, max_depth: 10 };
+            let report = crate::doctor::scan(&roots, &quarantine_dir, opts);
+            let m = crate::manifest::Manifest::load_or_empty(&manifest_path);
+            let mut plan = crate::manifest::plan_sweep(&report, &m, &quarantine_dir);
+            if apply {
+                plan = crate::manifest::apply_sweep(plan, &quarantine_dir);
+            }
+            if json {
+                print_pretty_json(&serde_json::to_value(&plan)?)
+            } else {
+                println!(
+                    "sweep {}: planned={} applied={} skipped={}",
+                    if apply { "applied" } else { "dry-run" },
+                    plan.planned.len(),
+                    plan.applied.len(),
+                    plan.skipped.len()
+                );
+                for a in &plan.planned {
+                    println!("  [plan]   {} → {}  ({})", a.path, a.quarantine_to.as_deref().unwrap_or("-"), a.reason);
+                }
+                for a in &plan.applied {
+                    println!("  [moved]  {} → {}  ({})", a.path, a.quarantine_to.as_deref().unwrap_or("-"), a.reason);
+                }
+                for a in &plan.skipped {
+                    println!("  [skip]   {}  ({})", a.path, a.note);
+                }
+                if !apply {
+                    println!("\n(dry-run; re-run with --apply to move files)");
+                }
+                Ok(())
+            }
+        }
     }
 }
 
