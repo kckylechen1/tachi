@@ -9,6 +9,8 @@ mod capability_ops;
 mod clawdoctor;
 mod cli;
 mod dlq_ops;
+mod doctor;
+mod doctor_ops;
 mod enrichment;
 mod foundry_ops;
 mod foundry_runtime_ops;
@@ -213,6 +215,7 @@ const CACHEABLE_TOOLS: &[&str] = &[
     "memory_graph",
     "list_memories",
     "memory_stats",
+    "tachi_doctor_scan",
     "get_state",
     "hub_discover",
     "hub_get",
@@ -679,6 +682,13 @@ impl MemoryServer {
     #[tool(description = "Get aggregate statistics about the memory store.")]
     async fn memory_stats(&self) -> Result<String, String> {
         handle_memory_stats(self).await
+    }
+
+    #[tool(
+        description = "Doctor v2 — scan known memory.db roots, classify each (healthy / vec_extension_missing / wal_orphan / corrupt / legacy_schema / placeholder / backup), return JSON report. Read-only; no mutations."
+    )]
+    async fn tachi_doctor_scan(&self) -> Result<String, String> {
+        crate::doctor_ops::handle_tachi_doctor_scan().await
     }
 
     #[tool(

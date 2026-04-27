@@ -963,6 +963,34 @@ async fn run_tidy_command(
     }
 }
 
+async fn run_doctor_command(
+    json_output: bool,
+    scan_only: bool,
+    roots_override: Vec<PathBuf>,
+    home: &std::path::Path,
+    app_home: &std::path::Path,
+    git_root: Option<&PathBuf>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let roots: Vec<PathBuf> = if !roots_override.is_empty() {
+        roots_override
+    } else {
+        crate::doctor::default_scan_roots(home, git_root.map(|p| p.as_path()))
+    };
+    let quarantine_dir = app_home.join("quarantine");
+    let opts = crate::doctor::ScanOptions {
+        auto_fix: !scan_only,
+        max_depth: 10,
+    };
+    let report = crate::doctor::scan(&roots, &quarantine_dir, opts);
+
+    if json_output {
+        print_pretty_json(&serde_json::to_value(&report)?)
+    } else {
+        println!("{}", crate::doctor::render_report(&report));
+        Ok(())
+    }
+}
+
 async fn run_cli_command(
     command: Commands,
     db_path: &PathBuf,
@@ -1173,6 +1201,10 @@ async fn run_cli_command(
                 }
             }
         }
+        Commands::Doctor { .. } => {
+            // Pre-handled above before run_cli_command dispatch.
+            Ok(())
+        }
     }
 }
 
@@ -1370,6 +1402,23 @@ async fn tokio_main(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             roots.push(root.clone());
         }
         return run_tidy_command(*json, *apply, &app_home, roots, git_root.as_ref()).await;
+    }
+
+    if let Commands::Doctor {
+        json,
+        scan_only,
+        roots,
+    } = &command
+    {
+        return run_doctor_command(
+            *json,
+            *scan_only,
+            roots.clone(),
+            &home,
+            &app_home,
+            git_root.as_ref(),
+        )
+        .await;
     }
 
     if !matches!(command, Commands::Serve) {

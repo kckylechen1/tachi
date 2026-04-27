@@ -103,6 +103,18 @@ pub(crate) enum Commands {
         #[arg(long)]
         apply: bool,
     },
+    /// Doctor v2 — extension-aware DB classification + safe auto-fix
+    Doctor {
+        /// Emit machine-readable JSON instead of the human summary
+        #[arg(long)]
+        json: bool,
+        /// Skip the safe auto-fix pass (placeholder quarantine + WAL copy-aside)
+        #[arg(long)]
+        scan_only: bool,
+        /// Override default scan roots (~/.tachi, ~/.openclaw, ~/.sigil, ~/.gemini/antigravity)
+        #[arg(long, value_name = "PATH")]
+        roots: Vec<PathBuf>,
+    },
     /// Run garbage collection
     Gc,
     /// Hub management
