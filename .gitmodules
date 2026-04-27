@@ -1,0 +1,3 @@
+[submodule "tmp/agent-vault"]
+	path = tmp/agent-vault
+	url = https://github.com/Infisical/agent-vault.git
