@@ -983,11 +983,58 @@ async fn run_doctor_command(
     };
     let report = crate::doctor::scan(&roots, &quarantine_dir, opts);
 
+    // Always update the manifest after a doctor run (idempotent; preserves notes).
+    let manifest_path = crate::manifest::Manifest::default_path(home);
+    let mut m = crate::manifest::Manifest::load_or_empty(&manifest_path);
+    m.populate_from_doctor(&report);
+    if let Err(e) = m.save(&manifest_path) {
+        eprintln!("[doctor] warning: failed to update manifest at {}: {e}", manifest_path.display());
+    }
+
     if json_output {
         print_pretty_json(&serde_json::to_value(&report)?)
     } else {
         println!("{}", crate::doctor::render_report(&report));
+        println!();
+        println!("manifest: {} ({} dbs recorded)", manifest_path.display(), m.dbs.len());
         Ok(())
+    }
+}
+
+async fn run_manifest_command(
+    action: ManifestAction,
+    home: &std::path::Path,
+    app_home: &std::path::Path,
+    git_root: Option<&PathBuf>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let manifest_path = crate::manifest::Manifest::default_path(home);
+
+    match action {
+        ManifestAction::Show { json } => {
+            let m = crate::manifest::Manifest::load_or_empty(&manifest_path);
+            if json {
+                print_pretty_json(&serde_json::to_value(&m)?)
+            } else {
+                println!("{}", crate::manifest::render_manifest(&m));
+                println!("(stored at {})", manifest_path.display());
+                Ok(())
+            }
+        }
+        ManifestAction::Init | ManifestAction::Refresh => {
+            let roots = crate::doctor::default_scan_roots(home, git_root.map(|p| p.as_path()));
+            let quarantine_dir = app_home.join("quarantine");
+            let opts = crate::doctor::ScanOptions { auto_fix: false, max_depth: 10 };
+            let report = crate::doctor::scan(&roots, &quarantine_dir, opts);
+            let mut m = crate::manifest::Manifest::load_or_empty(&manifest_path);
+            m.populate_from_doctor(&report);
+            m.save(&manifest_path)?;
+            println!(
+                "manifest written: {} ({} dbs)",
+                manifest_path.display(),
+                m.dbs.len()
+            );
+            Ok(())
+        }
     }
 }
 
@@ -1205,6 +1252,10 @@ async fn run_cli_command(
             // Pre-handled above before run_cli_command dispatch.
             Ok(())
         }
+        Commands::Manifest { .. } => {
+            // Pre-handled above before run_cli_command dispatch.
+            Ok(())
+        }
     }
 }
 
@@ -1419,6 +1470,10 @@ async fn tokio_main(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             git_root.as_ref(),
         )
         .await;
+    }
+
+    if let Commands::Manifest { action } = &command {
+        return run_manifest_command(action.clone(), &home, &app_home, git_root.as_ref()).await;
     }
 
     if !matches!(command, Commands::Serve) {

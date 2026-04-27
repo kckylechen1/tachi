@@ -115,6 +115,11 @@ pub(crate) enum Commands {
         #[arg(long, value_name = "PATH")]
         roots: Vec<PathBuf>,
     },
+    /// Manifest v1 — show/init/refresh ~/.tachi/manifest.json
+    Manifest {
+        #[command(subcommand)]
+        action: ManifestAction,
+    },
     /// Run garbage collection
     Gc,
     /// Hub management
@@ -143,6 +148,19 @@ pub(crate) enum Commands {
         #[arg(long)]
         dry_run: bool,
     },
+}
+
+#[derive(Subcommand, Debug, Clone)]
+pub(crate) enum ManifestAction {
+    /// Show the current manifest (human or --json)
+    Show {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Create a new manifest by running a doctor scan (idempotent)
+    Init,
+    /// Re-run doctor scan and update the manifest in place
+    Refresh,
 }
 
 #[derive(Subcommand, Debug, Clone)]
