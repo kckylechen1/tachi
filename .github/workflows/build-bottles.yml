@@ -75,8 +75,11 @@ jobs:
             tap/Formula/tachi.rb \
             --version "${{ needs.resolve-version.outputs.version }}"
 
+      - name: Register local tap
+        run: brew tap kckylechen1/tachi "$PWD/tap"
+
       - name: Build bottle
-        run: brew install --build-bottle ./tap/Formula/tachi.rb
+        run: brew install --build-bottle kckylechen1/tachi/tachi
 
       - name: Create bottle
         run: |
