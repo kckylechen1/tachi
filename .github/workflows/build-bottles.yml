@@ -123,8 +123,7 @@ jobs:
           repository: ${{ env.TAP_REPO }}
           tag_name: tachi-${{ needs.resolve-version.outputs.version }}
           files: bottles/*/tachi--*.tar.gz
-        env:
-          GITHUB_TOKEN: ${{ secrets.HOMEBREW_TAP_GITHUB_TOKEN }}
+          token: ${{ secrets.HOMEBREW_TAP_GITHUB_TOKEN }}
 
       - name: Check out tap repo
         uses: actions/checkout@v4
