@@ -120,7 +120,7 @@ jobs:
       - name: Upload bottles to GitHub Release (tap repo)
         uses: softprops/action-gh-release@v2
         with:
-          repo: ${{ env.TAP_REPO }}
+          repository: ${{ env.TAP_REPO }}
           tag_name: tachi-${{ needs.resolve-version.outputs.version }}
           files: bottles/*/tachi--*.tar.gz
         env:
