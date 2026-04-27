@@ -407,7 +407,7 @@ pub(crate) async fn handle_hub_call(
             &resolved_server_id,
             Some(&target.requested_id),
             &params.tool_name,
-            params.arguments.as_object().cloned(),
+            Some(params.arguments.clone()),
         )
         .await;
 
