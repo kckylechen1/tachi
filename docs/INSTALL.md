@@ -26,7 +26,7 @@ bash -c "$(curl -fsSL https://raw.githubusercontent.com/kckylechen1/tachi/main/s
 
 ```bash
 tachi --version
-# Expected: tachi 0.14.0 (or later)
+# Expected: tachi 0.16.3 (or later)
 ```
 
 If the command is not found, ensure Homebrew's bin directory is on your `PATH`:
