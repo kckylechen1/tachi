@@ -50,7 +50,11 @@ pub fn insert_foundry_job(conn: &Connection, job: &PersistedFoundryJob) -> Resul
             job.spec.evidence_count as i64,
             job.spec.goal_count as i64,
             job.spec.metadata.to_string(),
-            if job.spec.created_at.is_empty() { &now } else { &job.spec.created_at },
+            if job.spec.created_at.is_empty() {
+                &now
+            } else {
+                &job.spec.created_at
+            },
             now,
         ],
     )?;
@@ -83,31 +87,23 @@ pub fn update_foundry_job_status_with_reason(
 ) -> Result<(), MemoryError> {
     let now = chrono::Utc::now().to_rfc3339();
     if let Some(reason) = reason {
-        // Read-modify-write the metadata blob to graft `terminal_reason`.
-        let raw_meta: Option<String> = conn
-            .query_row(
-                "SELECT metadata FROM foundry_jobs WHERE id = ?1",
-                params![id],
-                |row| row.get::<_, String>(0),
-            )
-            .ok();
-        let mut meta_val: serde_json::Value = raw_meta
-            .as_deref()
-            .and_then(|s| serde_json::from_str(s).ok())
-            .unwrap_or_else(|| serde_json::json!({}));
-        if let Some(obj) = meta_val.as_object_mut() {
-            obj.insert(
-                "terminal_reason".into(),
-                serde_json::json!({
-                    "status": status,
-                    "reason": reason,
-                    "at": now,
-                }),
-            );
-        }
+        let terminal_reason = serde_json::json!({
+            "status": status,
+            "reason": reason,
+            "at": now,
+        })
+        .to_string();
         conn.execute(
-            "UPDATE foundry_jobs SET status = ?1, updated_at = ?2, metadata = ?3 WHERE id = ?4",
-            params![status, now, meta_val.to_string(), id],
+            "UPDATE foundry_jobs
+             SET status = ?1,
+                 updated_at = ?2,
+                 metadata = json_set(
+                     CASE WHEN json_valid(metadata) THEN metadata ELSE '{}' END,
+                     '$.terminal_reason',
+                     json(?3)
+                 )
+             WHERE id = ?4",
+            params![status, now, terminal_reason, id],
         )?;
     } else {
         conn.execute(
@@ -125,16 +121,15 @@ pub fn job_status_histogram(
     conn: &Connection,
     gc_threshold_days: i64,
 ) -> Result<JobStatusHistogram, MemoryError> {
-    let mut stmt = conn.prepare(
-        "SELECT status, COUNT(*) FROM foundry_jobs GROUP BY status",
-    )?;
+    let mut stmt = conn.prepare("SELECT status, COUNT(*) FROM foundry_jobs GROUP BY status")?;
     let mut hist = JobStatusHistogram::default();
     let rows = stmt.query_map([], |row| {
         let s: String = row.get(0)?;
         let n: i64 = row.get(1)?;
         Ok((s, n as usize))
     })?;
-    for r in rows.flatten() {
+    for r in rows {
+        let r = r?;
         match r.0.as_str() {
             "planned" => hist.planned = r.1,
             "queued" => hist.queued = r.1,
@@ -217,8 +212,8 @@ pub fn load_pending_foundry_jobs(
     })?;
 
     let mut jobs = Vec::new();
-    for job in rows.flatten() {
-        jobs.push(job);
+    for job in rows {
+        jobs.push(job?);
     }
     Ok(jobs)
 }
@@ -260,10 +255,20 @@ mod tests {
         .unwrap();
     }
 
+    fn insert_job_with_metadata(conn: &Connection, id: &str, status: &str, metadata: &str) {
+        let now = chrono::Utc::now().to_rfc3339();
+        conn.execute(
+            "INSERT INTO foundry_jobs (id, kind, lane, status, created_at, updated_at, metadata)
+             VALUES (?1, 'thesis_compaction', 'fast', ?2, ?3, ?3, ?4)",
+            params![id, status, now, metadata],
+        )
+        .unwrap();
+    }
+
     #[test]
     fn update_with_reason_grafts_terminal_reason_into_metadata() {
         let conn = open_test_db();
-        insert_minimal_job(&conn, "j1", "running");
+        insert_job_with_metadata(&conn, "j1", "running", r#"{"existing":true}"#);
 
         update_foundry_job_status_with_reason(&conn, "j1", "failed", Some("evidence empty"))
             .unwrap();
@@ -277,6 +282,7 @@ mod tests {
             .unwrap();
         assert_eq!(status, "failed");
         let v: serde_json::Value = serde_json::from_str(&meta).unwrap();
+        assert_eq!(v["existing"], true);
         assert_eq!(v["terminal_reason"]["status"], "failed");
         assert_eq!(v["terminal_reason"]["reason"], "evidence empty");
         assert!(v["terminal_reason"]["at"].is_string());
@@ -324,7 +330,10 @@ mod tests {
         assert_eq!(h.failed, 1);
         assert_eq!(h.skipped, 1);
         assert_eq!(h.queued, 1);
-        assert_eq!(h.gc_eligible, 1, "only the backdated 'completed' should be GC-eligible");
+        assert_eq!(
+            h.gc_eligible, 1,
+            "only the backdated 'completed' should be GC-eligible"
+        );
     }
 
     #[test]

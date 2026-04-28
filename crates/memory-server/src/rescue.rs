@@ -184,8 +184,17 @@ pub fn classify(row: &SourceRow) -> RescueAssignment {
     let combined = format!("{} {}", p, body_first_512);
 
     let kw_trading = [
-        "hapi", "持仓", "买入", "卖出", "止损", "止盈", "策略", "回测",
-        "trading agent", "stock symbol", "ticker",
+        "hapi",
+        "持仓",
+        "买入",
+        "卖出",
+        "止损",
+        "止盈",
+        "策略",
+        "回测",
+        "trading agent",
+        "stock symbol",
+        "ticker",
     ];
     if kw_trading.iter().any(|k| combined.contains(k)) {
         return RescueAssignment {
@@ -197,7 +206,13 @@ pub fn classify(row: &SourceRow) -> RescueAssignment {
         };
     }
 
-    let kw_quant = ["quant_analyzer", "quant-analyzer", "v8 engine", "v8-engine", "score_setup"];
+    let kw_quant = [
+        "quant_analyzer",
+        "quant-analyzer",
+        "v8 engine",
+        "v8-engine",
+        "score_setup",
+    ];
     if kw_quant.iter().any(|k| combined.contains(k)) {
         return RescueAssignment {
             source_id: row.id.clone(),
@@ -302,25 +317,28 @@ struct TargetCaps {
     has_retention_policy: bool,
 }
 
-fn detect_target_caps(conn: &Connection) -> TargetCaps {
+fn detect_target_caps(conn: &Connection) -> Result<TargetCaps, String> {
     let mut has_domain = false;
     let mut has_retention_policy = false;
-    if let Ok(mut stmt) = conn.prepare("PRAGMA table_info(memories)") {
-        if let Ok(rows) = stmt.query_map([], |r| r.get::<_, String>(1)) {
-            for col in rows.flatten() {
-                if col == "domain" {
-                    has_domain = true;
-                }
-                if col == "retention_policy" {
-                    has_retention_policy = true;
-                }
-            }
+    let mut stmt = conn
+        .prepare("PRAGMA table_info(memories)")
+        .map_err(|e| format!("inspect target memories schema: {e}"))?;
+    let rows = stmt
+        .query_map([], |r| r.get::<_, String>(1))
+        .map_err(|e| format!("read target memories schema: {e}"))?;
+    for col in rows {
+        let col = col.map_err(|e| format!("decode target memories schema column: {e}"))?;
+        if col == "domain" {
+            has_domain = true;
+        }
+        if col == "retention_policy" {
+            has_retention_policy = true;
         }
     }
-    TargetCaps {
+    Ok(TargetCaps {
         has_domain,
         has_retention_policy,
-    }
+    })
 }
 
 /// Apply the plan: insert each row into its target DB. Skips rows whose
@@ -353,9 +371,9 @@ pub fn apply_rescue(
             ));
             continue;
         }
-        let conn = Connection::open(&path)
-            .map_err(|e| format!("open target {}: {e}", path.display()))?;
-        let caps = detect_target_caps(&conn);
+        let conn =
+            Connection::open(&path).map_err(|e| format!("open target {}: {e}", path.display()))?;
+        let caps = detect_target_caps(&conn)?;
         conns.insert(target.clone(), (conn, caps));
     }
 
@@ -389,8 +407,8 @@ pub fn apply_rescue(
         }
 
         // Build the metadata blob, annotating provenance + isolation hints.
-        let mut meta_val: serde_json::Value = serde_json::from_str(&row.metadata)
-            .unwrap_or_else(|_| serde_json::json!({}));
+        let mut meta_val: serde_json::Value =
+            serde_json::from_str(&row.metadata).unwrap_or_else(|_| serde_json::json!({}));
         if let Some(obj) = meta_val.as_object_mut() {
             obj.insert(
                 "rescue".into(),
@@ -407,7 +425,11 @@ pub fn apply_rescue(
         }
         let meta_str = meta_val.to_string();
 
-        let scope_final = if assignment.trading { "user".to_string() } else { row.scope.clone() };
+        let scope_final = if assignment.trading {
+            "user".to_string()
+        } else {
+            row.scope.clone()
+        };
 
         let result = if caps.has_domain && caps.has_retention_policy {
             conn.execute(
