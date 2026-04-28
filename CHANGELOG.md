@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Memory governance suite**: doctor v2, manifest v1, manifest-aware write guards/resolvers, save-time capture gate validation, Foundry job lifecycle hardening, and antigravity multi-project rescue tooling.
+- **OpenClaw manifest-aware bridge**: OpenClaw now routes agent DBs through `~/.tachi/manifest.json` when available, raises the default auto-capture floor to 200 characters, and tolerates noisy MCP JSON payloads.
+
+### Changed
+- **Antigravity rescue flow**: mixed antigravity memory rows can now be split into project DBs with provenance and quarantine-style source backup instead of deletion.
+
 ## [0.16.1] - 2026-04-23
 
 ### Fixed

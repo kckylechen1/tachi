@@ -74,7 +74,11 @@ export const defaultConfig: BridgeConfig = {
   exposeExperimentalTachiTools:
     process.env.TACHI_OPENCLAW_EXPERIMENTAL_TACHI_TOOLS === "1" ||
     process.env.TACHI_OPENCLAW_EXPERIMENTAL_TACHI_TOOLS === "true",
-  captureMinChars: Number(process.env.MEMORY_BRIDGE_CAPTURE_MIN_CHARS || 24),
+  // Branch #7 (B#7) — bumped from 24 → 200 to align with the Sigil
+  // capture-gate floor (TACHI_CAPTURE_GATE warns/blocks on entries shorter
+  // than DEFAULT_CAPTURE_MIN_CHARS=200). Keeps OpenClaw's auto-capture from
+  // emitting low-signal scratchpad noise that the server would just reject.
+  captureMinChars: Number(process.env.MEMORY_BRIDGE_CAPTURE_MIN_CHARS || 200),
   captureTriggerKeywords: (
     process.env.MEMORY_BRIDGE_CAPTURE_TRIGGERS ||
     "记住,remember,偏好,喜欢,讨厌,生日,地址,电话,邮箱,习惯,计划,deadline,TODO,密码,账号,关键,always,never,重要,important"

@@ -14,6 +14,35 @@ pub(super) async fn handle_save_memory(
         .map_err(|e| format!("Failed to serialize: {}", e));
     }
 
+    // Capture gate (Branch #4): validate domain, path bucket, min-chars, and
+    // markdown-dump heuristic. Default mode = Warn (annotate response, write
+    // proceeds). TACHI_CAPTURE_GATE=enforce switches to hard rejection.
+    let gate_mode = crate::capture_gate::GateMode::from_env();
+    let gate_decision = crate::capture_gate::evaluate(
+        &crate::capture_gate::GateInput::new(
+            &params.text,
+            &params.path,
+            params.domain.as_deref(),
+            params.force,
+        ),
+        gate_mode,
+    );
+    if !gate_decision.accept {
+        return serde_json::to_string(&json!({
+            "saved": false,
+            "rejected_by": "capture_gate",
+            "mode": gate_decision.mode,
+            "violations": gate_decision.violations,
+            "hint": "Set TACHI_CAPTURE_GATE=warn to downgrade these to warnings, or pass force=true on save.",
+        }))
+        .map_err(|e| format!("Failed to serialize: {}", e));
+    }
+    let gate_warnings = if gate_decision.violations.is_empty() {
+        None
+    } else {
+        Some(gate_decision.violations.clone())
+    };
+
     let id = params
         .id
         .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
@@ -114,6 +143,9 @@ pub(super) async fn handle_save_memory(
     response.insert("status".into(), json!("saved (enrichment pending)"));
     if let Some(warning) = warning {
         response.insert("warning".into(), json!(warning));
+    }
+    if let Some(violations) = gate_warnings {
+        response.insert("capture_gate_warnings".into(), json!(violations));
     }
 
     if params.auto_link && !entry.entities.is_empty() {

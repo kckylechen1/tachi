@@ -927,15 +927,24 @@ pub(crate) async fn run_foundry_maintenance_worker(
 
         server.foundry_stats.running.fetch_sub(1, Ordering::Relaxed);
 
-        // Update persisted job status in DB
-        let status_str = match &result {
-            Ok(memory_core::FoundryJobStatus::Skipped) => "skipped",
-            Ok(_) => "completed",
-            Err(_) => "failed",
+        // Branch #5: capture a structured reason for non-completed terminal
+        // transitions so `tachi doctor --jobs` and post-mortems can surface
+        // *why* a job skipped/failed instead of just the bare status.
+        let (status_str, reason): (&str, Option<String>) = match &result {
+            Ok(memory_core::FoundryJobStatus::Skipped) => {
+                ("skipped", Some("worker reported no-op (no qualifying inputs)".to_string()))
+            }
+            Ok(_) => ("completed", None),
+            Err(e) => ("failed", Some(e.clone())),
         };
         let _ = with_foundry_store(&server, &item, |store| {
-            memory_core::update_foundry_job_status(store.connection(), &item.job.id, status_str)
-                .map_err(|e| format!("update foundry job status: {e}"))
+            memory_core::update_foundry_job_status_with_reason(
+                store.connection(),
+                &item.job.id,
+                status_str,
+                reason.as_deref(),
+            )
+            .map_err(|e| format!("update foundry job status: {e}"))
         });
 
         match result {

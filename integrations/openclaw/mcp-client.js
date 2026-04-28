@@ -99,21 +99,71 @@ function extractErrorMessage(result, toolName) {
     const text = extractTextBlocks(result.content).find(Boolean);
     return text || `MCP tool "${toolName}" returned an error`;
 }
+// Branch #7 — tolerant JSON parser for MCP tool payloads.
+// Sigil's memory-server occasionally returns text blocks with a UTF-8 BOM,
+// trailing whitespace/newlines, or a stray log line prepended. The MCP
+// SDK hands us those blocks verbatim. Try strict parse first, then fall
+// back to BOM/whitespace strip + braces/brackets substring recovery so a
+// single noisy block doesn't poison an otherwise valid response.
+function tryParseJson(raw) {
+    if (!raw)
+        return undefined;
+    try {
+        return JSON.parse(raw);
+    }
+    catch {
+        /* fall through */
+    }
+    let cleaned = raw;
+    if (cleaned.charCodeAt(0) === 0xfeff) {
+        cleaned = cleaned.slice(1);
+    }
+    cleaned = cleaned.trim();
+    if (cleaned !== raw) {
+        try {
+            return JSON.parse(cleaned);
+        }
+        catch {
+            /* fall through */
+        }
+    }
+    // Last resort: locate the first balanced JSON value (object or array).
+    const firstObj = cleaned.indexOf("{");
+    const firstArr = cleaned.indexOf("[");
+    const candidates = [];
+    if (firstObj >= 0)
+        candidates.push([firstObj, "}"]);
+    if (firstArr >= 0)
+        candidates.push([firstArr, "]"]);
+    candidates.sort((a, b) => a[0] - b[0]);
+    for (const [start, closer] of candidates) {
+        const end = cleaned.lastIndexOf(closer);
+        if (end > start) {
+            try {
+                return JSON.parse(cleaned.slice(start, end + 1));
+            }
+            catch {
+                continue;
+            }
+        }
+    }
+    return undefined;
+}
 function extractJsonPayload(result, toolName) {
     if (result.structuredContent !== undefined) {
         if (typeof result.structuredContent === "string") {
-            return JSON.parse(result.structuredContent);
+            const parsed = tryParseJson(result.structuredContent);
+            if (parsed !== undefined)
+                return parsed;
+            throw new Error(`MCP tool "${toolName}" returned unparseable structuredContent string`);
         }
         return result.structuredContent;
     }
     const textBlocks = extractTextBlocks(result.content).filter((text) => text.trim().length > 0);
     for (const text of textBlocks) {
-        try {
-            return JSON.parse(text);
-        }
-        catch {
-            continue;
-        }
+        const parsed = tryParseJson(text);
+        if (parsed !== undefined)
+            return parsed;
     }
     throw new Error(`MCP tool "${toolName}" returned non-JSON content`);
 }

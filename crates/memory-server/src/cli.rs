@@ -103,6 +103,26 @@ pub(crate) enum Commands {
         #[arg(long)]
         apply: bool,
     },
+    /// Doctor v2 — extension-aware DB classification + safe auto-fix
+    Doctor {
+        /// Emit machine-readable JSON instead of the human summary
+        #[arg(long)]
+        json: bool,
+        /// Skip the safe auto-fix pass (placeholder quarantine + WAL copy-aside)
+        #[arg(long)]
+        scan_only: bool,
+        /// Override default scan roots (~/.tachi, ~/.openclaw, ~/.sigil, ~/.gemini/antigravity)
+        #[arg(long, value_name = "PATH")]
+        roots: Vec<PathBuf>,
+        /// Branch #5: also report a foundry job-status histogram per manifest DB
+        #[arg(long)]
+        jobs: bool,
+    },
+    /// Manifest v1 — show/init/refresh ~/.tachi/manifest.json
+    Manifest {
+        #[command(subcommand)]
+        action: ManifestAction,
+    },
     /// Run garbage collection
     Gc,
     /// Hub management
@@ -130,6 +150,58 @@ pub(crate) enum Commands {
         /// Only count missing entries, don't generate summaries
         #[arg(long)]
         dry_run: bool,
+    },
+    /// Branch #6 — Rescue: split a multi-project memory.db into per-project Tachi DBs.
+    /// Plan-only by default; pass --apply to actually write into target DBs.
+    Rescue {
+        #[command(subcommand)]
+        action: RescueAction,
+    },
+}
+
+#[derive(Subcommand, Debug, Clone)]
+pub(crate) enum RescueAction {
+    /// Split the legacy antigravity memory.db into per-project Tachi DBs.
+    Antigravity {
+        /// Source DB path (defaults to ~/.gemini/antigravity/memory.db)
+        #[arg(long, value_name = "PATH")]
+        source: Option<PathBuf>,
+        /// Root directory containing per-project Tachi DBs (defaults to ~/.tachi/projects)
+        #[arg(long, value_name = "PATH")]
+        targets_root: Option<PathBuf>,
+        /// Actually perform the rescue (default: dry-run plan only).
+        #[arg(long)]
+        apply: bool,
+        /// Emit machine-readable JSON instead of the human summary.
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Subcommand, Debug, Clone)]
+pub(crate) enum ManifestAction {
+    /// Show the current manifest (human or --json)
+    Show {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Create a new manifest by running a doctor scan (idempotent)
+    Init,
+    /// Re-run doctor scan and update the manifest in place
+    Refresh,
+    /// Resolve a path or scope hint against the manifest (diagnostic)
+    Resolve {
+        /// Path or scope hint (e.g. "global", "project:hyperion", "/abs/path/memory.db")
+        target: String,
+    },
+    /// Plan or apply a sweep of unowned placeholder/backup DB files (dry-run by default)
+    Sweep {
+        /// Actually move files to quarantine (default: dry-run)
+        #[arg(long)]
+        apply: bool,
+        /// Output JSON instead of human text
+        #[arg(long)]
+        json: bool,
     },
 }
 
