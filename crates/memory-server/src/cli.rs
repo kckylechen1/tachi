@@ -151,6 +151,31 @@ pub(crate) enum Commands {
         #[arg(long)]
         dry_run: bool,
     },
+    /// Branch #6 — Rescue: split a multi-project memory.db into per-project Tachi DBs.
+    /// Plan-only by default; pass --apply to actually write into target DBs.
+    Rescue {
+        #[command(subcommand)]
+        action: RescueAction,
+    },
+}
+
+#[derive(Subcommand, Debug, Clone)]
+pub(crate) enum RescueAction {
+    /// Split the legacy antigravity memory.db into per-project Tachi DBs.
+    Antigravity {
+        /// Source DB path (defaults to ~/.gemini/antigravity/memory.db)
+        #[arg(long, value_name = "PATH")]
+        source: Option<PathBuf>,
+        /// Root directory containing per-project Tachi DBs (defaults to ~/.tachi/projects)
+        #[arg(long, value_name = "PATH")]
+        targets_root: Option<PathBuf>,
+        /// Actually perform the rescue (default: dry-run plan only).
+        #[arg(long)]
+        apply: bool,
+        /// Emit machine-readable JSON instead of the human summary.
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Subcommand, Debug, Clone)]

@@ -13,6 +13,7 @@ mod doctor;
 mod doctor_ops;
 mod manifest;
 mod capture_gate;
+mod rescue;
 mod enrichment;
 mod foundry_ops;
 mod foundry_runtime_ops;
@@ -158,7 +159,7 @@ use std::time::{Duration, Instant};
 use tokio::io::{stdin, stdout};
 use tokio::sync::mpsc;
 
-use crate::cli::{Cli, Commands, HubAction, ManifestAction};
+use crate::cli::{Cli, Commands, HubAction, ManifestAction, RescueAction};
 use crate::enrichment::EnrichmentItem;
 use crate::mcp_pool::McpClientPool;
 
