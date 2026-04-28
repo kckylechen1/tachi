@@ -114,6 +114,9 @@ pub(crate) enum Commands {
         /// Override default scan roots (~/.tachi, ~/.openclaw, ~/.sigil, ~/.gemini/antigravity)
         #[arg(long, value_name = "PATH")]
         roots: Vec<PathBuf>,
+        /// Branch #5: also report a foundry job-status histogram per manifest DB
+        #[arg(long)]
+        jobs: bool,
     },
     /// Manifest v1 — show/init/refresh ~/.tachi/manifest.json
     Manifest {

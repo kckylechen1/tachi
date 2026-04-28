@@ -967,6 +967,7 @@ async fn run_doctor_command(
     json_output: bool,
     scan_only: bool,
     roots_override: Vec<PathBuf>,
+    jobs_report: bool,
     home: &std::path::Path,
     app_home: &std::path::Path,
     git_root: Option<&PathBuf>,
@@ -991,14 +992,92 @@ async fn run_doctor_command(
         eprintln!("[doctor] warning: failed to update manifest at {}: {e}", manifest_path.display());
     }
 
+    // Branch #5: optional foundry job-status histogram per manifest DB.
+    let jobs_section = if jobs_report {
+        Some(collect_job_histograms(&m))
+    } else {
+        None
+    };
+
     if json_output {
-        print_pretty_json(&serde_json::to_value(&report)?)
+        let mut full = serde_json::to_value(&report)?;
+        if let Some(jobs) = &jobs_section {
+            if let Some(obj) = full.as_object_mut() {
+                obj.insert("foundry_jobs".into(), serde_json::to_value(jobs)?);
+            }
+        }
+        print_pretty_json(&full)
     } else {
         println!("{}", crate::doctor::render_report(&report));
         println!();
         println!("manifest: {} ({} dbs recorded)", manifest_path.display(), m.dbs.len());
+        if let Some(jobs) = &jobs_section {
+            println!("\n=== foundry jobs ===");
+            for entry in jobs {
+                let h = &entry.histogram;
+                println!(
+                    "  {} planned={} queued={} running={} completed={} failed={} skipped={} other={} gc_eligible(>=30d)={} total={}",
+                    entry.path,
+                    h.planned, h.queued, h.running, h.completed, h.failed, h.skipped,
+                    h.other.iter().map(|(_, n)| n).sum::<usize>(),
+                    h.gc_eligible, h.total
+                );
+                if !entry.error.is_empty() {
+                    println!("    error: {}", entry.error);
+                }
+            }
+        }
         Ok(())
     }
+}
+
+#[derive(Debug, serde::Serialize)]
+struct DbJobReport {
+    path: String,
+    histogram: memory_core::JobStatusHistogram,
+    error: String,
+}
+
+fn collect_job_histograms(manifest: &crate::manifest::Manifest) -> Vec<DbJobReport> {
+    let mut out = Vec::new();
+    for entry in &manifest.dbs {
+        // Read-only: open the connection directly without going through MemoryStore::open
+        // which would try to write schema. We use rusqlite OpenFlags to be paranoid.
+        let conn = match rusqlite::Connection::open_with_flags(
+            &entry.path,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        ) {
+            Ok(c) => c,
+            Err(e) => {
+                out.push(DbJobReport {
+                    path: entry.path.clone(),
+                    histogram: memory_core::JobStatusHistogram::default(),
+                    error: format!("open failed: {e}"),
+                });
+                continue;
+            }
+        };
+        let hist = match memory_core::job_status_histogram(&conn, 30) {
+            Ok(h) => h,
+            Err(e) => {
+                out.push(DbJobReport {
+                    path: entry.path.clone(),
+                    histogram: memory_core::JobStatusHistogram::default(),
+                    error: format!("histogram failed: {e}"),
+                });
+                continue;
+            }
+        };
+        // Skip silent zero-job DBs to keep the report focused.
+        if hist.total > 0 {
+            out.push(DbJobReport {
+                path: entry.path.clone(),
+                histogram: hist,
+                error: String::new(),
+            });
+        }
+    }
+    out
 }
 
 async fn run_manifest_command(
@@ -1524,12 +1603,14 @@ async fn tokio_main(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         json,
         scan_only,
         roots,
+        jobs,
     } = &command
     {
         return run_doctor_command(
             *json,
             *scan_only,
             roots.clone(),
+            *jobs,
             &home,
             &app_home,
             git_root.as_ref(),
