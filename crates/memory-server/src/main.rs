@@ -12,6 +12,7 @@ mod dlq_ops;
 mod doctor;
 mod doctor_ops;
 mod manifest;
+mod capture_gate;
 mod enrichment;
 mod foundry_ops;
 mod foundry_runtime_ops;
