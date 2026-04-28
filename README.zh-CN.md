@@ -202,6 +202,10 @@ Tachi 支持以外部扩展插件的形式桥接运行于 OpenClaw 内核。
 - **🏭 神经熔炉（Neural Foundry）**：服务端上下文生命周期管理——`recall_context`、`capture_session`、`compact_context`、`section_build` 等。
 - **📦 技能包管理（Skill Packs）**：安装、投射和管理技能集合。支持多 Agent 格式投射。
 - **🧠 能力推荐**：`recommend_capability`、`recommend_skill`、`recommend_toolchain`——Tachi 为任务推荐最优工具组合。
+- **🩺 记忆治理（Memory Governance）**：`tachi doctor` 巡检 SQLite 数据库健康状态（扩展缺失、WAL 孤子、腐坏、占位等），自动隔离或修复；`tachi manifest` 维护 `~/.tachi/manifest.json` 总册，统一管理已归属数据库的权限与路由；`tachi rescue` 可将 antigravity 混库按项目分拨归宗，源库永留备份。
+- **🛡️ 入库把关（Capture Gate）**：`save_memory` 时自动校验 domain、path 合规性、内容质量（防 markdown dump）与最小字数（默认 200，scratch 路径除外）。支持 `warn`（默认）/`enforce`/`off` 三档，由 `TACHI_CAPTURE_GATE` 环境变量控制。
+- **🏭 Foundry 任务生命周期加固**：任务终了原因以原子方式写入 metadata，GC Retention 延长至 30 天，新增 `job_status_histogram` 总览。
+- **🔌 OpenClaw 总录桥接**：OpenClaw 现在通过 `~/.tachi/manifest.json` 路由自身数据库，默认捕获门坎升至 200 字，MCP JSON 解析增强容错（BOM/空格/括号失衡）。
 
 ---
 

@@ -44,6 +44,15 @@
 
 **藏经阁** 弃平铺之法，取其**层峦叠嶂、如藏经阁之规制（层级化文件系统范式）**，辅以**经脉羁绊（图谱级因果关联）**。其底座由玄铁（Rust）百炼而成。不论化作 [MCP](https://modelcontextprotocol.io/) 法器独善其身，亦或寄魂于 OpenClaw 等奇巧宗门，皆可施展须臾即至之多系搜魂（亚毫秒级混合语义检索），且**皆不假外物（无需外部数据库）**。
 
+### 近次修补（v0.16.3）
+
+- **神医判官（Doctor v2）**：新增 `tachi doctor` 之术，以扩展感知之法巡检天下 SQLite 藏库，辨其健康、缺损、 orphaned WAL、腐坏、古制、占位之态。遇占位之库则自动隔离于隔离区（`~/.tachi/quarantine/`），遇 WAL 孤子则抄本截流，原库秋毫无犯。此乃守护百年藏经之第一重门闩。
+- **藏经总录（Manifest v1）**：立 `~/.tachi/manifest.json` 为万宝楼总册，录天下已归属之藏库（路径、宗派、主君、schema、向量、读写权限、上次巡检时日）。凡藏经阁正统之库，皆入此册；旁门左道之库（如 kline_cache、rust_gateway 之流）概不收录，免致混淆。`tachi manifest show / init / refresh / resolve / sweep` 五式俱全。
+- **山门把关（Capture Gate）**：新设入库试炼，凡欲录入之识，必经四关：域不可缺、路径须入正途（二十二阁之一）、非 markdown 长文之 Dump、字数过二百（scratch 阁除外）。`force=true` 可破第三、四关。设 `warn`（默认）、`enforce`、`off` 三档，由 `TACHI_CAPTURE_GATE` 调控。
+- **熔炉工籍加固（Foundry Job Lifecycle）**：`update_foundry_job_status_with_reason` 以原子之法于 metadata 中烙刻终了之因（skip/failure 之别），并新增 `job_status_histogram` 以总览工籍之存亡。GC Retention 由七日延至三十日，合生命周期之规。
+- **散修归宗（Antigravity Rescue）**：`tachi rescue antigravity` 一式，可将 `~/.gemini/antigravity/memory.db` 中散落于七大宗门（hapi、quant、hyperion、openclaw、sigil、tachi、antigravity）之识，按归属分拨至各宗项目库。先出蓝图（dry-run），后施搬运（`--apply`）。源库永留备份，不废不灭。Hapi 之交易记忆更得 `domain='equity_trading'` 与 `scope='user'` 之双重封印，免致 coding 灵核误入。
+- **OpenClaw 总录桥接**：OpenClaw 今可于 `~/.tachi/manifest.json` 中寻得自身之藏库，不再囿于旧式 `data/agents/<id>/memory.db` 之格局。默认捕获门坎由二十四字升至二百字，免致低信噪之碎片滥入库藏。MCP JSON 解析更添容错，UTF-8 BOM、首尾空格、失衡括号皆可不伤大雅。
+
 ### 近次修补（v0.16.0）
 
 - **缝合怪斩立决**：`process_memory_distill_job` 引入 `coherent_distill_buckets`，按 `topic`/`entity` 分桶蒸馏，需满 3 条同源记忆方启炉。无主题无实体之记忆直接跳过，蒸馏成果带 `coherence_key` 印记。先前因路径前缀粗暴拼合而生之"缝合怪"幻识，自此绝迹。
@@ -221,6 +230,9 @@ Tachi 亦化身为 OpenClaw 气海之元婴法宝。
 - **👻 幽灵低语（Ghost Whispers）**：灵核之间以暗道传书，主题持久刻于金石之上（SQLite 持久化），重启不失。`ghost_publish` 发信、`ghost_subscribe` 收信、`ghost_ack` 确收、`ghost_reflect` 参悟、`ghost_promote` 升格入永忆。
 - **🏭 神经熔炉（Neural Foundry）**：服务端掌控上下文之生灭——`recall_context` 唤醒旧忆、`capture_session` 封存当局、`compact_context` 炼化冗余、`section_build` 铸造篇章，令灵核无需自理记忆之苦。
 - **📦 技能包管理（Skill Packs）**：安装、投射、管理成套仙诀。`pack_register` 入册、`pack_project` 投射至各派（Claude, Cursor, Codex, Gemini 等）。
+- **🩺 神医判官与藏经总录（Memory Governance）**：`tachi doctor` 可巡天下 SQLite 藏库之健康，辨其症结（扩展缺失、WAL 孤子、腐坏、古制、占位），自动隔离或修复；`tachi manifest` 掌万宝楼总册，录各库之主君、宗派、schema、向量、读写权限，杜绝旁门左道之库混入。更有 `tachi rescue` 接引散修归宗，将 antigravity 混库之识按归属分拨七大宗门项目库，源库永留备份。
+- **🛡️ 山门把关（Capture Gate）**：入库之时设四重试炼——域不可缺、路径须入二十二阁之一、非 markdown 长文之 Dump、字数过二百（scratch 阁除外）。`force=true` 可破后两关。`warn`（默认）、`enforce`、`off` 三档由 `TACHI_CAPTURE_GATE` 调控，免致低信噪之碎片滥入库藏。
+- **🏭 熔炉工籍（Foundry Job Lifecycle）**：神经熔炉之工籍今得加固，终了之因以原子之法烙于 metadata，GC Retention 延至三十日，更有工籍存亡总览（`job_status_histogram`）供掌师审阅。
 - **🧠 能力推荐**：`recommend_capability`、`recommend_skill`、`recommend_toolchain`、`prepare_capability_bundle`——藏经阁可为任务择选最优法器组合，点石成金。
 
 ---

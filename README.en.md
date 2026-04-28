@@ -199,6 +199,10 @@ Operational notes:
 - **🏭 Neural Foundry**: Server-owned context lifecycle — `recall_context`, `capture_session`, `compact_context`, `section_build`, `compact_rollup`, and `compact_session_memory`. Memory capture, compaction, and durable session artifacts live in Tachi instead of host adapters.
 - **📦 Skill Packs**: Install, project, and manage curated skill collections. `pack_register`, `pack_list`, `pack_get`, `pack_project`, `pack_remove`. Project skills to multiple agent formats (Claude, Cursor, Codex, Gemini, OpenCode).
 - **🧠 Capability Recommendations**: `recommend_capability`, `recommend_skill`, `recommend_toolchain`, and `prepare_capability_bundle` let Tachi suggest optimal tool combinations for any task.
+- **🩺 Memory Governance**: `tachi doctor` audits SQLite DB health (extension-aware classification, WAL orphan detection, corruption checks) with safe auto-fix and quarantine; `tachi manifest` maintains `~/.tachi/manifest.json` as the single source of truth for owned DBs, with write guards, resolvers, and paranoid sweep; `tachi rescue` splits mixed antigravity DBs into per-project stores with provenance and source backup.
+- **🛡️ Capture Gate**: Pre-write validation on `save_memory` — domain required, path must match allowed buckets, markdown-dump detection, and configurable min-chars floor (default 200, scratch-exempt). Three modes: `warn` (default), `enforce`, `off` via `TACHI_CAPTURE_GATE`.
+- **🏭 Foundry Job Lifecycle Hardening**: Atomic terminal-reason metadata updates, GC retention extended to 30 days, and `job_status_histogram` for cross-DB overview.
+- **🔌 OpenClaw Manifest Bridge**: OpenClaw now routes through `~/.tachi/manifest.json`, raises default capture floor to 200 chars, and tolerates noisy MCP JSON (BOM, whitespace, bracket recovery).
 
 ---
 
