@@ -1,9 +1,66 @@
 import { createHash } from "node:crypto";
 import fs from "node:fs/promises";
+import fsSync from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { Type } from "@sinclair/typebox";
 import { bridgeConfigSchema } from "./config.js";
 import { MemoryMcpClient } from "./mcp-client.js";
+function tachiManifestPath() {
+    const home = process.env.TACHI_HOME || process.env.SIGIL_HOME;
+    const base = home ? home.replace(/^~/, os.homedir()) : path.join(os.homedir(), ".tachi");
+    return path.resolve(base, "manifest.json");
+}
+let manifestCache = null;
+function loadManifestSnapshot() {
+    const manifestPath = tachiManifestPath();
+    let stat;
+    try {
+        stat = fsSync.statSync(manifestPath);
+    }
+    catch {
+        manifestCache = null;
+        return null;
+    }
+    if (manifestCache && manifestCache.mtimeMs === stat.mtimeMs) {
+        return manifestCache;
+    }
+    let parsed;
+    try {
+        const raw = fsSync.readFileSync(manifestPath, "utf8");
+        parsed = JSON.parse(raw);
+    }
+    catch {
+        return manifestCache; // fall back to last known good snapshot
+    }
+    const byAgent = new Map();
+    for (const entry of parsed.dbs ?? []) {
+        if (!entry || typeof entry.path !== "string")
+            continue;
+        if (entry.allow_write === false)
+            continue;
+        if (entry.role !== "agent")
+            continue;
+        const owner = (entry.owner ?? "").toLowerCase();
+        const match = /^openclaw-agent:(.+)$/.exec(owner);
+        if (!match)
+            continue;
+        const agentId = match[1].trim();
+        if (!agentId)
+            continue;
+        if (!byAgent.has(agentId)) {
+            byAgent.set(agentId, entry.path);
+        }
+    }
+    manifestCache = { mtimeMs: stat.mtimeMs, byAgent };
+    return manifestCache;
+}
+function lookupAgentDbInManifest(agentId) {
+    const snap = loadManifestSnapshot();
+    if (!snap)
+        return null;
+    return snap.byAgent.get(agentId.toLowerCase()) ?? null;
+}
 function resolveConfigPath(api, configuredPath) {
     return path.isAbsolute(configuredPath) ? configuredPath : api.resolvePath(configuredPath);
 }
@@ -270,6 +327,11 @@ export const memoryHybridBridgePlugin = {
         }
         function resolveAgentDbPath(agentId) {
             const normalizedAgentId = resolveMemoryAgentId(agentId);
+            // Branch #7: prefer Tachi manifest assignment when present.
+            const manifestHit = lookupAgentDbInManifest(normalizedAgentId);
+            if (manifestHit) {
+                return path.resolve(manifestHit);
+            }
             const baseDir = path.dirname(configuredDbPath);
             const dbName = path.basename(configuredDbPath) || "memory.db";
             return path.resolve(baseDir, `agents/${normalizedAgentId}/${dbName}`);

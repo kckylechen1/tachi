@@ -1,10 +1,91 @@
 import { createHash } from "node:crypto";
 import fs from "node:fs/promises";
+import fsSync from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { Type } from "@sinclair/typebox";
 import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
 import { bridgeConfigSchema, type MemoryEntry } from "./config.js";
 import { MemoryMcpClient } from "./mcp-client.js";
+
+// ---------------------------------------------------------------------------
+// Branch #7 — Tachi manifest-aware DB routing
+// ---------------------------------------------------------------------------
+// Sigil's memory-server now publishes ~/.tachi/manifest.json (see
+// crates/memory-server/src/manifest.rs). Each entry tags an owned DB with
+// {role, owner, allow_write, scope_hint}. OpenClaw agents have entries like:
+//   { role: "agent", owner: "openclaw-agent:<id>", allow_write: true, ... }
+// We consult the manifest before falling back to the legacy
+// `<baseDir>/agents/<id>/<dbName>` layout so that agents whose DB lives
+// outside `appHome` (e.g. ~/.openclaw/agents/<id>/memory/memory.db) still
+// route correctly. Read-only entries are skipped — capture would just be
+// rejected by the server-side capture_gate anyway.
+type ManifestDbEntry = {
+  path?: string;
+  role?: string;
+  owner?: string;
+  allow_write?: boolean;
+  scope_hint?: string;
+};
+type ManifestFile = {
+  schema_version?: number;
+  dbs?: ManifestDbEntry[];
+};
+type ManifestSnapshot = {
+  mtimeMs: number;
+  byAgent: Map<string, string>;
+};
+
+function tachiManifestPath(): string {
+  const home = process.env.TACHI_HOME || process.env.SIGIL_HOME;
+  const base = home ? home.replace(/^~/, os.homedir()) : path.join(os.homedir(), ".tachi");
+  return path.resolve(base, "manifest.json");
+}
+
+let manifestCache: ManifestSnapshot | null = null;
+
+function loadManifestSnapshot(): ManifestSnapshot | null {
+  const manifestPath = tachiManifestPath();
+  let stat: fsSync.Stats;
+  try {
+    stat = fsSync.statSync(manifestPath);
+  } catch {
+    manifestCache = null;
+    return null;
+  }
+  if (manifestCache && manifestCache.mtimeMs === stat.mtimeMs) {
+    return manifestCache;
+  }
+  let parsed: ManifestFile;
+  try {
+    const raw = fsSync.readFileSync(manifestPath, "utf8");
+    parsed = JSON.parse(raw) as ManifestFile;
+  } catch {
+    return manifestCache; // fall back to last known good snapshot
+  }
+  const byAgent = new Map<string, string>();
+  for (const entry of parsed.dbs ?? []) {
+    if (!entry || typeof entry.path !== "string") continue;
+    if (entry.allow_write === false) continue;
+    if (entry.role !== "agent") continue;
+    const owner = (entry.owner ?? "").toLowerCase();
+    const match = /^openclaw-agent:(.+)$/.exec(owner);
+    if (!match) continue;
+    const agentId = match[1].trim();
+    if (!agentId) continue;
+    if (!byAgent.has(agentId)) {
+      byAgent.set(agentId, entry.path);
+    }
+  }
+  manifestCache = { mtimeMs: stat.mtimeMs, byAgent };
+  return manifestCache;
+}
+
+function lookupAgentDbInManifest(agentId: string): string | null {
+  const snap = loadManifestSnapshot();
+  if (!snap) return null;
+  return snap.byAgent.get(agentId.toLowerCase()) ?? null;
+}
 
 type SearchHit = {
   final_score: number;
@@ -372,6 +453,11 @@ export const memoryHybridBridgePlugin = {
 
     function resolveAgentDbPath(agentId?: string): string {
       const normalizedAgentId = resolveMemoryAgentId(agentId);
+      // Branch #7: prefer Tachi manifest assignment when present.
+      const manifestHit = lookupAgentDbInManifest(normalizedAgentId);
+      if (manifestHit) {
+        return path.resolve(manifestHit);
+      }
       const baseDir = path.dirname(configuredDbPath);
       const dbName = path.basename(configuredDbPath) || "memory.db";
       return path.resolve(baseDir, `agents/${normalizedAgentId}/${dbName}`);
