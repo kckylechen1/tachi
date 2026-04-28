@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.16.4] - 2026-04-28
+
+### Added
+- **FTS maintenance CLI**: `tachi backfill-fts [--db PATH] [--dry-run] [--full]` now reports, backfills, or fully rebuilds the `memories_fts` index for local stores.
+
+### Fixed
+- **Stale-branch safety patches recovered**: `sync_memories` now reads legacy project-scoped agent known-state before classifying entries as new, and the noise filter catches additional low-signal assistant boilerplate.
+- **Release alignment**: Crate/package versions, OpenClaw client version, install docs, GitHub release, and Homebrew tap are aligned on `0.16.4`.
+
 ## [0.16.3] - 2026-04-28
 
 ### Added

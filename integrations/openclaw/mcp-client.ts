@@ -256,7 +256,7 @@ export class MemoryMcpClient {
   private connecting: Promise<Client> | null = null;
   private availableTools = new Set<string>();
 
-  private static readonly CLIENT_VERSION = "0.16.1";
+  private static readonly CLIENT_VERSION = "0.16.4";
 
   constructor(
     private readonly dbPath: string,

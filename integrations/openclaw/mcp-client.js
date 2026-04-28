@@ -174,7 +174,7 @@ export class MemoryMcpClient {
     transport = null;
     connecting = null;
     availableTools = new Set();
-    static CLIENT_VERSION = "0.16.1";
+    static CLIENT_VERSION = "0.16.4";
     constructor(dbPath, logger) {
         this.dbPath = dbPath;
         this.logger = logger;

@@ -44,6 +44,12 @@
 
 **藏经阁** 弃平铺之法，取其**层峦叠嶂、如藏经阁之规制（层级化文件系统范式）**，辅以**经脉羁绊（图谱级因果关联）**。其底座由玄铁（Rust）百炼而成。不论化作 [MCP](https://modelcontextprotocol.io/) 法器独善其身，亦或寄魂于 OpenClaw 等奇巧宗门，皆可施展须臾即至之多系搜魂（亚毫秒级混合语义检索），且**皆不假外物（无需外部数据库）**。
 
+### 近次修补（v0.16.4）
+
+- **FTS 旧索补脉**：新增 `tachi backfill-fts [--db PATH] [--dry-run] [--full]`。可先验 `memories_fts` 缺口，亦可增量补齐，若旧索走火入魔，亦可一令重筑全表。
+- **旧战场良方归档**：从陈年未合分支中择其无害而有用者纳入正统：`sync_memories` 现会兼看旧 project 库之 agent known-state，免将旧识误报为新；降噪门禁亦能识别更多低信号套话。
+- **版牒归一**：源码、OpenClaw 客户端、安装文档、GitHub Release 与 Homebrew tap 统一至 `0.16.4`。
+
 ### 近次修补（v0.16.3）
 
 - **神医判官（Doctor v2）**：新增 `tachi doctor` 之术，以扩展感知之法巡检天下 SQLite 藏库，辨其健康、缺损、 orphaned WAL、腐坏、古制、占位之态。遇占位之库则自动隔离于隔离区（`~/.tachi/quarantine/`），遇 WAL 孤子则抄本截流，原库秋毫无犯。此乃守护百年藏经之第一重门闩。
