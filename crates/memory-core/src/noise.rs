@@ -25,6 +25,9 @@ lazy_static! {
         Regex::new(r"(?i)^i can'?t\b").unwrap(),
         Regex::new(r"(?i)^i am unable to\b").unwrap(),
         Regex::new(r"(?i)^i'?m unable to\b").unwrap(),
+        Regex::new(r"(?i)^let me know if\b").unwrap(),
+        Regex::new(r"(?i)^feel free to\b").unwrap(),
+        Regex::new(r"(?i)^is there anything else\b").unwrap(),
     ];
 
     /// User-side meta-question patterns

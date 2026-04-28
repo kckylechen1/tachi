@@ -1365,6 +1365,9 @@ async fn run_cli_command(
         Commands::BackfillSummaries { .. } => {
             unreachable!("BackfillSummaries is handled in async context before this point")
         }
+        Commands::BackfillFts { .. } => {
+            unreachable!("BackfillFts is handled before generic CLI dispatch")
+        }
         Commands::Setup { .. } => {
             unreachable!("Setup is handled in async context before generic CLI dispatch")
         }
@@ -1589,6 +1592,15 @@ async fn tokio_main(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             global_db_path.clone()
         };
         return run_backfill_summaries(&target_path, *dry_run).await;
+    }
+
+    if let Commands::BackfillFts { db, full, dry_run } = &command {
+        let target_path = if let Some(p) = db {
+            expand_user_path(p.to_string_lossy().as_ref())
+        } else {
+            global_db_path.clone()
+        };
+        return run_backfill_fts(&target_path, *full, *dry_run).await;
     }
 
     let gc_enabled = cli
@@ -2259,5 +2271,55 @@ async fn run_backfill_summaries(
     let final_missing = store.entries_missing_summaries()?.len();
     let final_with_summary = total.saturating_sub(final_missing as u64);
     println!("\n✅ Done! Summaries: {with_summary} → {final_with_summary} / {total}");
+    Ok(())
+}
+
+/// Rebuild or backfill FTS5 full-text search index for a given DB.
+async fn run_backfill_fts(
+    db_path: &PathBuf,
+    full: bool,
+    dry_run: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let db_str = db_path.to_str().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("DB path contains invalid UTF-8: {}", db_path.display()),
+        )
+    })?;
+
+    let store = MemoryStore::open(db_str)?;
+    let (total, with_fts) = store.fts_stats()?;
+    let missing = total.saturating_sub(with_fts);
+
+    println!("DB:      {}", db_path.display());
+    println!("Total:   {total}");
+    println!("FTS:     {with_fts}");
+    println!("Missing: {missing}");
+    println!("Mode:    {}", if full { "full rebuild" } else { "incremental" });
+
+    if !full && missing == 0 {
+        println!("\n✅ All entries have FTS index!");
+        return Ok(());
+    }
+
+    if dry_run {
+        println!("\n(dry-run mode, no changes made)");
+        return Ok(());
+    }
+
+    drop(store);
+    let mut store = MemoryStore::open(db_str)?;
+
+    if full {
+        println!("\nDropping and rebuilding FTS table...");
+        let inserted = store.rebuild_fts_full()?;
+        println!("\n✅ Full rebuild done! {inserted} entries indexed.");
+    } else {
+        println!("\nBackfilling {missing} missing FTS entries...");
+        let inserted = store.backfill_fts_missing()?;
+        let (_, final_fts) = store.fts_stats()?;
+        println!("\n✅ Done! FTS: {with_fts} → {final_fts} / {total} (+{inserted})");
+    }
+
     Ok(())
 }

@@ -151,6 +151,18 @@ pub(crate) enum Commands {
         #[arg(long)]
         dry_run: bool,
     },
+    /// Rebuild or backfill FTS5 full-text search index
+    BackfillFts {
+        /// Target DB path (defaults to global DB)
+        #[arg(long, value_name = "PATH")]
+        db: Option<PathBuf>,
+        /// Drop and fully rebuild the FTS table (useful after corruption)
+        #[arg(long)]
+        full: bool,
+        /// Only show stats, don't modify
+        #[arg(long)]
+        dry_run: bool,
+    },
     /// Branch #6 — Rescue: split a multi-project memory.db into per-project Tachi DBs.
     /// Plan-only by default; pass --apply to actually write into target DBs.
     Rescue {
