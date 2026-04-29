@@ -1,4 +1,6 @@
 use super::*;
+use crate::vault_ops::read_unlocked_vault_secret;
+use base64::{engine::general_purpose::STANDARD as B64, Engine};
 use reqwest::header::{HeaderName, HeaderValue};
 use serde_json::Map as JsonMap;
 
@@ -95,12 +97,18 @@ fn path_within_roots(path: &std::path::Path, roots: &[String]) -> bool {
     })
 }
 
-fn resolve_env_map(def: &serde_json::Value) -> Result<HashMap<String, String>, String> {
+fn resolve_env_map_with_secret_resolver<F>(
+    def: &serde_json::Value,
+    secret_resolver: &F,
+) -> Result<HashMap<String, String>, String>
+where
+    F: Fn(&str) -> Result<Option<String>, String>,
+{
     let mut result = HashMap::new();
     if let Some(obj) = def.get("env").and_then(|v| v.as_object()) {
         for (k, v) in obj {
             if let Some(val) = v.as_str() {
-                let resolved = expand_env_placeholders(val)?;
+                let resolved = expand_placeholders_with_secret_resolver(val, secret_resolver)?;
                 result.insert(k.clone(), resolved);
             } else {
                 return Err(format!(
@@ -115,7 +123,18 @@ fn resolve_env_map(def: &serde_json::Value) -> Result<HashMap<String, String>, S
     Ok(result)
 }
 
+#[cfg(test)]
 fn expand_env_placeholders(value: &str) -> Result<String, String> {
+    expand_placeholders_with_secret_resolver(value, &|_| Ok(None))
+}
+
+fn expand_placeholders_with_secret_resolver<F>(
+    value: &str,
+    secret_resolver: &F,
+) -> Result<String, String>
+where
+    F: Fn(&str) -> Result<Option<String>, String>,
+{
     let mut output = String::new();
     let mut cursor = 0usize;
 
@@ -127,14 +146,62 @@ fn expand_env_placeholders(value: &str) -> Result<String, String> {
             .find('}')
             .ok_or_else(|| format!("Unclosed environment placeholder in '{value}'"))?;
         let end = start + 2 + end_rel;
-        let key = &value[start + 2..end];
-        let env_value = resolve_env_fallback_chain(key)?;
-        output.push_str(&env_value);
+        let spec = &value[start + 2..end];
+        let resolved = if let Some(secret_spec) = spec.strip_prefix("vault:") {
+            resolve_secret_fallback_chain(secret_spec, secret_resolver)?
+        } else {
+            resolve_env_fallback_chain(spec)?
+        };
+        output.push_str(&resolved);
         cursor = end + 1;
     }
 
     output.push_str(&value[cursor..]);
     Ok(output)
+}
+
+fn resolve_secret_fallback_chain<F>(spec: &str, secret_resolver: &F) -> Result<String, String>
+where
+    F: Fn(&str) -> Result<Option<String>, String>,
+{
+    let candidates: Vec<&str> = spec
+        .split('|')
+        .map(str::trim)
+        .filter(|key| !key.is_empty())
+        .collect();
+    if candidates.is_empty() {
+        return Err("Empty vault placeholder".to_string());
+    }
+
+    let mut last_secret_error = None;
+    for key in &candidates {
+        validate_secret_key_name(key)?;
+        match secret_resolver(key) {
+            Ok(Some(value)) if !value.trim().is_empty() => return Ok(value.trim().to_string()),
+            Ok(_) => {}
+            Err(err) => last_secret_error = Some(err),
+        }
+        if let Ok(value) = std::env::var(key) {
+            let trimmed = value.trim();
+            if !trimmed.is_empty() {
+                return Ok(trimmed.to_string());
+            }
+        }
+    }
+
+    let base = if candidates.len() == 1 {
+        format!("Vault secret '{}' not available", candidates[0])
+    } else {
+        format!(
+            "None of the vault secrets [{}] are available",
+            candidates.join(", ")
+        )
+    };
+    if let Some(err) = last_secret_error {
+        Err(format!("{base}: {err}"))
+    } else {
+        Err(base)
+    }
 }
 
 fn resolve_env_fallback_chain(spec: &str) -> Result<String, String> {
@@ -171,6 +238,12 @@ fn resolve_env_fallback_chain(spec: &str) -> Result<String, String> {
 }
 
 fn validate_env_key_name(key: &str) -> Result<(), String> {
+    validate_secret_key_name(key).map_err(|_| {
+        format!(
+            "Invalid environment variable name '{}': only letters, digits, and underscores are allowed",
+            key
+        )
+    })?;
     let mut chars = key.chars();
     let Some(first) = chars.next() else {
         return Err("Environment variable name cannot be empty".to_string());
@@ -190,25 +263,184 @@ fn validate_env_key_name(key: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn resolve_header_map(def: &serde_json::Value) -> Result<HashMap<HeaderName, HeaderValue>, String> {
-    let mut headers = HashMap::new();
-    let Some(obj) = def.get("headers").and_then(|value| value.as_object()) else {
-        return Ok(headers);
+fn validate_secret_key_name(key: &str) -> Result<(), String> {
+    let mut chars = key.chars();
+    let Some(first) = chars.next() else {
+        return Err("Secret name cannot be empty".to_string());
     };
+    if !(first.is_ascii_alphabetic() || first == '_') {
+        return Err(format!(
+            "Invalid secret name '{}': must start with a letter or underscore",
+            key
+        ));
+    }
+    if !chars.all(|ch| ch.is_ascii_alphanumeric() || ch == '_') {
+        return Err(format!(
+            "Invalid secret name '{}': only letters, digits, and underscores are allowed",
+            key
+        ));
+    }
+    Ok(())
+}
 
-    for (name, value) in obj {
-        let raw_value = value
-            .as_str()
-            .ok_or_else(|| format!("Invalid header value type for '{name}': expected string"))?;
-        let resolved = expand_env_placeholders(raw_value)?;
-        let header_name = HeaderName::from_bytes(name.as_bytes())
-            .map_err(|e| format!("Invalid header name '{name}': {e}"))?;
-        let header_value = HeaderValue::from_str(&resolved)
-            .map_err(|e| format!("Invalid header value for '{name}': {e}"))?;
-        headers.insert(header_name, header_value);
+#[cfg(test)]
+fn resolve_header_map(def: &serde_json::Value) -> Result<HashMap<HeaderName, HeaderValue>, String> {
+    resolve_header_map_with_secret_resolver(def, &|_| Ok(None))
+}
+
+fn resolve_header_map_with_secret_resolver<F>(
+    def: &serde_json::Value,
+    secret_resolver: &F,
+) -> Result<HashMap<HeaderName, HeaderValue>, String>
+where
+    F: Fn(&str) -> Result<Option<String>, String>,
+{
+    let mut headers = HashMap::new();
+    if let Some(obj) = def.get("headers").and_then(|value| value.as_object()) {
+        for (name, value) in obj {
+            let raw_value = value.as_str().ok_or_else(|| {
+                format!("Invalid header value type for '{name}': expected string")
+            })?;
+            let resolved = expand_placeholders_with_secret_resolver(raw_value, secret_resolver)?;
+            insert_header(&mut headers, name, &resolved)?;
+        }
+    } else if def.get("headers").is_some() {
+        return Err("Invalid headers field: expected object".to_string());
+    }
+
+    if let Some(auth) = def.get("auth") {
+        for (name, value) in resolve_broker_auth_headers(auth, secret_resolver)? {
+            insert_header(&mut headers, &name, &value)?;
+        }
     }
 
     Ok(headers)
+}
+
+fn insert_header(
+    headers: &mut HashMap<HeaderName, HeaderValue>,
+    name: &str,
+    value: &str,
+) -> Result<(), String> {
+    let header_name = HeaderName::from_bytes(name.as_bytes())
+        .map_err(|e| format!("Invalid header name '{name}': {e}"))?;
+    let header_value = HeaderValue::from_str(value)
+        .map_err(|e| format!("Invalid header value for '{name}': {e}"))?;
+    headers.insert(header_name, header_value);
+    Ok(())
+}
+
+fn resolve_secret_reference<F>(key_spec: &str, secret_resolver: &F) -> Result<String, String>
+where
+    F: Fn(&str) -> Result<Option<String>, String>,
+{
+    resolve_secret_fallback_chain(key_spec, secret_resolver)
+}
+
+fn resolve_broker_auth_headers<F>(
+    auth: &serde_json::Value,
+    secret_resolver: &F,
+) -> Result<Vec<(String, String)>, String>
+where
+    F: Fn(&str) -> Result<Option<String>, String>,
+{
+    let obj = auth
+        .as_object()
+        .ok_or_else(|| "Invalid auth field: expected object".to_string())?;
+    let auth_type = obj
+        .get("type")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| "auth.type is required".to_string())?;
+
+    match auth_type {
+        "bearer" => {
+            let key = obj
+                .get("token")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| "auth.token is required for bearer auth".to_string())?;
+            let token = resolve_secret_reference(key, secret_resolver)?;
+            Ok(vec![("Authorization".to_string(), format!("Bearer {token}"))])
+        }
+        "basic" => {
+            let user_key = obj
+                .get("username")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| "auth.username is required for basic auth".to_string())?;
+            let username = resolve_secret_reference(user_key, secret_resolver)?;
+            let password = obj
+                .get("password")
+                .and_then(|v| v.as_str())
+                .map(|key| resolve_secret_reference(key, secret_resolver))
+                .transpose()?
+                .unwrap_or_default();
+            let encoded = B64.encode(format!("{username}:{password}"));
+            Ok(vec![("Authorization".to_string(), format!("Basic {encoded}"))])
+        }
+        "api-key" => {
+            let key = obj
+                .get("key")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| "auth.key is required for api-key auth".to_string())?;
+            let header = obj
+                .get("header")
+                .and_then(|v| v.as_str())
+                .unwrap_or("Authorization");
+            let prefix = obj.get("prefix").and_then(|v| v.as_str()).unwrap_or("");
+            let value = resolve_secret_reference(key, secret_resolver)?;
+            let header_value = if prefix.is_empty() {
+                value
+            } else {
+                format!("{prefix} {value}")
+            };
+            Ok(vec![(header.to_string(), header_value)])
+        }
+        "custom" => {
+            let headers = obj
+                .get("headers")
+                .and_then(|v| v.as_object())
+                .ok_or_else(|| "auth.headers is required for custom auth".to_string())?;
+            let mut out = Vec::new();
+            for (name, value) in headers {
+                let template = value.as_str().ok_or_else(|| {
+                    format!("Invalid custom auth header '{name}': expected string")
+                })?;
+                out.push((
+                    name.clone(),
+                    expand_custom_auth_template(template, secret_resolver)?,
+                ));
+            }
+            Ok(out)
+        }
+        "passthrough" => Ok(Vec::new()),
+        other => Err(format!(
+            "auth.type '{}' is not supported (expected bearer, basic, api-key, custom, passthrough)",
+            other
+        )),
+    }
+}
+
+fn expand_custom_auth_template<F>(template: &str, secret_resolver: &F) -> Result<String, String>
+where
+    F: Fn(&str) -> Result<Option<String>, String>,
+{
+    let mut output = String::new();
+    let mut cursor = 0usize;
+
+    while let Some(rel_start) = template[cursor..].find("{{") {
+        let start = cursor + rel_start;
+        output.push_str(&template[cursor..start]);
+        let rest = &template[start + 2..];
+        let end_rel = rest
+            .find("}}")
+            .ok_or_else(|| format!("Unclosed credential placeholder in '{template}'"))?;
+        let end = start + 2 + end_rel;
+        let key = template[start + 2..end].trim();
+        output.push_str(&resolve_secret_reference(key, secret_resolver)?);
+        cursor = end + 2;
+    }
+
+    output.push_str(&template[cursor..]);
+    Ok(output)
 }
 
 pub(crate) fn is_bigmodel_remote_mcp(def: &serde_json::Value) -> bool {
@@ -289,12 +521,135 @@ mod tests {
             .expect_err("invalid key names should be rejected");
         assert!(err.contains("Invalid environment variable name"));
     }
+
+    #[test]
+    fn vault_placeholders_resolve_without_exposing_env() {
+        std::env::remove_var("SECRET_TOKEN");
+        let expanded =
+            expand_placeholders_with_secret_resolver("Bearer ${vault:SECRET_TOKEN}", &|key| {
+                Ok((key == "SECRET_TOKEN").then(|| "vault-secret".to_string()))
+            })
+            .expect("vault placeholder should resolve");
+
+        assert_eq!(expanded, "Bearer vault-secret");
+    }
+
+    #[test]
+    fn broker_auth_resolves_bearer_from_vault_secret() {
+        std::env::remove_var("EXA_API_KEY");
+        let headers = resolve_header_map_with_secret_resolver(
+            &json!({
+                "auth": {
+                    "type": "bearer",
+                    "token": "EXA_API_KEY"
+                }
+            }),
+            &|key| Ok((key == "EXA_API_KEY").then(|| "exa-secret".to_string())),
+        )
+        .expect("broker auth should resolve");
+
+        let auth = headers
+            .get(&HeaderName::from_static("authorization"))
+            .expect("authorization header should exist");
+        assert_eq!(auth, "Bearer exa-secret");
+    }
+
+    #[test]
+    fn broker_auth_supports_vault_secret_fallback_chains() {
+        std::env::remove_var("PRIMARY_API_KEY");
+        std::env::remove_var("SECONDARY_API_KEY");
+        let headers = resolve_header_map_with_secret_resolver(
+            &json!({
+                "auth": {
+                    "type": "bearer",
+                    "token": "PRIMARY_API_KEY|SECONDARY_API_KEY"
+                }
+            }),
+            &|key| Ok((key == "SECONDARY_API_KEY").then(|| "secondary-secret".to_string())),
+        )
+        .expect("broker auth should resolve fallback chains");
+
+        let auth = headers
+            .get(&HeaderName::from_static("authorization"))
+            .expect("authorization header should exist");
+        assert_eq!(auth, "Bearer secondary-secret");
+    }
+
+    #[test]
+    fn broker_auth_resolves_custom_templates() {
+        let headers = resolve_header_map_with_secret_resolver(
+            &json!({
+                "auth": {
+                    "type": "custom",
+                    "headers": {
+                        "X-Api-Key": "{{ CUSTOM_API_KEY }}"
+                    }
+                }
+            }),
+            &|key| Ok((key == "CUSTOM_API_KEY").then(|| "custom-secret".to_string())),
+        )
+        .expect("custom auth should resolve");
+
+        let value = headers
+            .get(&HeaderName::from_static("x-api-key"))
+            .expect("x-api-key header should exist");
+        assert_eq!(value, "custom-secret");
+    }
 }
 
 impl MemoryServer {
+    fn resolve_vault_secret_for_capability(
+        &self,
+        capability_id: &str,
+        key: &str,
+    ) -> Result<Option<String>, String> {
+        match read_unlocked_vault_secret(self, key, Some(capability_id), true) {
+            Ok(value) => Ok(Some(value)),
+            Err(err)
+                if err.starts_with("Secret not found: ")
+                    || err.starts_with("Vault is locked")
+                    || err.starts_with("Vault auto-locked")
+                    || err.starts_with("Vault not initialized") =>
+            {
+                Ok(None)
+            }
+            Err(err) => Err(err),
+        }
+    }
+
+    fn resolve_env_map_for_capability(
+        &self,
+        capability_id: &str,
+        def: &serde_json::Value,
+    ) -> Result<HashMap<String, String>, String> {
+        resolve_env_map_with_secret_resolver(def, &|key| {
+            self.resolve_vault_secret_for_capability(capability_id, key)
+        })
+    }
+
+    fn resolve_header_map_for_capability(
+        &self,
+        capability_id: &str,
+        def: &serde_json::Value,
+    ) -> Result<HashMap<HeaderName, HeaderValue>, String> {
+        resolve_header_map_with_secret_resolver(def, &|key| {
+            self.resolve_vault_secret_for_capability(capability_id, key)
+        })
+    }
+
+    fn resolve_auth_header_for_capability(
+        &self,
+        capability_id: &str,
+        value: &str,
+    ) -> Result<String, String> {
+        expand_placeholders_with_secret_resolver(value, &|key| {
+            self.resolve_vault_secret_for_capability(capability_id, key)
+        })
+    }
+
     pub(super) async fn proxy_call_bigmodel_mcp(
         &self,
-        _capability_id: &str,
+        capability_id: &str,
         def: &serde_json::Value,
         tool_name: &str,
         arguments: Option<JsonMap<String, serde_json::Value>>,
@@ -311,7 +666,8 @@ impl MemoryServer {
             })?;
 
         let mut headers = reqwest::header::HeaderMap::new();
-        for (name, value) in resolve_header_map(def)
+        for (name, value) in self
+            .resolve_header_map_for_capability(capability_id, def)
             .map_err(|e| rmcp::ErrorData::internal_error(format!("resolve headers: {e}"), None))?
         {
             headers.insert(name, value);
@@ -319,7 +675,7 @@ impl MemoryServer {
         if let Some(token) = def
             .get("auth_header")
             .and_then(|value| value.as_str())
-            .map(expand_env_placeholders)
+            .map(|value| self.resolve_auth_header_for_capability(capability_id, value))
             .transpose()
             .map_err(|e| {
                 rmcp::ErrorData::internal_error(format!("resolve auth header: {e}"), None)
@@ -581,7 +937,7 @@ impl MemoryServer {
                     }
                     None => Vec::new(),
                 };
-                let env_map = resolve_env_map(def).map_err(|e| {
+                let env_map = self.resolve_env_map_for_capability(capability_id, def).map_err(|e| {
                     self.record_sandbox_exec_audit(
                         capability_id,
                         "preflight",
@@ -785,12 +1141,12 @@ impl MemoryServer {
                 if let Some(token) = def
                     .get("auth_header")
                     .and_then(|value| value.as_str())
-                    .map(expand_env_placeholders)
+                    .map(|value| self.resolve_auth_header_for_capability(capability_id, value))
                     .transpose()?
                 {
                     transport_config = transport_config.auth_header(token);
                 }
-                let headers = resolve_header_map(def)?;
+                let headers = self.resolve_header_map_for_capability(capability_id, def)?;
                 if !headers.is_empty() {
                     transport_config = transport_config.custom_headers(headers);
                 }

@@ -2873,9 +2873,11 @@ async fn server_seeds_builtin_capabilities_and_mcp_policies() {
     assert_eq!(coding_def["retention_policy"], "permanent");
     assert_eq!(trading_def["retention_policy"], "ephemeral");
     assert_eq!(mcp_def["auto_ingest"], true);
+    assert!(mcp_def.get("auth_header").is_none());
+    assert_eq!(mcp_def["auth"]["type"], "bearer");
     assert_eq!(
-        mcp_def["auth_header"],
-        "${BIGMODEL_API_KEY|ZAI_API_KEY|REASONING_API_KEY}"
+        mcp_def["auth"]["token"],
+        "ZAI_API_KEY|BIGMODEL_API_KEY|REASONING_API_KEY"
     );
     assert_eq!(
         mcp_def["url"],
@@ -2891,7 +2893,7 @@ async fn server_seeds_builtin_capabilities_and_mcp_policies() {
     assert_eq!(vision_def["args"][1], "@z_ai/mcp-server@latest");
     assert_eq!(
         vision_def["env"]["Z_AI_API_KEY"],
-        "${BIGMODEL_API_KEY|ZAI_API_KEY|REASONING_API_KEY}"
+        "${vault:ZAI_API_KEY|BIGMODEL_API_KEY|REASONING_API_KEY}"
     );
     assert_eq!(vision_def["env"]["Z_AI_MODE"], "ZAI");
 

@@ -345,6 +345,38 @@ pub(super) fn load_unlocked_api_key_secrets(
     Ok(secrets)
 }
 
+pub(super) fn read_unlocked_vault_secret(
+    server: &MemoryServer,
+    name: &str,
+    agent_id: Option<&str>,
+    auto_rotate: bool,
+) -> Result<String, String> {
+    let key = get_vault_key(server)?;
+    let params = VaultGetParams {
+        name: name.to_string(),
+        agent_id: agent_id.map(str::to_string),
+        auto_rotate,
+    };
+    let (target_name, entry) =
+        server.with_global_store(|store| select_vault_entry(store, &params))?;
+
+    ensure_agent_allowed(&entry, params.agent_id.as_deref())?;
+
+    let decrypted = crypto::decrypt(&key, &entry.encrypted_value, &entry.nonce)?;
+    let value = String::from_utf8(decrypted)
+        .map_err(|e| format!("Vault secret '{}' is not valid UTF-8: {e}", entry.name))?;
+
+    server
+        .with_global_store(|store| {
+            store
+                .vault_touch_entry(&target_name)
+                .map_err(|e| e.to_string())
+        })
+        .map_err(|e| format!("Failed to update access stats: {e}"))?;
+
+    Ok(value)
+}
+
 pub(super) async fn handle_vault_init(
     server: &MemoryServer,
     params: VaultInitParams,
