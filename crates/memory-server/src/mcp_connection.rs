@@ -605,6 +605,9 @@ impl MemoryServer {
     ) -> Result<Option<String>, String> {
         match read_unlocked_vault_secret(self, key, Some(capability_id), true) {
             Ok(value) => Ok(Some(value)),
+            // Backward compatibility: existing Hub definitions can still run
+            // from env vars when the vault is unavailable or intentionally
+            // locked. Authorization failures are not swallowed below.
             Err(err)
                 if err.starts_with("Secret not found: ")
                     || err.starts_with("Vault is locked")

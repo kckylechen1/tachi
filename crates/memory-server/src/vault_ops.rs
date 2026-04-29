@@ -333,6 +333,13 @@ pub(super) fn load_unlocked_api_key_secrets(
         if entry.secret_type != "api_key" || !entry.name.ends_with("_API_KEY") {
             continue;
         }
+        if entry
+            .allowed_agents
+            .as_ref()
+            .is_some_and(|agents| !agents.is_empty())
+        {
+            continue;
+        }
 
         let decrypted = crypto::decrypt(&key, &entry.encrypted_value, &entry.nonce)?;
         let value = String::from_utf8(decrypted)
@@ -343,6 +350,25 @@ pub(super) fn load_unlocked_api_key_secrets(
     }
 
     Ok(secrets)
+}
+
+fn attach_provider_refresh_warning(server: &MemoryServer, body: String) -> Result<String, String> {
+    match server.refresh_llm_provider_secrets_from_vault() {
+        Ok(_) => Ok(body),
+        Err(err) => {
+            let mut value: serde_json::Value = serde_json::from_str(&body)
+                .map_err(|e| format!("serialize provider refresh warning: {e}"))?;
+            if let Some(obj) = value.as_object_mut() {
+                obj.insert(
+                    "provider_secret_refresh_warning".to_string(),
+                    json!(format!(
+                        "Vault operation succeeded, but provider key cache refresh failed: {err}"
+                    )),
+                );
+            }
+            serde_json::to_string(&value).map_err(|e| format!("serialize: {e}"))
+        }
+    }
 }
 
 pub(super) fn read_unlocked_vault_secret(
@@ -421,9 +447,7 @@ pub(super) async fn handle_vault_init(
         .map_err(|e| format!("serialize: {e}"))
     })();
 
-    if result.is_ok() {
-        let _ = server.refresh_llm_provider_secrets_from_vault();
-    }
+    let result = result.and_then(|body| attach_provider_refresh_warning(server, body));
 
     record_vault_audit(
         server,
@@ -466,9 +490,7 @@ pub(super) async fn handle_vault_unlock(
         .map_err(|e| format!("serialize: {e}"))
     })();
 
-    if result.is_ok() {
-        let _ = server.refresh_llm_provider_secrets_from_vault();
-    }
+    let result = result.and_then(|body| attach_provider_refresh_warning(server, body));
 
     record_vault_audit(
         server,
@@ -592,9 +614,7 @@ pub(super) async fn handle_vault_set(
         .map_err(|e| format!("serialize: {e}"))
     })();
 
-    if result.is_ok() {
-        let _ = server.refresh_llm_provider_secrets_from_vault();
-    }
+    let result = result.and_then(|body| attach_provider_refresh_warning(server, body));
 
     record_vault_audit(
         server,

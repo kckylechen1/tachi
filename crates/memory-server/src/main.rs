@@ -589,6 +589,7 @@ impl MemoryServer {
     }
 
     fn refresh_llm_provider_secrets_from_vault(&self) -> Result<usize, String> {
+        self.llm.clear_provider_secrets();
         let secrets = load_unlocked_api_key_secrets(self)?;
         Ok(self.llm.set_provider_secrets(secrets))
     }
