@@ -147,6 +147,7 @@ fn remaining_lockout_seconds(until: Instant) -> u64 {
 fn clear_cached_vault_state(server: &MemoryServer) {
     *write_or_recover(&server.vault_key, "vault_key") = None;
     *write_or_recover(&server.vault_unlock_time, "vault_unlock_time") = None;
+    server.llm.clear_provider_secrets();
 }
 
 fn maybe_auto_lock_vault(server: &MemoryServer) -> bool {
@@ -319,6 +320,89 @@ fn select_vault_entry(
     }
 }
 
+pub(super) fn load_unlocked_api_key_secrets(
+    server: &MemoryServer,
+) -> Result<Vec<(String, String)>, String> {
+    let key = get_vault_key(server)?;
+    let entries = server
+        .with_global_store_read(|store| store.vault_list_entries().map_err(|e| e.to_string()))
+        .map_err(|e| format!("Failed to list vault secrets: {e}"))?;
+
+    let mut secrets = Vec::new();
+    for entry in entries {
+        if entry.secret_type != "api_key" || !entry.name.ends_with("_API_KEY") {
+            continue;
+        }
+        if entry
+            .allowed_agents
+            .as_ref()
+            .is_some_and(|agents| !agents.is_empty())
+        {
+            continue;
+        }
+
+        let decrypted = crypto::decrypt(&key, &entry.encrypted_value, &entry.nonce)?;
+        let value = String::from_utf8(decrypted)
+            .map_err(|e| format!("Vault secret '{}' is not valid UTF-8: {e}", entry.name))?;
+        if !value.trim().is_empty() {
+            secrets.push((entry.name, value));
+        }
+    }
+
+    Ok(secrets)
+}
+
+fn attach_provider_refresh_warning(server: &MemoryServer, body: String) -> Result<String, String> {
+    match server.refresh_llm_provider_secrets_from_vault() {
+        Ok(_) => Ok(body),
+        Err(err) => {
+            let mut value: serde_json::Value = serde_json::from_str(&body)
+                .map_err(|e| format!("serialize provider refresh warning: {e}"))?;
+            if let Some(obj) = value.as_object_mut() {
+                obj.insert(
+                    "provider_secret_refresh_warning".to_string(),
+                    json!(format!(
+                        "Vault operation succeeded, but provider key cache refresh failed: {err}"
+                    )),
+                );
+            }
+            serde_json::to_string(&value).map_err(|e| format!("serialize: {e}"))
+        }
+    }
+}
+
+pub(super) fn read_unlocked_vault_secret(
+    server: &MemoryServer,
+    name: &str,
+    agent_id: Option<&str>,
+    auto_rotate: bool,
+) -> Result<String, String> {
+    let key = get_vault_key(server)?;
+    let params = VaultGetParams {
+        name: name.to_string(),
+        agent_id: agent_id.map(str::to_string),
+        auto_rotate,
+    };
+    let (target_name, entry) =
+        server.with_global_store(|store| select_vault_entry(store, &params))?;
+
+    ensure_agent_allowed(&entry, params.agent_id.as_deref())?;
+
+    let decrypted = crypto::decrypt(&key, &entry.encrypted_value, &entry.nonce)?;
+    let value = String::from_utf8(decrypted)
+        .map_err(|e| format!("Vault secret '{}' is not valid UTF-8: {e}", entry.name))?;
+
+    server
+        .with_global_store(|store| {
+            store
+                .vault_touch_entry(&target_name)
+                .map_err(|e| e.to_string())
+        })
+        .map_err(|e| format!("Failed to update access stats: {e}"))?;
+
+    Ok(value)
+}
+
 pub(super) async fn handle_vault_init(
     server: &MemoryServer,
     params: VaultInitParams,
@@ -363,6 +447,8 @@ pub(super) async fn handle_vault_init(
         .map_err(|e| format!("serialize: {e}"))
     })();
 
+    let result = result.and_then(|body| attach_provider_refresh_warning(server, body));
+
     record_vault_audit(
         server,
         "vault_init",
@@ -403,6 +489,8 @@ pub(super) async fn handle_vault_unlock(
         }))
         .map_err(|e| format!("serialize: {e}"))
     })();
+
+    let result = result.and_then(|body| attach_provider_refresh_warning(server, body));
 
     record_vault_audit(
         server,
@@ -525,6 +613,8 @@ pub(super) async fn handle_vault_set(
         }))
         .map_err(|e| format!("serialize: {e}"))
     })();
+
+    let result = result.and_then(|body| attach_provider_refresh_warning(server, body));
 
     record_vault_audit(
         server,

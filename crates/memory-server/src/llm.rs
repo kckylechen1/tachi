@@ -5,6 +5,8 @@
 
 use reqwest::header::{AUTHORIZATION, CONTENT_TYPE};
 use serde_json::Value;
+use std::collections::HashMap;
+use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
 const DEFAULT_CHAT_BASE_URL: &str = "https://api.siliconflow.cn/v1/chat/completions";
@@ -14,8 +16,8 @@ const DEFAULT_REASONING_MODEL: &str = "Qwen/Qwen3.5-27B";
 #[derive(Clone)]
 struct ChatLaneConfig {
     base_url: String,
-    api_key: String,
     model: String,
+    api_key_envs: Vec<&'static str>,
 }
 
 #[derive(Clone, Copy)]
@@ -31,11 +33,11 @@ enum ChatLane {
 #[derive(Clone)]
 pub struct LlmClient {
     http: reqwest::Client,
-    voyage_api_key: String,
     extract: ChatLaneConfig,
     distill: ChatLaneConfig,
     reasoning: ChatLaneConfig,
     summary: ChatLaneConfig,
+    provider_secrets: Arc<RwLock<HashMap<String, String>>>,
 }
 
 impl LlmClient {
@@ -43,9 +45,6 @@ impl LlmClient {
     const BASE_RETRY_DELAY_MS: u64 = 500;
 
     pub fn new() -> Result<Self, String> {
-        let voyage_api_key = std::env::var("VOYAGE_API_KEY")
-            .map_err(|_| "VOYAGE_API_KEY environment variable not set".to_string())?;
-
         let extract = Self::load_lane(
             &["EXTRACT_API_KEY", "SILICONFLOW_API_KEY"],
             &[
@@ -109,30 +108,28 @@ impl LlmClient {
 
         Ok(Self {
             http,
-            voyage_api_key,
             extract,
             distill,
             reasoning,
             summary,
+            provider_secrets: Arc::new(RwLock::new(HashMap::new())),
         })
     }
 
     fn load_lane(
-        api_key_envs: &[&str],
+        api_key_envs: &[&'static str],
         base_url_envs: &[&str],
         model_envs: &[&str],
         default_model: &str,
     ) -> Result<ChatLaneConfig, String> {
-        let api_key = Self::first_env(api_key_envs)
-            .ok_or_else(|| format!("Missing API key env vars: {}", api_key_envs.join(", ")))?;
         let base_url =
             Self::first_env(base_url_envs).unwrap_or_else(|| DEFAULT_CHAT_BASE_URL.to_string());
         let model = Self::first_env(model_envs).unwrap_or_else(|| default_model.trim().to_string());
 
         Ok(ChatLaneConfig {
             base_url,
-            api_key,
             model,
+            api_key_envs: api_key_envs.to_vec(),
         })
     }
 
@@ -152,6 +149,71 @@ impl LlmClient {
             ChatLane::Reasoning => &self.reasoning,
             ChatLane::Summary => &self.summary,
         }
+    }
+
+    pub fn set_provider_secret(&self, name: &str, value: &str) -> bool {
+        let name = name.trim();
+        let value = value.trim();
+        if name.is_empty() || value.is_empty() {
+            return false;
+        }
+
+        let mut secrets = self
+            .provider_secrets
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        secrets.insert(name.to_string(), value.to_string());
+        true
+    }
+
+    pub fn set_provider_secrets<I, K, V>(&self, secrets: I) -> usize
+    where
+        I: IntoIterator<Item = (K, V)>,
+        K: AsRef<str>,
+        V: AsRef<str>,
+    {
+        secrets
+            .into_iter()
+            .filter(|(name, value)| self.set_provider_secret(name.as_ref(), value.as_ref()))
+            .count()
+    }
+
+    pub fn clear_provider_secrets(&self) {
+        self.provider_secrets
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clear();
+    }
+
+    fn first_secret(&self, keys: &[&str]) -> Option<String> {
+        let vault_value = {
+            let secrets = self
+                .provider_secrets
+                .read()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            keys.iter().find_map(|key| {
+                secrets
+                    .get(*key)
+                    .map(|value| value.trim().to_string())
+                    .filter(|value| !value.is_empty())
+            })
+        };
+
+        vault_value.or_else(|| Self::first_env(keys))
+    }
+
+    fn required_secret(&self, keys: &[&str]) -> Result<String, String> {
+        self.first_secret(keys).ok_or_else(|| {
+            format!(
+                "Missing API key. Add one to Tachi Vault or set env var: {}",
+                keys.join(", ")
+            )
+        })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn provider_secret_for_tests(&self, keys: &[&str]) -> Option<String> {
+        self.first_secret(keys)
     }
 
     fn should_disable_thinking(base_url: &str, model: &str) -> bool {
@@ -185,6 +247,7 @@ impl LlmClient {
 
         const VOYAGE_MAX_BATCH: usize = 128;
         let mut all_embeddings: Vec<Vec<f32>> = Vec::with_capacity(texts.len());
+        let voyage_api_key = self.required_secret(&["VOYAGE_API_KEY"])?;
 
         for chunk in texts.chunks(VOYAGE_MAX_BATCH) {
             let body = serde_json::json!({
@@ -197,7 +260,7 @@ impl LlmClient {
                 .http
                 .post("https://api.voyageai.com/v1/embeddings")
                 .header(CONTENT_TYPE, "application/json")
-                .header(AUTHORIZATION, format!("Bearer {}", self.voyage_api_key))
+                .header(AUTHORIZATION, format!("Bearer {}", voyage_api_key))
                 .json(&body)
                 .send()
                 .await
@@ -257,6 +320,7 @@ impl LlmClient {
         if documents.is_empty() {
             return Ok(vec![]);
         }
+        let voyage_api_key = self.required_secret(&["VOYAGE_RERANK_API_KEY", "VOYAGE_API_KEY"])?;
 
         let body = serde_json::json!({
             "model": "rerank-2.5",
@@ -269,7 +333,7 @@ impl LlmClient {
             .http
             .post("https://api.voyageai.com/v1/rerank")
             .header(CONTENT_TYPE, "application/json")
-            .header(AUTHORIZATION, format!("Bearer {}", self.voyage_api_key))
+            .header(AUTHORIZATION, format!("Bearer {}", voyage_api_key))
             .json(&body)
             .send()
             .await
@@ -411,6 +475,7 @@ impl LlmClient {
     ) -> Result<String, String> {
         let lane_cfg = self.lane(lane);
         let model = model_override.unwrap_or(&lane_cfg.model);
+        let api_key = self.required_secret(&lane_cfg.api_key_envs)?;
 
         let mut body = serde_json::json!({
             "model": model,
@@ -432,7 +497,7 @@ impl LlmClient {
                 .http
                 .post(&lane_cfg.base_url)
                 .header(CONTENT_TYPE, "application/json")
-                .header(AUTHORIZATION, format!("Bearer {}", lane_cfg.api_key))
+                .header(AUTHORIZATION, format!("Bearer {}", api_key))
                 .json(&body)
                 .send()
                 .await;
@@ -582,5 +647,39 @@ impl LlmClient {
         } else {
             inner
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn llm_client_initializes_without_provider_env() {
+        let client = LlmClient::new().expect("client should not require API keys at startup");
+
+        assert!(client
+            .provider_secret_for_tests(&["TACHI_TEST_ONLY_API_KEY"])
+            .is_none());
+        assert!(client
+            .required_secret(&["TACHI_TEST_ONLY_API_KEY"])
+            .expect_err("missing keys should fail at call time")
+            .contains("TACHI_TEST_ONLY_API_KEY"));
+    }
+
+    #[test]
+    fn vault_provider_secret_overrides_env_value() {
+        std::env::set_var("TACHI_TEST_ONLY_API_KEY", "env-value");
+        let client = LlmClient::new().expect("client should initialize");
+
+        client.set_provider_secret("TACHI_TEST_ONLY_API_KEY", "vault-value");
+
+        assert_eq!(
+            client
+                .provider_secret_for_tests(&["TACHI_TEST_ONLY_API_KEY"])
+                .unwrap(),
+            "vault-value"
+        );
+        std::env::remove_var("TACHI_TEST_ONLY_API_KEY");
     }
 }
