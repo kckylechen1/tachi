@@ -51,7 +51,7 @@ fn make_mcp_capability(
     let definition = json!({
         "transport": "streamable-http",
         "url": url,
-        "auth_header": "${BIGMODEL_API_KEY|REASONING_API_KEY|DISTILL_API_KEY|SUMMARY_API_KEY|SILICONFLOW_API_KEY}",
+        "auth_header": "${BIGMODEL_API_KEY|ZAI_API_KEY|REASONING_API_KEY}",
         "tool_exposure": "gateway",
         "policy": {
             "visibility": "discoverable"
@@ -424,7 +424,7 @@ fn builtin_mcp_capabilities() -> Result<Vec<HubCapability>, String> {
             "npx",
             &["-y", "@z_ai/mcp-server@latest"],
             json!({
-                "Z_AI_API_KEY": "${BIGMODEL_API_KEY|REASONING_API_KEY|DISTILL_API_KEY|SUMMARY_API_KEY|SILICONFLOW_API_KEY}",
+                "Z_AI_API_KEY": "${BIGMODEL_API_KEY|ZAI_API_KEY|REASONING_API_KEY}",
                 "Z_AI_MODE": "ZAI"
             }),
             false,

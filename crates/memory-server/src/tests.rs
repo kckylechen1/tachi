@@ -1738,6 +1738,14 @@ async fn vault_init_set_get_lock_unlock_roundtrip() {
         }))
         .await
         .expect("vault_set should succeed");
+    assert_eq!(
+        server
+            .llm
+            .provider_secret_for_tests(&["OPENAI_API_KEY"])
+            .as_deref(),
+        Some("sk-test-123"),
+        "vault_set should make provider keys available to the LLM client"
+    );
 
     let get = server
         .vault_get(Parameters(VaultGetParams {
@@ -1755,6 +1763,13 @@ async fn vault_init_set_get_lock_unlock_roundtrip() {
         .vault_lock()
         .await
         .expect("vault_lock should succeed");
+    assert!(
+        server
+            .llm
+            .provider_secret_for_tests(&["OPENAI_API_KEY"])
+            .is_none(),
+        "vault_lock should clear provider keys cached from the vault"
+    );
     let locked_get = server
         .vault_get(Parameters(VaultGetParams {
             name: "OPENAI_API_KEY".to_string(),
@@ -1779,6 +1794,14 @@ async fn vault_init_set_get_lock_unlock_roundtrip() {
         }))
         .await
         .expect("vault_unlock should succeed");
+    assert_eq!(
+        server
+            .llm
+            .provider_secret_for_tests(&["OPENAI_API_KEY"])
+            .as_deref(),
+        Some("sk-test-123"),
+        "vault_unlock should reload provider keys into the LLM client"
+    );
 
     let status = server
         .vault_status()
@@ -2852,7 +2875,7 @@ async fn server_seeds_builtin_capabilities_and_mcp_policies() {
     assert_eq!(mcp_def["auto_ingest"], true);
     assert_eq!(
         mcp_def["auth_header"],
-        "${BIGMODEL_API_KEY|REASONING_API_KEY|DISTILL_API_KEY|SUMMARY_API_KEY|SILICONFLOW_API_KEY}"
+        "${BIGMODEL_API_KEY|ZAI_API_KEY|REASONING_API_KEY}"
     );
     assert_eq!(
         mcp_def["url"],
@@ -2868,7 +2891,7 @@ async fn server_seeds_builtin_capabilities_and_mcp_policies() {
     assert_eq!(vision_def["args"][1], "@z_ai/mcp-server@latest");
     assert_eq!(
         vision_def["env"]["Z_AI_API_KEY"],
-        "${BIGMODEL_API_KEY|REASONING_API_KEY|DISTILL_API_KEY|SUMMARY_API_KEY|SILICONFLOW_API_KEY}"
+        "${BIGMODEL_API_KEY|ZAI_API_KEY|REASONING_API_KEY}"
     );
     assert_eq!(vision_def["env"]["Z_AI_MODE"], "ZAI");
 
@@ -3313,7 +3336,8 @@ async fn wiki_lint_reports_memory_health_and_skill_quality_guards() {
                     id: "skill-snapshot-a".to_string(),
                     path: "/skills/coding/merge-a/distilled/20260406T000000".to_string(),
                     summary: "merge a".to_string(),
-                    text: "Follow SOP: inspect logs, isolate failure, add regression test.".to_string(),
+                    text: "Follow SOP: inspect logs, isolate failure, add regression test."
+                        .to_string(),
                     importance: 0.9,
                     timestamp: Utc::now().to_rfc3339(),
                     category: "decision".to_string(),
@@ -3337,7 +3361,8 @@ async fn wiki_lint_reports_memory_health_and_skill_quality_guards() {
                     id: "skill-snapshot-b".to_string(),
                     path: "/skills/coding/merge-b/distilled/20260406T000100".to_string(),
                     summary: "merge b".to_string(),
-                    text: "Follow SOP: inspect logs, isolate failure, add regression test.".to_string(),
+                    text: "Follow SOP: inspect logs, isolate failure, add regression test."
+                        .to_string(),
                     importance: 0.9,
                     timestamp: Utc::now().to_rfc3339(),
                     category: "decision".to_string(),
@@ -3446,11 +3471,19 @@ async fn wiki_lint_reports_memory_health_and_skill_quality_guards() {
         .expect("wiki_lint should succeed");
     let json: Value = serde_json::from_str(&response).expect("wiki_lint json");
     assert!(
-        json["orphans"].as_array().unwrap().iter().any(|v| v["id"] == "wiki-orphan"),
+        json["orphans"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|v| v["id"] == "wiki-orphan"),
         "expected orphan node in wiki_lint output"
     );
     assert!(
-        json["stale_nodes"].as_array().unwrap().iter().any(|v| v["id"] == "wiki-orphan"),
+        json["stale_nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|v| v["id"] == "wiki-orphan"),
         "expected stale node in wiki_lint output"
     );
     assert!(
@@ -3458,7 +3491,10 @@ async fn wiki_lint_reports_memory_health_and_skill_quality_guards() {
         "expected missing edge hints"
     );
     assert!(
-        !json["contradiction_candidates"].as_array().unwrap().is_empty(),
+        !json["contradiction_candidates"]
+            .as_array()
+            .unwrap()
+            .is_empty(),
         "expected contradiction candidates"
     );
 
@@ -4749,7 +4785,10 @@ async fn save_memory_clamps_importance_into_valid_range() {
 fn strip_code_fence_uses_last_closing_fence() {
     let raw = "```json\n{\"outer\":\"ok\",\"inner\":\"```json\\n{}\\n```\"}\n```";
     let stripped = crate::llm::LlmClient::strip_code_fence(raw);
-    assert_eq!(stripped, "{\"outer\":\"ok\",\"inner\":\"```json\\n{}\\n```\"}");
+    assert_eq!(
+        stripped,
+        "{\"outer\":\"ok\",\"inner\":\"```json\\n{}\\n```\"}"
+    );
 }
 
 #[test]

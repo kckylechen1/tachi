@@ -147,6 +147,7 @@ fn remaining_lockout_seconds(until: Instant) -> u64 {
 fn clear_cached_vault_state(server: &MemoryServer) {
     *write_or_recover(&server.vault_key, "vault_key") = None;
     *write_or_recover(&server.vault_unlock_time, "vault_unlock_time") = None;
+    server.llm.clear_provider_secrets();
 }
 
 fn maybe_auto_lock_vault(server: &MemoryServer) -> bool {
@@ -319,6 +320,31 @@ fn select_vault_entry(
     }
 }
 
+pub(super) fn load_unlocked_api_key_secrets(
+    server: &MemoryServer,
+) -> Result<Vec<(String, String)>, String> {
+    let key = get_vault_key(server)?;
+    let entries = server
+        .with_global_store_read(|store| store.vault_list_entries().map_err(|e| e.to_string()))
+        .map_err(|e| format!("Failed to list vault secrets: {e}"))?;
+
+    let mut secrets = Vec::new();
+    for entry in entries {
+        if entry.secret_type != "api_key" || !entry.name.ends_with("_API_KEY") {
+            continue;
+        }
+
+        let decrypted = crypto::decrypt(&key, &entry.encrypted_value, &entry.nonce)?;
+        let value = String::from_utf8(decrypted)
+            .map_err(|e| format!("Vault secret '{}' is not valid UTF-8: {e}", entry.name))?;
+        if !value.trim().is_empty() {
+            secrets.push((entry.name, value));
+        }
+    }
+
+    Ok(secrets)
+}
+
 pub(super) async fn handle_vault_init(
     server: &MemoryServer,
     params: VaultInitParams,
@@ -363,6 +389,10 @@ pub(super) async fn handle_vault_init(
         .map_err(|e| format!("serialize: {e}"))
     })();
 
+    if result.is_ok() {
+        let _ = server.refresh_llm_provider_secrets_from_vault();
+    }
+
     record_vault_audit(
         server,
         "vault_init",
@@ -403,6 +433,10 @@ pub(super) async fn handle_vault_unlock(
         }))
         .map_err(|e| format!("serialize: {e}"))
     })();
+
+    if result.is_ok() {
+        let _ = server.refresh_llm_provider_secrets_from_vault();
+    }
 
     record_vault_audit(
         server,
@@ -525,6 +559,10 @@ pub(super) async fn handle_vault_set(
         }))
         .map_err(|e| format!("serialize: {e}"))
     })();
+
+    if result.is_ok() {
+        let _ = server.refresh_llm_provider_secrets_from_vault();
+    }
 
     record_vault_audit(
         server,

@@ -333,8 +333,8 @@ cargo test --workspace           # all tests pass
 Then test startup:
 ```bash
 ENABLE_PIPELINE=true \
-VOYAGE_API_KEY="pa-XkUZYIk9Lrsdu37rUw3DWKMMxdwIrIRp3jfQxyHanPP" \
-SILICONFLOW_API_KEY="sk-npcpuekoijwpstamyebmvjobthsdyevcboucsbofqgkzmhxk" \
+VOYAGE_API_KEY="your_voyage_key_here" \
+SILICONFLOW_API_KEY="your_siliconflow_key_here" \
 MEMORY_DB_PATH="/Users/kckylechen/.gemini/antigravity/memory.db" \
 timeout 3 ./target/release/memory-server
 ```

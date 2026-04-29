@@ -133,8 +133,8 @@ use crate::utils::{
 use crate::vault_ops::{
     handle_vault_get, handle_vault_init, handle_vault_list, handle_vault_lock, handle_vault_remove,
     handle_vault_set, handle_vault_setup_rotation, handle_vault_status, handle_vault_unlock,
-    VaultGetParams, VaultInitParams, VaultListParams, VaultRemoveParams, VaultSetParams,
-    VaultSetupRotationParams, VaultUnlockParams,
+    load_unlocked_api_key_secrets, VaultGetParams, VaultInitParams, VaultListParams,
+    VaultRemoveParams, VaultSetParams, VaultSetupRotationParams, VaultUnlockParams,
 };
 use crate::wiki_ops::{handle_wiki_browse, handle_wiki_lint, handle_wiki_search};
 
@@ -586,6 +586,11 @@ impl MemoryServer {
             .map_err(|e| std::io::Error::other(format!("seed builtin capabilities: {e}")))?;
 
         Ok(server)
+    }
+
+    fn refresh_llm_provider_secrets_from_vault(&self) -> Result<usize, String> {
+        let secrets = load_unlocked_api_key_secrets(self)?;
+        Ok(self.llm.set_provider_secrets(secrets))
     }
 }
 
