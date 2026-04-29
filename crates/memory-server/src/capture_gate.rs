@@ -27,6 +27,7 @@ pub const DEFAULT_CAPTURE_MIN_CHARS: usize = 200;
 
 /// Allowed top-level path buckets. Saves to anything else are rejected.
 pub const ALLOWED_BUCKETS: &[&str] = &[
+    "wiki",
     "scratch",
     "decisions",
     "facts",
@@ -126,7 +127,11 @@ impl<'a> GateInput<'a> {
 /// bypasses hard-enforce). `mode=Off` short-circuits with accept=true.
 pub fn evaluate(input: &GateInput<'_>, mode: GateMode) -> GateDecision {
     if matches!(mode, GateMode::Off) {
-        return GateDecision { accept: true, mode, violations: vec![] };
+        return GateDecision {
+            accept: true,
+            mode,
+            violations: vec![],
+        };
     }
 
     let mut violations = Vec::new();
@@ -192,7 +197,11 @@ pub fn evaluate(input: &GateInput<'_>, mode: GateMode) -> GateDecision {
         GateMode::Enforce => violations.is_empty() || input.force,
     };
 
-    GateDecision { accept, mode, violations }
+    GateDecision {
+        accept,
+        mode,
+        violations,
+    }
 }
 
 /// Extract the first non-empty path segment (the "bucket"). Returns empty string
@@ -240,14 +249,20 @@ mod tests {
     use super::*;
 
     fn evaluate_warn(text: &str, path: &str, domain: Option<&str>) -> GateDecision {
-        evaluate(&GateInput::new(text, path, domain, false), GateMode::Enforce)
+        evaluate(
+            &GateInput::new(text, path, domain, false),
+            GateMode::Enforce,
+        )
     }
 
     #[test]
     fn rejects_missing_domain_outside_scratch() {
         let d = evaluate_warn("a".repeat(300).as_str(), "/decisions/foo", None);
         assert!(!d.accept);
-        assert!(d.violations.iter().any(|v| v.code == GateViolationCode::DomainRequired));
+        assert!(d
+            .violations
+            .iter()
+            .any(|v| v.code == GateViolationCode::DomainRequired));
     }
 
     #[test]
@@ -270,13 +285,19 @@ mod tests {
     #[test]
     fn rejects_root_or_empty_path() {
         let d = evaluate_warn(&"x".repeat(300), "/", Some("equity_trading"));
-        assert!(d.violations.iter().any(|v| v.code == GateViolationCode::PathTooShallow));
+        assert!(d
+            .violations
+            .iter()
+            .any(|v| v.code == GateViolationCode::PathTooShallow));
     }
 
     #[test]
     fn enforces_min_chars_outside_scratch() {
         let d = evaluate_warn("too short", "/facts/lesson", Some("coding"));
-        assert!(d.violations.iter().any(|v| v.code == GateViolationCode::BelowMinChars));
+        assert!(d
+            .violations
+            .iter()
+            .any(|v| v.code == GateViolationCode::BelowMinChars));
     }
 
     #[test]
@@ -320,7 +341,10 @@ mod tests {
             GateMode::Warn,
         );
         assert!(d.accept);
-        assert!(!d.violations.is_empty(), "warn mode still surfaces violations");
+        assert!(
+            !d.violations.is_empty(),
+            "warn mode still surfaces violations"
+        );
     }
 
     #[test]
@@ -336,12 +360,18 @@ mod tests {
     #[test]
     fn empty_domain_string_is_treated_as_missing() {
         let d = evaluate_warn(&"x".repeat(300), "/facts/x", Some(""));
-        assert!(d.violations.iter().any(|v| v.code == GateViolationCode::DomainRequired));
+        assert!(d
+            .violations
+            .iter()
+            .any(|v| v.code == GateViolationCode::DomainRequired));
     }
 
     #[test]
     fn none_literal_domain_is_treated_as_missing() {
         let d = evaluate_warn(&"x".repeat(300), "/facts/x", Some("<none>"));
-        assert!(d.violations.iter().any(|v| v.code == GateViolationCode::DomainRequired));
+        assert!(d
+            .violations
+            .iter()
+            .any(|v| v.code == GateViolationCode::DomainRequired));
     }
 }

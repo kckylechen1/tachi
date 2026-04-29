@@ -831,9 +831,7 @@ impl MemoryServer {
                 windows.retain(|_, deque| deque.back().is_some_and(|&t| t >= cutoff));
             }
 
-            let window = windows
-                .entry(session_id.to_string())
-                .or_default();
+            let window = windows.entry(session_id.to_string()).or_default();
 
             // Evict entries older than 60 seconds
             let cutoff = now - Duration::from_secs(60);
@@ -896,7 +894,7 @@ impl MemoryServer {
                     rmcp::model::ErrorCode::INVALID_REQUEST,
                     format!(
                         "Loop detected: tool '{}' called {} times with identical arguments within {}s (burst_limit={}). \
-                         Break the loop by varying your approach or arguments.",
+                         Stop before retrying the same path. Call tachi_progress_check with the current task, attempts, and latest error to get a debug checklist and ask_codex_prompt; search prior lessons with tachi_wiki_search or tachi_task_brief; if still blocked, ask another agent using that prompt.",
                         tool_name,
                         stamps.len() + 1,
                         RATE_LIMIT_BURST_WINDOW.as_secs(),

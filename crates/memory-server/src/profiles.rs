@@ -115,6 +115,9 @@ impl ToolProfile {
 }
 
 const OBSERVE_TOOL_PATTERNS: &[&str] = &[
+    "tachi_task_brief",
+    "tachi_progress_check",
+    "tachi_wiki_search",
     "recommend_capability",
     "recommend_skill",
     "recommend_toolchain",
@@ -129,6 +132,7 @@ const OBSERVE_TOOL_PATTERNS: &[&str] = &[
 
 const REMEMBER_TOOL_PATTERNS: &[&str] = &[
     "save_memory",
+    "tachi_wiki_write",
     "extract_facts",
     "run_skill",
     "ingest_event",
@@ -178,6 +182,9 @@ pub(super) fn parse_tool_profile(raw: &str) -> Option<ToolProfile> {
             "remember" | "write" | "writer" | "ide" | "agent" | "claude" | "claude-code"
             | "codex" | "cursor" | "trae" => ToolProfile::remember(),
             "coordinate" | "antigravity" => ToolProfile::coordinate(),
+            "companion" | "copilot" | "coach" => ToolProfile::remember()
+                .merge(ToolProfile::coordinate())
+                .merge(ToolProfile::operate()),
             "workflow" => ToolProfile::coordinate().merge(ToolProfile::operate()),
             "operate" | "runtime" | "openclaw" | "adapter" | "ops" => ToolProfile::operate(),
             "admin" | "full" => ToolProfile::admin(),
@@ -301,6 +308,14 @@ mod tests {
     fn profile_parsing_maps_host_aliases() {
         assert_eq!(parse_tool_profile("codex"), Some(ToolProfile::remember()));
         assert_eq!(parse_tool_profile("openclaw"), Some(ToolProfile::operate()));
+        assert_eq!(
+            parse_tool_profile("companion"),
+            Some(
+                ToolProfile::remember()
+                    .merge(ToolProfile::coordinate())
+                    .merge(ToolProfile::operate())
+            )
+        );
         assert_eq!(
             parse_tool_profile("antigravity"),
             Some(ToolProfile::coordinate())

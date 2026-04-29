@@ -118,6 +118,22 @@ fn default_wiki_stale_days() -> u32 {
     90
 }
 
+fn default_wiki_write_importance() -> f64 {
+    0.85
+}
+
+fn default_wiki_write_category() -> String {
+    "experience".to_string()
+}
+
+fn default_wiki_write_scope() -> String {
+    "global".to_string()
+}
+
+fn default_wiki_retention_policy() -> String {
+    "permanent".to_string()
+}
+
 fn default_missing_edge_threshold() -> f64 {
     0.85
 }
@@ -742,6 +758,93 @@ pub(crate) struct WikiLintParams {
     /// Similarity threshold for contradiction candidates
     #[serde(default = "default_contradiction_threshold")]
     pub contradiction_threshold: f64,
+}
+
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub(crate) struct WikiWriteParams {
+    /// Short title for the wiki entry.
+    pub title: String,
+
+    /// Full wiki entry body.
+    pub text: String,
+
+    /// Optional explicit /wiki path. Non-/wiki paths are nested under /wiki.
+    #[serde(default)]
+    pub path: Option<String>,
+
+    /// Optional topic. Defaults to a sanitized title.
+    #[serde(default)]
+    pub topic: Option<String>,
+
+    /// Short summary. Defaults to the title.
+    #[serde(default)]
+    pub summary: Option<String>,
+
+    /// Category for the underlying memory entry.
+    #[serde(default = "default_wiki_write_category")]
+    pub category: String,
+
+    /// Keyword tags.
+    #[serde(default)]
+    pub keywords: Vec<String>,
+
+    /// Entity names mentioned.
+    #[serde(default)]
+    pub entities: Vec<String>,
+
+    /// Importance score.
+    #[serde(default = "default_wiki_write_importance")]
+    pub importance: f64,
+
+    /// Scope for the underlying memory write; wiki defaults to global.
+    #[serde(default = "default_wiki_write_scope")]
+    pub scope: String,
+
+    /// Retention policy; wiki defaults to permanent.
+    #[serde(default = "default_wiki_retention_policy")]
+    pub retention_policy: String,
+
+    /// Optional domain.
+    #[serde(default)]
+    pub domain: Option<String>,
+
+    /// Optional named project DB.
+    #[serde(default)]
+    pub project: Option<String>,
+
+    /// Bypass noise filtering for short but intentional wiki entries.
+    #[serde(default)]
+    pub force: bool,
+}
+
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub(crate) struct WikiSearchParams {
+    /// Search query text.
+    pub query: String,
+
+    /// Wiki path prefix. Defaults to /wiki.
+    #[serde(default = "default_wiki_path_prefix_opt")]
+    pub path_prefix: Option<String>,
+
+    /// Number of results to return.
+    #[serde(default = "default_top_k")]
+    pub top_k: usize,
+
+    /// Include archived wiki entries.
+    #[serde(default)]
+    pub include_archived: bool,
+
+    /// Optional agent role for sandbox filtering.
+    #[serde(default)]
+    pub agent_role: Option<String>,
+
+    /// Optional named project DB.
+    #[serde(default)]
+    pub project: Option<String>,
+
+    /// Optional domain filter.
+    #[serde(default)]
+    pub domain: Option<String>,
 }
 
 /// Build a MemoryEntry from a JSON fact value (shared by extract_facts and ingest_event).

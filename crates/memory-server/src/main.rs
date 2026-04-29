@@ -6,14 +6,13 @@
 mod bootstrap;
 mod builtins;
 mod capability_ops;
+mod capture_gate;
 mod clawdoctor;
 mod cli;
+mod copilot_ops;
 mod dlq_ops;
 mod doctor;
 mod doctor_ops;
-mod manifest;
-mod capture_gate;
-mod rescue;
 mod enrichment;
 mod foundry_ops;
 mod foundry_runtime_ops;
@@ -24,6 +23,7 @@ mod hub_helpers;
 mod hub_ops;
 mod kanban;
 mod llm;
+mod manifest;
 mod mcp_connection;
 mod mcp_pool;
 mod mcp_proxy;
@@ -35,6 +35,7 @@ mod profiles;
 mod project_db_ops;
 mod prompts;
 mod provenance;
+mod rescue;
 mod sandbox_ops;
 mod server_handler;
 mod server_methods;
@@ -50,6 +51,10 @@ use crate::builtins::seed_builtin_capabilities;
 use crate::capability_ops::{
     handle_prepare_capability_bundle, handle_recommend_capability, handle_recommend_skill,
     handle_recommend_toolchain,
+};
+use crate::copilot_ops::{
+    handle_tachi_progress_check, handle_tachi_task_brief, handle_tachi_wiki_search,
+    handle_tachi_wiki_write,
 };
 use crate::dlq_ops::{handle_dlq_list, handle_dlq_retry};
 use crate::foundry_ops::{
@@ -211,6 +216,9 @@ const CACHEABLE_TOOLS: &[&str] = &[
     "recommend_skill",
     "recommend_toolchain",
     "prepare_capability_bundle",
+    "tachi_task_brief",
+    "tachi_progress_check",
+    "tachi_wiki_search",
     "search_memory",
     "cyberbrain_search",
     "find_similar_memory",
@@ -269,6 +277,7 @@ const CACHE_INVALIDATING_TOOLS: &[&str] = &[
     "delete_domain",
     "distill_trajectory",
     "wiki_lint",
+    "tachi_wiki_write",
 ];
 
 struct CachedResult {
@@ -528,27 +537,26 @@ impl MemoryServer {
                 let mut replayed = 0usize;
 
                 // Helper: replay jobs from a store
-                let replay_from =
-                    |jobs: Vec<memory_core::PersistedFoundryJob>| -> usize {
-                        let mut count = 0;
-                        for job in jobs {
-                            let target_db = match job.target_db.as_str() {
-                                "project" => DbScope::Project,
-                                _ => DbScope::Global,
-                            };
-                            let item = FoundryMaintenanceItem {
-                                job: job.spec,
-                                target_db,
-                                named_project: job.named_project,
-                                path_prefix: job.path_prefix,
-                                memory_ids: job.memory_ids,
-                            };
-                            if replay_server.foundry_tx.try_send(item).is_ok() {
-                                count += 1;
-                            }
+                let replay_from = |jobs: Vec<memory_core::PersistedFoundryJob>| -> usize {
+                    let mut count = 0;
+                    for job in jobs {
+                        let target_db = match job.target_db.as_str() {
+                            "project" => DbScope::Project,
+                            _ => DbScope::Global,
+                        };
+                        let item = FoundryMaintenanceItem {
+                            job: job.spec,
+                            target_db,
+                            named_project: job.named_project,
+                            path_prefix: job.path_prefix,
+                            memory_ids: job.memory_ids,
+                        };
+                        if replay_server.foundry_tx.try_send(item).is_ok() {
+                            count += 1;
                         }
-                        count
-                    };
+                    }
+                    count
+                };
 
                 // Replay from global DB
                 if let Ok(jobs) = replay_server.with_global_store(|store| {
@@ -841,6 +849,46 @@ impl MemoryServer {
         Parameters(params): Parameters<WikiLintParams>,
     ) -> Result<String, String> {
         handle_wiki_lint(self, params).await
+    }
+
+    #[tool(
+        description = "Write a durable wiki entry under /wiki with sane defaults for path, retention, metadata, and auto-linking."
+    )]
+    async fn tachi_wiki_write(
+        &self,
+        Parameters(params): Parameters<WikiWriteParams>,
+    ) -> Result<String, String> {
+        handle_tachi_wiki_write(self, params).await
+    }
+
+    #[tool(
+        description = "Search wiki entries under /wiki. Use this before debugging from scratch or when a prior lesson may exist."
+    )]
+    async fn tachi_wiki_search(
+        &self,
+        Parameters(params): Parameters<WikiSearchParams>,
+    ) -> Result<String, String> {
+        handle_tachi_wiki_search(self, params).await
+    }
+
+    #[tool(
+        description = "Prepare a task brief before non-trivial work: relevant wiki lessons, memory hits, lightweight skill suggestions, and debugging checklist."
+    )]
+    async fn tachi_task_brief(
+        &self,
+        Parameters(params): Parameters<TaskBriefParams>,
+    ) -> Result<String, String> {
+        handle_tachi_task_brief(self, params).await
+    }
+
+    #[tool(
+        description = "Check whether an agent is stuck after repeated attempts. Returns reframe advice, relevant wiki hits, and an ask-codex prompt when useful."
+    )]
+    async fn tachi_progress_check(
+        &self,
+        Parameters(params): Parameters<ProgressCheckParams>,
+    ) -> Result<String, String> {
+        handle_tachi_progress_check(self, params).await
     }
 
     #[tool(description = "Set a key-value pair in server state (stored in hard_state table).")]

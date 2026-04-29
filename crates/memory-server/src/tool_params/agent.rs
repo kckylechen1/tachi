@@ -18,6 +18,10 @@ fn default_foundry_list_limit() -> usize {
     10
 }
 
+fn default_copilot_top_k() -> usize {
+    6
+}
+
 // ─── Agent Registration ─────────────────────────────────────────────────────
 
 #[allow(dead_code)]
@@ -87,6 +91,66 @@ pub(crate) struct HandoffCheckParams {
     /// If true, mark retrieved memos as acknowledged (default: true)
     #[serde(default = "default_true")]
     pub acknowledge: bool,
+}
+
+// ─── Copilot / Task Guidance ────────────────────────────────────────────────
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub(crate) struct TaskBriefParams {
+    /// Natural-language task the agent is about to work on.
+    pub task: String,
+
+    /// Optional canonical agent id for sandbox filtering and context scoping.
+    #[serde(default)]
+    pub agent_id: Option<String>,
+
+    /// Optional named project DB.
+    #[serde(default)]
+    pub project: Option<String>,
+
+    /// Optional memory path prefix for non-wiki context search.
+    #[serde(default)]
+    pub path_prefix: Option<String>,
+
+    /// Optional domain filter.
+    #[serde(default)]
+    pub domain: Option<String>,
+
+    /// Number of wiki and memory hits to return.
+    #[serde(default = "default_copilot_top_k")]
+    pub top_k: usize,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub(crate) struct ProgressCheckParams {
+    /// Natural-language task currently being attempted.
+    pub task: String,
+
+    /// Attempts already made, in chronological order.
+    #[serde(default)]
+    pub attempts: Vec<String>,
+
+    /// Latest error, symptom, or failed observation.
+    #[serde(default)]
+    pub latest_error: Option<String>,
+
+    /// Optional canonical agent id for sandbox filtering and context scoping.
+    #[serde(default)]
+    pub agent_id: Option<String>,
+
+    /// Optional named project DB.
+    #[serde(default)]
+    pub project: Option<String>,
+
+    /// Optional domain filter.
+    #[serde(default)]
+    pub domain: Option<String>,
+
+    /// Number of relevant wiki hits to return.
+    #[serde(default = "default_copilot_top_k")]
+    pub top_k: usize,
 }
 
 // ─── Agent Evolution ────────────────────────────────────────────────────────

@@ -38,7 +38,7 @@ pub use db::foundry_jobs::{
     PersistedFoundryJob,
 };
 
-use rusqlite::Connection;
+use rusqlite::{Connection, OpenFlags};
 use std::time::Duration;
 
 /// High-level handle that owns a database connection.
@@ -58,6 +58,24 @@ impl MemoryStore {
         let conn = Connection::open(db_path)?;
         conn.busy_timeout(Duration::from_millis(5_000))?;
         db::init_schema(&conn)?;
+        let vec_available = db::try_load_sqlite_vec(&conn);
+        Ok(Self {
+            conn,
+            vec_available,
+        })
+    }
+
+    /// Open an existing memory database for pure read-only operations.
+    ///
+    /// This intentionally skips schema initialization because init paths can
+    /// write. Use it for CLI search/stats and other diagnostics that must work
+    /// even when the DB file is not writable.
+    pub fn open_read_only(db_path: &str) -> Result<Self, MemoryError> {
+        libsimple::enable_auto_extension()
+            .map_err(|e| MemoryError::InvalidArg(format!("simple tokenizer init: {e}")))?;
+        db::register_sqlite_vec();
+        let conn = Connection::open_with_flags(db_path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+        conn.busy_timeout(Duration::from_millis(5_000))?;
         let vec_available = db::try_load_sqlite_vec(&conn);
         Ok(Self {
             conn,
@@ -1017,5 +1035,65 @@ impl MemoryStore {
     /// Delete rotation configuration for a prefix.
     pub fn vault_delete_rotation(&self, prefix: &str) -> Result<bool, MemoryError> {
         db::vault_delete_rotation(&self.conn, prefix)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_entry(id: &str) -> MemoryEntry {
+        MemoryEntry {
+            id: id.to_string(),
+            path: "/facts/readonly".to_string(),
+            summary: "Readonly search fixture".to_string(),
+            text: "Hermes rate limit was caused by routing to the ZAI global endpoint".to_string(),
+            importance: 0.8,
+            timestamp: chrono::Utc::now().to_rfc3339(),
+            category: "fact".to_string(),
+            topic: "hermes-rate-limit".to_string(),
+            keywords: vec!["hermes".to_string(), "rate-limit".to_string()],
+            persons: vec![],
+            entities: vec!["Hermes".to_string(), "ZAI".to_string()],
+            location: String::new(),
+            source: "test".to_string(),
+            scope: "project".to_string(),
+            archived: false,
+            access_count: 0,
+            last_access: None,
+            revision: 1,
+            metadata: serde_json::json!({}),
+            vector: None,
+            retention_policy: Some("durable".to_string()),
+            domain: Some("coding".to_string()),
+        }
+    }
+
+    #[test]
+    fn read_only_store_supports_stats_and_search_without_access_writes() {
+        let temp = tempfile::NamedTempFile::new().expect("temp db");
+        let db_path = temp.path().to_string_lossy().to_string();
+
+        {
+            let mut store = MemoryStore::open(&db_path).expect("open writable store");
+            store
+                .upsert(&test_entry("readonly-search"))
+                .expect("seed memory");
+        }
+
+        let store = MemoryStore::open_read_only(&db_path).expect("open read-only store");
+        assert_eq!(store.stats(false).expect("stats").total, 1);
+
+        let rows = store
+            .search(
+                "Hermes rate limit",
+                Some(SearchOptions {
+                    record_access: false,
+                    ..Default::default()
+                }),
+            )
+            .expect("read-only search");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].entry.id, "readonly-search");
     }
 }

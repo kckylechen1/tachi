@@ -93,6 +93,18 @@ fn open_cli_store(db_path: &PathBuf) -> Result<MemoryStore, Box<dyn std::error::
     Ok(MemoryStore::open(db_str)?)
 }
 
+fn open_cli_store_read_only(
+    db_path: &PathBuf,
+) -> Result<MemoryStore, Box<dyn std::error::Error>> {
+    let db_str = db_path.to_str().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("DB path contains invalid UTF-8: {}", db_path.display()),
+        )
+    })?;
+    Ok(MemoryStore::open_read_only(db_str)?)
+}
+
 fn print_pretty_json(value: &serde_json::Value) -> Result<(), Box<dyn std::error::Error>> {
     println!("{}", serde_json::to_string_pretty(value)?);
     Ok(())
@@ -1266,7 +1278,7 @@ async fn run_cli_command(
     match command {
         Commands::Serve => Ok(()),
         Commands::Search { query, path, top_k } => {
-            let store = open_cli_store(db_path)?;
+            let store = open_cli_store_read_only(db_path)?;
             let path_prefix = path.clone();
             let query_vec = if store.vec_available {
                 match crate::llm::LlmClient::new() {
@@ -1295,6 +1307,7 @@ async fn run_cli_command(
                     top_k,
                     path_prefix,
                     query_vec,
+                    record_access: false,
                     ..Default::default()
                 }),
             )?;
@@ -1303,6 +1316,7 @@ async fn run_cli_command(
                 "path": path,
                 "top_k": top_k,
                 "vector": store.vec_available,
+                "warnings": ["audit/access write skipped: database opened read-only"],
                 "results": results,
             }))
         }
@@ -1336,13 +1350,14 @@ async fn run_cli_command(
             }))
         }
         Commands::Stats => {
-            let store = open_cli_store(db_path)?;
+            let store = open_cli_store_read_only(db_path)?;
             let stats = store.stats(false)?;
             print_pretty_json(&json!({
                 "total": stats.total,
                 "by_scope": stats.by_scope,
                 "by_category": stats.by_category,
                 "by_root_path": stats.by_root_path,
+                "warnings": ["stats opened database read-only; no maintenance writes attempted"],
                 "database": {
                     "path": db_path.display().to_string(),
                     "vec_available": store.vec_available,
