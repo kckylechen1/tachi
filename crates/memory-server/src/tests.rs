@@ -2462,6 +2462,272 @@ async fn rate_limit_agent_profile_overrides_server_defaults() {
     assert!(err.message.contains("Loop detected"));
 }
 
+// ─── PR6: hub_quick_add safety boundary ─────────────────────────────────────
+
+#[tokio::test]
+async fn hub_quick_add_skill_auto_approve_is_noop_already_enabled() {
+    let server = make_server();
+    let body = crate::hub_ops::handle_hub_quick_add(
+        &server,
+        crate::tool_params::HubQuickAddParams {
+            id: "skill:pr6-test".to_string(),
+            cap_type: "skill".to_string(),
+            name: "pr6 test skill".to_string(),
+            description: "A trivial skill for the PR6 quick_add test.".to_string(),
+            definition: serde_json::json!({"prompt": "echo {{x}}"}).to_string(),
+            version: 1,
+            scope: "global".to_string(),
+            auto_approve: true,
+        },
+    )
+    .await
+    .expect("quick_add");
+    let v: Value = serde_json::from_str(&body).expect("json");
+    assert_eq!(
+        v["auto_approve"], json!("already_enabled"),
+        "skills are governance-approved at register time; auto_approve must be a no-op. body: {body}"
+    );
+    assert!(v.get("review").is_none(), "no review step should run");
+}
+
+#[tokio::test]
+async fn hub_quick_add_refuses_to_auto_approve_untrusted_stdio_mcp() {
+    let server = make_server();
+    let definition = serde_json::json!({
+        "transport": "stdio",
+        "command": "/tmp/definitely-not-on-allowlist",
+        "args": []
+    })
+    .to_string();
+    let body = crate::hub_ops::handle_hub_quick_add(
+        &server,
+        crate::tool_params::HubQuickAddParams {
+            id: "mcp:pr6-untrusted".to_string(),
+            cap_type: "mcp".to_string(),
+            name: "untrusted mcp".to_string(),
+            description: String::new(),
+            definition,
+            version: 1,
+            scope: "global".to_string(),
+            auto_approve: true,
+        },
+    )
+    .await
+    .expect("quick_add");
+    let v: Value = serde_json::from_str(&body).expect("json");
+    assert_eq!(
+        v["auto_approve"], json!("refused_untrusted"),
+        "untrusted stdio MCP must NOT be auto-approved even when explicitly requested. body: {body}"
+    );
+    // The register step must still report the cap as pending+disabled.
+    assert_eq!(v["register"]["enabled"], json!(false));
+    assert_eq!(v["register"]["review_status"], json!("pending"));
+    assert_eq!(v["register"]["auto_approval_eligible"], json!(false));
+    // No review step should have run.
+    assert!(v.get("review").is_none(), "untrusted path must not invoke review");
+    // A safety warning should be present in the response (warnings are
+    // appended via `append_warning` which concatenates into a single "warning"
+    // string field, not an array).
+    let warning = v.get("warning").and_then(|w| w.as_str()).unwrap_or("");
+    assert!(
+        warning.contains("trusted allowlist"),
+        "expected an allowlist warning, got warning={warning:?}, body: {body}"
+    );
+}
+
+#[tokio::test]
+async fn hub_quick_add_applies_review_for_trusted_stdio_mcp() {
+    let server = make_server();
+    let definition = serde_json::json!({
+        "transport": "stdio",
+        "command": "npx",
+        "args": ["-y", "@modelcontextprotocol/server-everything"]
+    })
+    .to_string();
+    let body = crate::hub_ops::handle_hub_quick_add(
+        &server,
+        crate::tool_params::HubQuickAddParams {
+            id: "mcp:pr6-trusted".to_string(),
+            cap_type: "mcp".to_string(),
+            name: "trusted mcp".to_string(),
+            description: String::new(),
+            definition,
+            version: 1,
+            scope: "global".to_string(),
+            auto_approve: true,
+        },
+    )
+    .await
+    .expect("quick_add");
+    let v: Value = serde_json::from_str(&body).expect("json");
+    assert_eq!(v["register"]["auto_approval_eligible"], json!(true), "body: {body}");
+    assert_eq!(v["auto_approve"], json!("applied"), "body: {body}");
+    // The review sub-response must reflect the approve+enable transition.
+    assert_eq!(v["review"]["review_status"], json!("approved"));
+    assert_eq!(v["review"]["enabled"], json!(true));
+}
+
+
+
+#[tokio::test]
+async fn get_memory_reports_pending_when_neither_summary_nor_vector_present() {
+    let server = make_server();
+
+    // Save a freshly-built entry: summary empty, vector None — the on-disk
+    // shape immediately after a synchronous write but before the enrichment
+    // batcher has flushed.
+    let id = format!("pending-{}", uuid::Uuid::new_v4());
+    let entry = make_entry(&id);
+    server
+        .with_global_store(|store| {
+            store
+                .upsert(&entry)
+                .map_err(|e| format!("save: {e}"))
+        })
+        .expect("save entry");
+
+    let body = crate::memory_ops::handle_get_memory(
+        &server,
+        crate::tool_params::GetMemoryParams {
+            id: id.clone(),
+            include_archived: false,
+            project: None,
+        },
+    )
+    .await
+    .expect("get_memory");
+
+    let v: Value = serde_json::from_str(&body).expect("json");
+    assert_eq!(v["embedding_pending"], json!(true), "body: {body}");
+    assert_eq!(v["summary_pending"], json!(true), "body: {body}");
+    // No foundry job has been queued for this id — the field must be absent.
+    assert!(
+        v.get("foundry_jobs").is_none(),
+        "expected no foundry_jobs field, got: {body}"
+    );
+}
+
+#[tokio::test]
+async fn get_memory_reports_complete_when_summary_and_vector_present() {
+    let server = make_server();
+
+    let id = format!("complete-{}", uuid::Uuid::new_v4());
+    let mut entry = make_entry(&id);
+    entry.summary = "a brief precomputed summary".to_string();
+    entry.vector = Some(vec![0.0_f32; 1024]); // schema requires 1024-dim vectors
+    server
+        .with_global_store(|store| {
+            store
+                .upsert(&entry)
+                .map_err(|e| format!("save: {e}"))
+        })
+        .expect("save entry");
+
+    let body = crate::memory_ops::handle_get_memory(
+        &server,
+        crate::tool_params::GetMemoryParams {
+            id: id.clone(),
+            include_archived: false,
+            project: None,
+        },
+    )
+    .await
+    .expect("get_memory");
+
+    let v: Value = serde_json::from_str(&body).expect("json");
+    assert_eq!(v["embedding_pending"], json!(false), "body: {body}");
+    assert_eq!(v["summary_pending"], json!(false), "body: {body}");
+}
+
+#[tokio::test]
+async fn stuck_detection_no_warning_below_threshold() {
+    let server = make_server();
+
+    // First two identical calls: no warning, hard block far away.
+    for i in 0..2 {
+        let warn = server
+            .check_rate_limit("save_memory", "hash-pre", "session-soft")
+            .unwrap_or_else(|e| panic!("call {} should succeed: {:?}", i + 1, e));
+        assert!(
+            warn.is_none(),
+            "call {} should not carry a stuck warning, got: {:?}",
+            i + 1,
+            warn
+        );
+    }
+}
+
+#[tokio::test]
+async fn stuck_detection_emits_warning_from_third_call_through_seventh() {
+    let server = make_server();
+
+    // Calls 1 and 2: no warning.
+    for _ in 0..2 {
+        let warn = server
+            .check_rate_limit("save_memory", "hash-warn", "session-soft-2")
+            .expect("call should succeed");
+        assert!(warn.is_none());
+    }
+
+    // Calls 3 through 7 (5 calls): each succeeds and carries a warning.
+    // Hard block triggers on call 9 (default burst = 8 means stamps.len() >= 8).
+    for upcoming in 3u64..=7 {
+        let warn = server
+            .check_rate_limit("save_memory", "hash-warn", "session-soft-2")
+            .unwrap_or_else(|e| panic!("call {upcoming} should succeed: {:?}", e));
+        let msg =
+            warn.unwrap_or_else(|| panic!("call {upcoming} should carry a soft stuck warning"));
+        assert!(
+            msg.contains("stuck-detection"),
+            "warning text should include the 'stuck-detection' tag, got: {msg}"
+        );
+        assert!(
+            msg.contains("save_memory"),
+            "warning should mention the tool name, got: {msg}"
+        );
+        assert!(
+            msg.contains(&format!("called {upcoming} times")),
+            "warning should report current count {upcoming}, got: {msg}"
+        );
+        assert!(
+            msg.contains("tachi_progress_check"),
+            "warning should suggest tachi_progress_check, got: {msg}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn stuck_detection_warning_disappears_at_hard_block() {
+    let server = make_server();
+
+    // Burn through 8 successful calls (calls 3..=7 carry warnings, calls 1,2,8 do not).
+    // Wait — at call 8 (upcoming_count=8), upcoming_count == effective_burst(8),
+    // so the soft-warning condition `upcoming < effective_burst` is false. Verify.
+    for upcoming in 1u64..=8 {
+        let warn = server
+            .check_rate_limit("save_memory", "hash-hard", "session-hard")
+            .unwrap_or_else(|e| panic!("call {upcoming} should succeed: {:?}", e));
+        if (3..=7).contains(&upcoming) {
+            assert!(
+                warn.is_some(),
+                "call {upcoming} should carry a soft warning"
+            );
+        } else {
+            assert!(
+                warn.is_none(),
+                "call {upcoming} should NOT carry a soft warning, got: {:?}",
+                warn
+            );
+        }
+    }
+
+    // 9th identical call → hard block.
+    let err = server
+        .check_rate_limit("save_memory", "hash-hard", "session-hard")
+        .expect_err("9th identical call should hit the hard loop block");
+    assert!(err.message.contains("Loop detected"));
+}
+
 // ─── Agent Profile Tests ─────────────────────────────────────────────────────
 
 #[tokio::test]
@@ -5291,4 +5557,133 @@ async fn vc_register_and_bind_workflow() {
 
     let resolve_json: Value = serde_json::from_str(&resolve).unwrap();
     assert_eq!(resolve_json["resolved_id"], "mcp:concrete");
+}
+
+// ─── cli_client: daemon detection + in-process fallback ─────────────────────
+
+#[tokio::test]
+async fn cli_client_detect_daemon_returns_none_when_pid_file_missing() {
+    let temp = std::env::temp_dir().join(format!("tachi-cli-test-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&temp).unwrap();
+
+    let info = crate::cli_client::detect_daemon(&temp).await;
+    assert!(
+        info.is_none(),
+        "expected None when ~/.tachi/daemon.pid is missing"
+    );
+
+    let _ = std::fs::remove_dir_all(&temp);
+}
+
+#[tokio::test]
+async fn cli_client_detect_daemon_returns_none_for_stale_pid_file() {
+    let temp = std::env::temp_dir().join(format!("tachi-cli-test-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&temp).unwrap();
+
+    // Write a pid file pointing at a port nobody is listening on. Pick a high
+    // port that is extremely unlikely to be in use during the test.
+    let pid_path = temp.join("daemon.pid");
+    std::fs::write(
+        &pid_path,
+        serde_json::to_string(&json!({
+            "pid": 99999,
+            "port": 1u16,           // privileged port we won't be bound to
+            "url": "http://127.0.0.1:1/mcp",
+            "global_db": "/tmp/none.db",
+            "project_db": null,
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    let info = crate::cli_client::detect_daemon(&temp).await;
+    assert!(
+        info.is_none(),
+        "expected None when port in pid file is not listening"
+    );
+
+    let _ = std::fs::remove_dir_all(&temp);
+}
+
+#[tokio::test]
+async fn cli_client_detect_daemon_succeeds_when_port_is_open() {
+    let temp = std::env::temp_dir().join(format!("tachi-cli-test-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&temp).unwrap();
+
+    // Bind a real listener on an OS-assigned port so the TCP probe succeeds.
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind ephemeral port");
+    let addr = listener.local_addr().expect("local_addr");
+    let port = addr.port();
+
+    let pid_path = temp.join("daemon.pid");
+    std::fs::write(
+        &pid_path,
+        serde_json::to_string(&json!({
+            "pid": std::process::id(),
+            "port": port,
+            "url": format!("http://127.0.0.1:{port}/mcp"),
+            "global_db": "/tmp/none.db",
+            "project_db": null,
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    let info = crate::cli_client::detect_daemon(&temp)
+        .await
+        .expect("expected Some(DaemonInfo) when port is listening");
+    assert_eq!(info.port, port);
+    assert!(info.url.contains(&format!("127.0.0.1:{port}")));
+
+    drop(listener);
+    let _ = std::fs::remove_dir_all(&temp);
+}
+
+#[tokio::test]
+async fn cli_client_in_process_remember_round_trips_through_handler() {
+    // Verifies the in-process fallback path: build a transient MemoryServer
+    // and call the same `handle_remember` the MCP tool uses. This is the
+    // critical guarantee that `tachi remember` from the shell behaves
+    // identically to the `remember` MCP tool when no daemon is running.
+    ensure_test_env();
+
+    let db_path = std::env::temp_dir().join(format!(
+        "tachi-cli-remember-{}.sqlite",
+        uuid::Uuid::new_v4()
+    ));
+    let server = crate::cli_client::build_in_process_server(&db_path, None)
+        .expect("build in-process server");
+
+    let body = crate::memory_search_ops::handle_remember(
+        &server,
+        crate::tool_params::RememberParams {
+            text: "cli round-trip note about a single concrete fact".to_string(),
+            summary: String::new(),
+            tags: vec!["cli-test".to_string()],
+            topic: String::new(),
+            importance: Some(0.6),
+            scope: Some("project".to_string()),
+            project: None,
+            path: Some("/notes/cli-roundtrip".to_string()),
+            category: None,
+            domain: None,
+            retention_policy: None,
+            force: true, // bypass noise filter for the deterministic test string
+        },
+    )
+    .await
+    .expect("remember should succeed in-process");
+
+    let parsed: Value = serde_json::from_str(&body).expect("remember body is JSON");
+    // handle_remember delegates to handle_save_memory which returns either
+    // {"saved": true, ...} or {"id": "...", ...} depending on the path; we
+    // only need to assert the call landed without an error key.
+    assert!(
+        parsed.get("error").is_none(),
+        "remember returned error: {body}"
+    );
+
+    let _ = std::fs::remove_file(&db_path);
 }

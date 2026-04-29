@@ -102,7 +102,7 @@ impl ServerHandler for MemoryServer {
             let name = params.name.as_ref();
 
             // ─── Rate Limiter: throttle and loop detection ───────────────
-            {
+            let stuck_warning: Option<String> = {
                 let args_hash = params
                     .arguments
                     .as_ref()
@@ -111,8 +111,8 @@ impl ServerHandler for MemoryServer {
                 // Each MemoryServer clone corresponds to one MCP session
                 // (StreamableHttpService creates one clone per session), so
                 // "default" as session_id is correct for per-session limiting.
-                self.check_rate_limit(name, &args_hash, "default")?;
-            }
+                self.check_rate_limit(name, &args_hash, "default")?
+            };
 
             // ─── Phantom Tools: cache invalidation on write ops ──────────
             if CACHE_INVALIDATING_TOOLS.contains(&name) {
@@ -145,7 +145,11 @@ impl ServerHandler for MemoryServer {
                         if cached.created_at.elapsed() < TOOL_CACHE_TTL {
                             self.cache_hits
                                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                            return Ok(cached.result.clone());
+                            let mut hit = cached.result.clone();
+                            if let Some(warn) = stuck_warning.clone() {
+                                hit.content.push(rmcp::model::Content::text(warn));
+                            }
+                            return Ok(hit);
                         }
                     }
                 }
@@ -282,7 +286,13 @@ impl ServerHandler for MemoryServer {
                                     );
                                 }
                             }
-                            return retry_result;
+                            return match (retry_result, stuck_warning.clone()) {
+                                (Ok(mut tool_result), Some(warn)) => {
+                                    tool_result.content.push(rmcp::model::Content::text(warn));
+                                    Ok(tool_result)
+                                }
+                                (other, _) => other,
+                            };
                         }
                     }
                 }
@@ -319,6 +329,19 @@ impl ServerHandler for MemoryServer {
                     );
                 }
             }
+
+            // ─── Stuck detection: append soft warning block ──────────────
+            // Done AFTER caching so the cached entry stays warning-free; the
+            // warning is intentionally a property of *this* call, not of the
+            // tool's output. Cache hits and retries get fresh warnings on
+            // their own dispatch through call_tool.
+            let result = match (result, stuck_warning) {
+                (Ok(mut tool_result), Some(warn)) => {
+                    tool_result.content.push(rmcp::model::Content::text(warn));
+                    Ok(tool_result)
+                }
+                (other, _) => other,
+            };
 
             result
         }

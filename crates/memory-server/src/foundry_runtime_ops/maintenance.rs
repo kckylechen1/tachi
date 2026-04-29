@@ -931,9 +931,10 @@ pub(crate) async fn run_foundry_maintenance_worker(
         // transitions so `tachi doctor --jobs` and post-mortems can surface
         // *why* a job skipped/failed instead of just the bare status.
         let (status_str, reason): (&str, Option<String>) = match &result {
-            Ok(memory_core::FoundryJobStatus::Skipped) => {
-                ("skipped", Some("worker reported no-op (no qualifying inputs)".to_string()))
-            }
+            Ok(memory_core::FoundryJobStatus::Skipped) => (
+                "skipped",
+                Some("worker reported no-op (no qualifying inputs)".to_string()),
+            ),
             Ok(_) => ("completed", None),
             Err(e) => ("failed", Some(e.clone())),
         };

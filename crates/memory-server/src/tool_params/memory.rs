@@ -230,6 +230,65 @@ pub(crate) struct SaveMemoryParams {
     pub metadata: Option<serde_json::Value>,
 }
 
+// ─── Remember shortcut ──────────────────────────────────────────────────────
+
+/// Low-friction write surface for IDE / human use. Infers `path`, `category`,
+/// and `importance` so callers only need to supply text. Internally delegates
+/// to `handle_save_memory`, so the capture gate, noise filter, provenance, and
+/// enrichment pipeline all run identically to a `save_memory` call.
+#[allow(dead_code)]
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub(crate) struct RememberParams {
+    /// Full text content to remember.
+    pub text: String,
+
+    /// Optional short summary (≤100 chars). If omitted, the enrichment pipeline
+    /// will generate one asynchronously.
+    #[serde(default)]
+    pub summary: String,
+
+    /// Optional tags (forwarded as `keywords` to save_memory).
+    #[serde(default)]
+    pub tags: Vec<String>,
+
+    /// Optional explicit topic / subject area.
+    #[serde(default)]
+    pub topic: String,
+
+    /// Importance score 0.0–1.0. Defaults to 0.6 (slightly below save_memory's
+    /// 0.7) since `remember` is intended for casual notes.
+    #[serde(default)]
+    pub importance: Option<f64>,
+
+    /// Scope: "user" | "project" | "general". Defaults to "project".
+    #[serde(default)]
+    pub scope: Option<String>,
+
+    /// Optional named project DB target.
+    #[serde(default)]
+    pub project: Option<String>,
+
+    /// Optional path override. If omitted, defaults to `/notes/{YYYY-MM-DD}`.
+    #[serde(default)]
+    pub path: Option<String>,
+
+    /// Optional category override. Defaults to "fact".
+    #[serde(default)]
+    pub category: Option<String>,
+
+    /// Optional domain (e.g. "finance", "code-review").
+    #[serde(default)]
+    pub domain: Option<String>,
+
+    /// Optional retention policy.
+    #[serde(default)]
+    pub retention_policy: Option<String>,
+
+    /// Bypass noise filter (forwarded to save_memory). Defaults to false.
+    #[serde(default)]
+    pub force: bool,
+}
+
 // ─── Search ─────────────────────────────────────────────────────────────────
 
 #[allow(dead_code)]

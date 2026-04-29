@@ -137,6 +137,39 @@ pub(crate) struct HubRegisterParams {
     pub scope: String,
 }
 
+/// PR6: composite "register + (optional) auto-approve" params.
+///
+/// `auto_approve = true` requests a follow-up `hub_review` step. The follow-up
+/// is silently dropped (with a warning in the response) when the underlying
+/// register reports `auto_approval_eligible: false` — i.e. for an untrusted
+/// stdio MCP command. This keeps the trusted-command allowlist authoritative.
+#[allow(dead_code)]
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub(crate) struct HubQuickAddParams {
+    /// Unique capability ID, e.g. "skill:code-review", "mcp:github"
+    pub id: String,
+    /// Type: "skill" | "plugin" | "mcp"
+    pub cap_type: String,
+    /// Human-readable name
+    pub name: String,
+    /// Short description
+    #[serde(default)]
+    pub description: String,
+    /// JSON string of capability definition (prompt template, manifest, config)
+    #[serde(default)]
+    pub definition: String,
+    /// Version number
+    #[serde(default = "default_hub_version")]
+    pub version: u32,
+    /// Target database scope: "global" or "project" (default)
+    #[serde(default = "default_scope")]
+    pub scope: String,
+    /// Request immediate approve+enable after register. Honored only for
+    /// `auto_approval_eligible` registrations (see register response).
+    #[serde(default)]
+    pub auto_approve: bool,
+}
+
 #[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub(crate) struct HubDiscoverParams {

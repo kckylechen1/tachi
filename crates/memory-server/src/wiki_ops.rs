@@ -62,7 +62,9 @@ fn token_cosine_similarity(a: &str, b: &str) -> f64 {
 }
 
 fn contradiction_score(a: &str, b: &str) -> f64 {
-    let negations = ["never", "not", "avoid", "disable", "forbid", "against", "cannot"];
+    let negations = [
+        "never", "not", "avoid", "disable", "forbid", "against", "cannot",
+    ];
     let affirmations = ["always", "use", "enable", "allow", "prefer", "should"];
     let a_lower = a.to_ascii_lowercase();
     let b_lower = b.to_ascii_lowercase();
@@ -97,9 +99,7 @@ fn set_skill_quality_metadata(def: &mut Value, patch: Value) {
         *def = json!({});
     }
     let obj = def.as_object_mut().expect("def should be object");
-    let quality = obj
-        .entry("quality_guard")
-        .or_insert_with(|| json!({}));
+    let quality = obj.entry("quality_guard").or_insert_with(|| json!({}));
     if !quality.is_object() {
         *quality = json!({});
     }
@@ -119,10 +119,15 @@ fn latest_snapshot_for_skill(store: &mut MemoryStore, skill_path: &str) -> Optio
         .max_by(|a, b| a.timestamp.cmp(&b.timestamp))
 }
 
-fn relation_exists(edges: &[memory_core::MemoryEdge], a: &str, b: &str, relation: Option<&str>) -> bool {
+fn relation_exists(
+    edges: &[memory_core::MemoryEdge],
+    a: &str,
+    b: &str,
+    relation: Option<&str>,
+) -> bool {
     edges.iter().any(|edge| {
-        let matches_nodes =
-            (edge.source_id == a && edge.target_id == b) || (edge.source_id == b && edge.target_id == a);
+        let matches_nodes = (edge.source_id == a && edge.target_id == b)
+            || (edge.source_id == b && edge.target_id == a);
         let matches_relation = relation.map(|rel| edge.relation == rel).unwrap_or(true);
         matches_nodes && matches_relation
     })
@@ -140,29 +145,31 @@ fn run_skill_quality_guards_for_scope(
     server: &MemoryServer,
     scope: DbScope,
 ) -> Result<Value, String> {
-    let mut snapshots: Vec<SkillQualitySnapshot> = server.with_store_for_scope_read(scope, |store| {
-        let caps = store
-            .hub_list(Some("skill"), false)
-            .map_err(|e| format!("hub list skills: {e}"))?;
-        let mut out = Vec::new();
-        for cap in caps {
-            let Some(content) = extract_skill_content(&cap) else {
-                continue;
-            };
-            let def: Value = serde_json::from_str(&cap.definition).unwrap_or_else(|_| json!({}));
-            let skill_path = extract_skill_path(&cap);
-            let latest_snapshot = skill_path
-                .as_deref()
-                .and_then(|path| latest_snapshot_for_skill(store, path));
-            out.push(SkillQualitySnapshot {
-                cap,
-                def,
-                content,
-                latest_snapshot,
-            });
-        }
-        Ok(out)
-    })?;
+    let mut snapshots: Vec<SkillQualitySnapshot> =
+        server.with_store_for_scope_read(scope, |store| {
+            let caps = store
+                .hub_list(Some("skill"), false)
+                .map_err(|e| format!("hub list skills: {e}"))?;
+            let mut out = Vec::new();
+            for cap in caps {
+                let Some(content) = extract_skill_content(&cap) else {
+                    continue;
+                };
+                let def: Value =
+                    serde_json::from_str(&cap.definition).unwrap_or_else(|_| json!({}));
+                let skill_path = extract_skill_path(&cap);
+                let latest_snapshot = skill_path
+                    .as_deref()
+                    .and_then(|path| latest_snapshot_for_skill(store, path));
+                out.push(SkillQualitySnapshot {
+                    cap,
+                    def,
+                    content,
+                    latest_snapshot,
+                });
+            }
+            Ok(out)
+        })?;
 
     let now = Utc::now();
     let mut merge_map: HashMap<String, Vec<Value>> = HashMap::new();
@@ -172,14 +179,20 @@ fn run_skill_quality_guards_for_scope(
         for j in (i + 1)..snapshots.len() {
             let similarity = token_cosine_similarity(&snapshots[i].content, &snapshots[j].content);
             if similarity > 0.92 {
-                merge_map.entry(snapshots[i].cap.id.clone()).or_default().push(json!({
-                    "skill_id": snapshots[j].cap.id,
-                    "similarity": similarity,
-                }));
-                merge_map.entry(snapshots[j].cap.id.clone()).or_default().push(json!({
-                    "skill_id": snapshots[i].cap.id,
-                    "similarity": similarity,
-                }));
+                merge_map
+                    .entry(snapshots[i].cap.id.clone())
+                    .or_default()
+                    .push(json!({
+                        "skill_id": snapshots[j].cap.id,
+                        "similarity": similarity,
+                    }));
+                merge_map
+                    .entry(snapshots[j].cap.id.clone())
+                    .or_default()
+                    .push(json!({
+                        "skill_id": snapshots[i].cap.id,
+                        "similarity": similarity,
+                    }));
 
                 if let (Some(left), Some(right)) = (
                     snapshots[i].latest_snapshot.as_ref(),
@@ -208,7 +221,9 @@ fn run_skill_quality_guards_for_scope(
         let edges = graph_edges.clone();
         let _ = server.with_store_for_scope(scope, |store| {
             for edge in &edges {
-                store.add_edge(edge).map_err(|e| format!("skill graph edge: {e}"))?;
+                store
+                    .add_edge(edge)
+                    .map_err(|e| format!("skill graph edge: {e}"))?;
             }
             Ok(())
         });
@@ -219,10 +234,7 @@ fn run_skill_quality_guards_for_scope(
     let mut changed_caps = Vec::<HubCapability>::new();
 
     for snapshot in &mut snapshots {
-        let merge_hints = merge_map
-            .get(&snapshot.cap.id)
-            .cloned()
-            .unwrap_or_default();
+        let merge_hints = merge_map.get(&snapshot.cap.id).cloned().unwrap_or_default();
         let pagerank_score = snapshot
             .latest_snapshot
             .as_ref()
@@ -311,7 +323,10 @@ fn run_skill_quality_guards_for_scope(
 pub(crate) fn refresh_skill_quality_guards(server: &MemoryServer) -> Result<Value, String> {
     let global = run_skill_quality_guards_for_scope(server, DbScope::Global)?;
     let project = if server.has_project_db() {
-        Some(run_skill_quality_guards_for_scope(server, DbScope::Project)?)
+        Some(run_skill_quality_guards_for_scope(
+            server,
+            DbScope::Project,
+        )?)
     } else {
         None
     };
@@ -338,9 +353,7 @@ fn resolve_wiki_category(category: &str) -> String {
         "quant/market-analysis" | "market-analysis" | "market" => {
             "/wiki/quant/market-analysis".to_string()
         }
-        "quant/data-pipeline" | "data-pipeline" | "data" => {
-            "/wiki/quant/data-pipeline".to_string()
-        }
+        "quant/data-pipeline" | "data-pipeline" | "data" => "/wiki/quant/data-pipeline".to_string(),
         "quant/autoresearch" | "autoresearch" => "/wiki/quant/autoresearch".to_string(),
         "engineering" | "eng" | "code" | "coding" => "/wiki/engineering".to_string(),
         "engineering/architecture" | "architecture" | "arch" => {
@@ -532,14 +545,22 @@ pub(crate) async fn handle_wiki_lint(
             .list_by_path(path_prefix, limit, false)
             .map_err(|e| format!("wiki_lint global list: {e}"))
     })?;
-    nodes.extend(global_entries.into_iter().map(|entry| (entry, DbScope::Global)));
+    nodes.extend(
+        global_entries
+            .into_iter()
+            .map(|entry| (entry, DbScope::Global)),
+    );
     if server.has_project_db() {
         let project_entries = server.with_project_store_read(|store| {
             store
                 .list_by_path(path_prefix, limit, false)
                 .map_err(|e| format!("wiki_lint project list: {e}"))
         })?;
-        nodes.extend(project_entries.into_iter().map(|entry| (entry, DbScope::Project)));
+        nodes.extend(
+            project_entries
+                .into_iter()
+                .map(|entry| (entry, DbScope::Project)),
+        );
     }
 
     let mut orphans = Vec::new();
@@ -573,7 +594,10 @@ pub(crate) async fn handle_wiki_lint(
         if checks.iter().any(|check| check == "stale") {
             if let Some(ts) = parse_rfc3339_utc(&entry.timestamp) {
                 if ts < stale_cutoff
-                    && !matches!(entry.retention_policy.as_deref(), Some("permanent" | "pinned"))
+                    && !matches!(
+                        entry.retention_policy.as_deref(),
+                        Some("permanent" | "pinned")
+                    )
                 {
                     stale_nodes.push(json!({
                         "id": entry.id,

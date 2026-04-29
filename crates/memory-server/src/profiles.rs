@@ -6,6 +6,7 @@ enum ToolBundle {
     Remember,
     Coordinate,
     Operate,
+    AntigravityMinimal,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -15,6 +16,11 @@ pub(super) struct ToolProfile {
     coordinate: bool,
     operate: bool,
     admin: bool,
+    /// Antigravity host: a curated minimal allow-list intersected on top of
+    /// the union of other bundles. When set, only patterns in
+    /// ANTIGRAVITY_MINIMAL_TOOL_PATTERNS pass — even if other bundles would
+    /// otherwise allow them. Designed to keep the Antigravity tool tray small.
+    antigravity_minimal: bool,
 }
 
 impl ToolProfile {
@@ -25,6 +31,7 @@ impl ToolProfile {
             coordinate: false,
             operate: false,
             admin: false,
+            antigravity_minimal: false,
         }
     }
 
@@ -35,6 +42,7 @@ impl ToolProfile {
             coordinate: false,
             operate: false,
             admin: false,
+            antigravity_minimal: false,
         }
     }
 
@@ -45,6 +53,7 @@ impl ToolProfile {
             coordinate: true,
             operate: false,
             admin: false,
+            antigravity_minimal: false,
         }
     }
 
@@ -55,6 +64,7 @@ impl ToolProfile {
             coordinate: false,
             operate: true,
             admin: false,
+            antigravity_minimal: false,
         }
     }
 
@@ -65,6 +75,22 @@ impl ToolProfile {
             coordinate: true,
             operate: true,
             admin: true,
+            antigravity_minimal: false,
+        }
+    }
+
+    /// Antigravity host minimal profile: read + remember + handoff coordination,
+    /// constrained by an explicit allow-list (see ANTIGRAVITY_MINIMAL_TOOL_PATTERNS).
+    /// Replaces the previous behavior of mapping `antigravity` → full coordinate
+    /// bundle, which exposed ~30 tools in the IDE tool tray.
+    const fn antigravity() -> Self {
+        Self {
+            observe: true,
+            remember: true,
+            coordinate: true,
+            operate: false,
+            admin: false,
+            antigravity_minimal: true,
         }
     }
 
@@ -75,6 +101,9 @@ impl ToolProfile {
             coordinate: self.coordinate || other.coordinate,
             operate: self.operate || other.operate,
             admin: self.admin || other.admin,
+            // Minimal allow-list is "sticky": once requested, additive merges
+            // do not silently expand the surface. Use `admin`/`full` to override.
+            antigravity_minimal: self.antigravity_minimal || other.antigravity_minimal,
         }
     }
 
@@ -85,12 +114,16 @@ impl ToolProfile {
                 ToolBundle::Remember => self.remember,
                 ToolBundle::Coordinate => self.coordinate,
                 ToolBundle::Operate => self.operate,
+                ToolBundle::AntigravityMinimal => self.antigravity_minimal,
             }
     }
 
     pub(super) fn as_str(self) -> String {
         if self.admin {
             return "admin".to_string();
+        }
+        if self.antigravity_minimal {
+            return "antigravity".to_string();
         }
 
         let mut names = Vec::new();
@@ -134,6 +167,7 @@ const OBSERVE_TOOL_PATTERNS: &[&str] = &[
 
 const REMEMBER_TOOL_PATTERNS: &[&str] = &[
     "save_memory",
+    "remember",
     "tachi_wiki_write",
     "extract_facts",
     "run_skill",
@@ -172,6 +206,29 @@ const OPERATE_TOOL_PATTERNS: &[&str] = &[
     "wiki_lint",
 ];
 
+/// Antigravity host minimal allow-list. Intersected with the union of
+/// observe+remember+coordinate bundles so the IDE tray stays small.
+/// Order: read-first, then write, then handoff/coordination.
+const ANTIGRAVITY_MINIMAL_TOOL_PATTERNS: &[&str] = &[
+    // Discovery + lessons
+    "tachi_task_brief",
+    "tachi_progress_check",
+    "tachi_wiki_search",
+    "wiki_search",
+    "wiki_browse",
+    // Memory read
+    "search_memory",
+    "get_memory",
+    "list_memories",
+    // Memory write (canonical + low-friction shortcut)
+    "save_memory",
+    "remember",
+    "tachi_wiki_write",
+    // Cross-session handoff (the only coordination Antigravity needs)
+    "handoff_check",
+    "handoff_leave",
+];
+
 pub(super) fn parse_tool_profile(raw: &str) -> Option<ToolProfile> {
     let mut resolved: Option<ToolProfile> = None;
 
@@ -184,7 +241,8 @@ pub(super) fn parse_tool_profile(raw: &str) -> Option<ToolProfile> {
             "observe" | "read" | "reader" => ToolProfile::observe(),
             "remember" | "write" | "writer" | "ide" | "agent" | "claude" | "claude-code"
             | "codex" | "cursor" | "trae" => ToolProfile::remember(),
-            "coordinate" | "antigravity" => ToolProfile::coordinate(),
+            "coordinate" => ToolProfile::coordinate(),
+            "antigravity" => ToolProfile::antigravity(),
             "companion" | "copilot" | "coach" => ToolProfile::remember()
                 .merge(ToolProfile::coordinate())
                 .merge(ToolProfile::operate()),
@@ -236,6 +294,15 @@ fn tool_visible(
     if profile.admin {
         return true;
     }
+
+    // Antigravity host: intersect bundle membership with a curated allow-list
+    // so the IDE tool tray stays small (~12 tools instead of ~30).
+    if profile.allows(ToolBundle::AntigravityMinimal)
+        && !matches_any_pattern(tool_name, ANTIGRAVITY_MINIMAL_TOOL_PATTERNS.iter().copied())
+    {
+        return false;
+    }
+
     profile.allows(ToolBundle::Observe)
         && matches_any_pattern(tool_name, OBSERVE_TOOL_PATTERNS.iter().copied())
         || profile.allows(ToolBundle::Remember)
@@ -321,7 +388,7 @@ mod tests {
         );
         assert_eq!(
             parse_tool_profile("antigravity"),
-            Some(ToolProfile::coordinate())
+            Some(ToolProfile::antigravity())
         );
         assert_eq!(
             parse_tool_profile("workflow"),
@@ -447,6 +514,71 @@ mod tests {
                 "save_memory".to_string(),
                 "hub_register".to_string()
             ]
+        );
+    }
+
+    #[test]
+    fn antigravity_profile_restricts_to_minimal_allowlist() {
+        // Bundle membership says coordinate would normally include
+        // ghost_publish/post_card/check_inbox; the antigravity intersection
+        // must drop them.
+        let filtered = filter_tool_defs(
+            vec![
+                test_tool("search_memory"),
+                test_tool("save_memory"),
+                test_tool("remember"),
+                test_tool("get_memory"),
+                test_tool("list_memories"),
+                test_tool("tachi_task_brief"),
+                test_tool("tachi_progress_check"),
+                test_tool("tachi_wiki_search"),
+                test_tool("tachi_wiki_write"),
+                test_tool("handoff_check"),
+                test_tool("handoff_leave"),
+                // These should be filtered OUT by the minimal allow-list:
+                test_tool("ghost_publish"),
+                test_tool("post_card"),
+                test_tool("check_inbox"),
+                test_tool("update_card"),
+                test_tool("ingest_event"),
+                test_tool("memory_graph"),
+                test_tool("recommend_capability"),
+                test_tool("run_skill"),
+            ],
+            Some(ToolProfile::antigravity()),
+            None,
+        );
+        let names: Vec<String> = filtered
+            .into_iter()
+            .map(|tool| tool.name.into_owned())
+            .collect();
+        assert_eq!(
+            names,
+            vec![
+                "search_memory".to_string(),
+                "save_memory".to_string(),
+                "remember".to_string(),
+                "get_memory".to_string(),
+                "list_memories".to_string(),
+                "tachi_task_brief".to_string(),
+                "tachi_progress_check".to_string(),
+                "tachi_wiki_search".to_string(),
+                "tachi_wiki_write".to_string(),
+                "handoff_check".to_string(),
+                "handoff_leave".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn antigravity_profile_label_is_distinct() {
+        assert_eq!(ToolProfile::antigravity().as_str(), "antigravity");
+        // admin still wins over the minimal flag if explicitly merged.
+        assert_eq!(
+            ToolProfile::antigravity()
+                .merge(ToolProfile::admin())
+                .as_str(),
+            "admin"
         );
     }
 }

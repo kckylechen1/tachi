@@ -20,8 +20,13 @@ pub(super) async fn handle_get_memory(
         })?;
 
         if let Some(entry) = project_entry {
-            return serde_json::to_string(&slim_entry(&entry, DbScope::Project))
-                .map_err(|e| format!("Failed to serialize: {}", e));
+            return serde_json::to_string(&slim_entry_with_enrichment(
+                server,
+                &entry,
+                DbScope::Project,
+                Some(project_name.as_str()),
+            ))
+            .map_err(|e| format!("Failed to serialize: {}", e));
         }
     } else if server.has_project_db() {
         let project_entry = server.with_project_store_read(|store| {
@@ -31,8 +36,13 @@ pub(super) async fn handle_get_memory(
         })?;
 
         if let Some(entry) = project_entry {
-            return serde_json::to_string(&slim_entry(&entry, DbScope::Project))
-                .map_err(|e| format!("Failed to serialize: {}", e));
+            return serde_json::to_string(&slim_entry_with_enrichment(
+                server,
+                &entry,
+                DbScope::Project,
+                None,
+            ))
+            .map_err(|e| format!("Failed to serialize: {}", e));
         }
     }
 
@@ -43,8 +53,13 @@ pub(super) async fn handle_get_memory(
     })?;
 
     match global_entry {
-        Some(entry) => serde_json::to_string(&slim_entry(&entry, DbScope::Global))
-            .map_err(|e| format!("Failed to serialize: {}", e)),
+        Some(entry) => serde_json::to_string(&slim_entry_with_enrichment(
+            server,
+            &entry,
+            DbScope::Global,
+            None,
+        ))
+        .map_err(|e| format!("Failed to serialize: {}", e)),
         None => serde_json::to_string(&json!({
             "error": "Memory not found"
         }))
@@ -259,9 +274,7 @@ pub(super) async fn handle_get_domain(
     })?;
 
     match domain {
-        Some(d) => {
-            serde_json::to_string(&d).map_err(|e| format!("Failed to serialize: {}", e))
-        }
+        Some(d) => serde_json::to_string(&d).map_err(|e| format!("Failed to serialize: {}", e)),
         None => serde_json::to_string(&json!({ "error": "Domain not found", "name": params.name }))
             .map_err(|e| format!("Failed to serialize: {}", e)),
     }

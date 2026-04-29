@@ -318,7 +318,8 @@ fn project_pack_to_agent(pack: &Pack, agent: AgentKind) -> Result<ProjectionSumm
     let (base_dir_template, _) = agent.skill_target();
     let home = dirs::home_dir().ok_or_else(|| "Cannot determine home directory".to_string())?;
     let base_dir = base_dir_template.replace("~", &home.to_string_lossy());
-    let pack_short_name = sanitize_safe_path_name(pack.id.split('/').next_back().unwrap_or(&pack.id));
+    let pack_short_name =
+        sanitize_safe_path_name(pack.id.split('/').next_back().unwrap_or(&pack.id));
     let target_dir = PathBuf::from(&base_dir).join(&pack_short_name);
     std::fs::create_dir_all(&target_dir)
         .map_err(|e| format!("Failed to create {}: {e}", target_dir.display()))?;

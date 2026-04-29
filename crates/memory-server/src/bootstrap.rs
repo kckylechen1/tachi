@@ -3,7 +3,10 @@ use serde::Serialize;
 
 const SETUP_API_KEYS: [(&str, &str); 5] = [
     ("VOYAGE_API_KEY", "Voyage embeddings (voyage-4)"),
-    ("VOYAGE_RERANK_API_KEY", "Voyage reranking (rerank-2.5) — optional"),
+    (
+        "VOYAGE_RERANK_API_KEY",
+        "Voyage reranking (rerank-2.5) — optional",
+    ),
     ("SILICONFLOW_API_KEY", "SiliconFlow extraction"),
     ("MINIMAX_API_KEY", "MiniMax distill/summary"),
     ("REASONING_API_KEY", "GLM-5.1 reasoning lane"),
@@ -93,9 +96,7 @@ fn open_cli_store(db_path: &PathBuf) -> Result<MemoryStore, Box<dyn std::error::
     Ok(MemoryStore::open(db_str)?)
 }
 
-fn open_cli_store_read_only(
-    db_path: &PathBuf,
-) -> Result<MemoryStore, Box<dyn std::error::Error>> {
+fn open_cli_store_read_only(db_path: &PathBuf) -> Result<MemoryStore, Box<dyn std::error::Error>> {
     let db_str = db_path.to_str().ok_or_else(|| {
         std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
@@ -211,10 +212,9 @@ fn collect_memory_db_files(root: &std::path::Path, out: &mut Vec<PathBuf>, max_d
             continue;
         }
 
-        if path.is_dir()
-            && max_depth > 0 {
-                collect_memory_db_files(&path, out, max_depth.saturating_sub(1));
-            }
+        if path.is_dir() && max_depth > 0 {
+            collect_memory_db_files(&path, out, max_depth.saturating_sub(1));
+        }
     }
 }
 
@@ -418,7 +418,8 @@ pub(crate) fn build_setup_report(
         })
         .collect::<Vec<_>>();
 
-    let agent_configs = [(
+    let agent_configs = [
+        (
             "amp",
             home.join("Library/Application Support/Amp/settings.json"),
         ),
@@ -427,7 +428,8 @@ pub(crate) fn build_setup_report(
         ("gemini", home.join(".gemini").join("mcp.json")),
         ("codex", home.join(".codex")),
         ("openclaw", home.join(".openclaw").join("openclaw.json")),
-        ("opencode", home.join(".opencode"))];
+        ("opencode", home.join(".opencode")),
+    ];
     let detected_agents = agent_configs
         .iter()
         .filter(|(_, path)| path.exists())
@@ -997,7 +999,12 @@ async fn run_setup_command(
     // 2. Pipeline
     let pipeline_enabled = env_vars
         .get("ENABLE_PIPELINE")
-        .map(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"))
+        .map(|v| {
+            matches!(
+                v.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
         .unwrap_or(false);
 
     if !pipeline_enabled {
@@ -1089,7 +1096,11 @@ async fn run_setup_command(
     }
 
     std::fs::write(&config_env_path, output)?;
-    println!("\nWrote {} entries to {}", new_entries.len(), config_env_path.display());
+    println!(
+        "\nWrote {} entries to {}",
+        new_entries.len(),
+        config_env_path.display()
+    );
     println!("Restart the daemon for changes to take effect.");
     Ok(())
 }
@@ -1157,7 +1168,10 @@ async fn run_doctor_command(
     let mut m = crate::manifest::Manifest::load_or_empty(&manifest_path);
     m.populate_from_doctor(&report);
     if let Err(e) = m.save(&manifest_path) {
-        eprintln!("[doctor] warning: failed to update manifest at {}: {e}", manifest_path.display());
+        eprintln!(
+            "[doctor] warning: failed to update manifest at {}: {e}",
+            manifest_path.display()
+        );
     }
 
     // Branch #5: optional foundry job-status histogram per manifest DB.
@@ -1178,7 +1192,11 @@ async fn run_doctor_command(
     } else {
         println!("{}", crate::doctor::render_report(&report));
         println!();
-        println!("manifest: {} ({} dbs recorded)", manifest_path.display(), m.dbs.len());
+        println!(
+            "manifest: {} ({} dbs recorded)",
+            manifest_path.display(),
+            m.dbs.len()
+        );
         if let Some(jobs) = &jobs_section {
             println!("\n=== foundry jobs ===");
             for entry in jobs {
@@ -1270,7 +1288,10 @@ async fn run_manifest_command(
         ManifestAction::Init | ManifestAction::Refresh => {
             let roots = crate::doctor::default_scan_roots(home, git_root.map(|p| p.as_path()));
             let quarantine_dir = app_home.join("quarantine");
-            let opts = crate::doctor::ScanOptions { auto_fix: false, max_depth: 10 };
+            let opts = crate::doctor::ScanOptions {
+                auto_fix: false,
+                max_depth: 10,
+            };
             let report = crate::doctor::scan(&roots, &quarantine_dir, opts);
             let mut m = crate::manifest::Manifest::load_or_empty(&manifest_path);
             m.populate_from_doctor(&report);
@@ -1306,7 +1327,12 @@ async fn run_manifest_command(
                 for e in matches {
                     println!(
                         "[scope] {} role={:?} owner={} writable={} schema={} last={}",
-                        e.path, e.role, e.owner, e.allow_write, e.schema_kind, e.last_classification
+                        e.path,
+                        e.role,
+                        e.owner,
+                        e.allow_write,
+                        e.schema_kind,
+                        e.last_classification
                     );
                 }
             }
@@ -1315,7 +1341,10 @@ async fn run_manifest_command(
         ManifestAction::Sweep { apply, json } => {
             let roots = crate::doctor::default_scan_roots(home, git_root.map(|p| p.as_path()));
             let quarantine_dir = app_home.join("quarantine");
-            let opts = crate::doctor::ScanOptions { auto_fix: false, max_depth: 10 };
+            let opts = crate::doctor::ScanOptions {
+                auto_fix: false,
+                max_depth: 10,
+            };
             let report = crate::doctor::scan(&roots, &quarantine_dir, opts);
             let m = crate::manifest::Manifest::load_or_empty(&manifest_path);
             let mut plan = crate::manifest::plan_sweep(&report, &m, &quarantine_dir);
@@ -1333,10 +1362,20 @@ async fn run_manifest_command(
                     plan.skipped.len()
                 );
                 for a in &plan.planned {
-                    println!("  [plan]   {} → {}  ({})", a.path, a.quarantine_to.as_deref().unwrap_or("-"), a.reason);
+                    println!(
+                        "  [plan]   {} → {}  ({})",
+                        a.path,
+                        a.quarantine_to.as_deref().unwrap_or("-"),
+                        a.reason
+                    );
                 }
                 for a in &plan.applied {
-                    println!("  [moved]  {} → {}  ({})", a.path, a.quarantine_to.as_deref().unwrap_or("-"), a.reason);
+                    println!(
+                        "  [moved]  {} → {}  ({})",
+                        a.path,
+                        a.quarantine_to.as_deref().unwrap_or("-"),
+                        a.reason
+                    );
                 }
                 for a in &plan.skipped {
                     println!("  [skip]   {}  ({})", a.path, a.note);
@@ -1361,18 +1400,15 @@ async fn run_rescue_command(
             apply,
             json,
         } => {
-            let source_path: PathBuf = source.unwrap_or_else(|| {
-                home.join(".gemini").join("antigravity").join("memory.db")
-            });
+            let source_path: PathBuf = source
+                .unwrap_or_else(|| home.join(".gemini").join("antigravity").join("memory.db"));
             let targets_root_path: PathBuf =
                 targets_root.unwrap_or_else(|| home.join(".tachi").join("projects"));
 
             if !source_path.exists() {
-                return Err(format!(
-                    "rescue source DB not found: {}",
-                    source_path.display()
-                )
-                .into());
+                return Err(
+                    format!("rescue source DB not found: {}", source_path.display()).into(),
+                );
             }
             if !targets_root_path.exists() {
                 return Err(format!(
@@ -1430,6 +1466,8 @@ async fn run_rescue_command(
 async fn run_cli_command(
     command: Commands,
     db_path: &PathBuf,
+    project_db_path: Option<&PathBuf>,
+    app_home: &PathBuf,
 ) -> Result<(), Box<dyn std::error::Error>> {
     match command {
         Commands::Serve => Ok(()),
@@ -1655,15 +1693,403 @@ async fn run_cli_command(
             // Pre-handled above before run_cli_command dispatch.
             Ok(())
         }
+        Commands::Remember {
+            text,
+            tags,
+            scope,
+            project,
+            path,
+            importance,
+            category,
+            topic,
+            domain,
+            retention_policy,
+            summary,
+            force,
+        } => {
+            let mut args = serde_json::Map::new();
+            args.insert("text".into(), json!(text));
+            if !tags.is_empty() {
+                args.insert("tags".into(), json!(tags));
+            }
+            if let Some(v) = &scope {
+                args.insert("scope".into(), json!(v));
+            }
+            if let Some(v) = &project {
+                args.insert("project".into(), json!(v));
+            }
+            if let Some(v) = &path {
+                args.insert("path".into(), json!(v));
+            }
+            if let Some(v) = importance {
+                args.insert("importance".into(), json!(v));
+            }
+            if let Some(v) = &category {
+                args.insert("category".into(), json!(v));
+            }
+            if let Some(v) = &topic {
+                args.insert("topic".into(), json!(v));
+            }
+            if let Some(v) = &domain {
+                args.insert("domain".into(), json!(v));
+            }
+            if let Some(v) = &retention_policy {
+                args.insert("retention_policy".into(), json!(v));
+            }
+            if let Some(v) = &summary {
+                args.insert("summary".into(), json!(v));
+            }
+            if force {
+                args.insert("force".into(), json!(true));
+            }
+
+            let body = dispatch_cli_tool(
+                "remember",
+                args,
+                db_path,
+                project_db_path,
+                app_home,
+                |server, args_map| {
+                    Box::pin(async move {
+                        let params: RememberParams =
+                            serde_json::from_value(serde_json::Value::Object(args_map))
+                                .map_err(|e| format!("invalid remember args: {e}"))?;
+                        crate::memory_search_ops::handle_remember(&server, params).await
+                    })
+                },
+            )
+            .await?;
+            print_cli_tool_result(&body)
+        }
+        Commands::WikiSearch {
+            query,
+            category,
+            top_k,
+            project,
+        } => {
+            let mut args = serde_json::Map::new();
+            args.insert("query".into(), json!(query));
+            args.insert("top_k".into(), json!(top_k));
+            if let Some(v) = &category {
+                args.insert("category".into(), json!(v));
+            }
+            if let Some(v) = &project {
+                args.insert("project".into(), json!(v));
+            }
+
+            let body = dispatch_cli_tool(
+                "tachi_wiki_search",
+                args,
+                db_path,
+                project_db_path,
+                app_home,
+                |server, args_map| {
+                    Box::pin(async move {
+                        let params: WikiSearchParams =
+                            serde_json::from_value(serde_json::Value::Object(args_map))
+                                .map_err(|e| format!("invalid wiki_search args: {e}"))?;
+                        crate::wiki_ops::handle_wiki_search(&server, params).await
+                    })
+                },
+            )
+            .await?;
+            print_cli_tool_result(&body)
+        }
+        Commands::WikiWrite {
+            title,
+            text,
+            path,
+            topic,
+            summary,
+            keywords,
+            entities,
+            importance,
+            scope,
+            project,
+            domain,
+            force,
+        } => {
+            let mut args = serde_json::Map::new();
+            args.insert("title".into(), json!(title));
+            args.insert("text".into(), json!(text));
+            if let Some(v) = &path {
+                args.insert("path".into(), json!(v));
+            }
+            if let Some(v) = &topic {
+                args.insert("topic".into(), json!(v));
+            }
+            if let Some(v) = &summary {
+                args.insert("summary".into(), json!(v));
+            }
+            if !keywords.is_empty() {
+                args.insert("keywords".into(), json!(keywords));
+            }
+            if !entities.is_empty() {
+                args.insert("entities".into(), json!(entities));
+            }
+            if let Some(v) = importance {
+                args.insert("importance".into(), json!(v));
+            }
+            if let Some(v) = &scope {
+                args.insert("scope".into(), json!(v));
+            }
+            if let Some(v) = &project {
+                args.insert("project".into(), json!(v));
+            }
+            if let Some(v) = &domain {
+                args.insert("domain".into(), json!(v));
+            }
+            if force {
+                args.insert("force".into(), json!(true));
+            }
+
+            let body = dispatch_cli_tool(
+                "tachi_wiki_write",
+                args,
+                db_path,
+                project_db_path,
+                app_home,
+                |server, args_map| {
+                    Box::pin(async move {
+                        let params: WikiWriteParams =
+                            serde_json::from_value(serde_json::Value::Object(args_map))
+                                .map_err(|e| format!("invalid wiki_write args: {e}"))?;
+                        crate::copilot_ops::handle_tachi_wiki_write(&server, params).await
+                    })
+                },
+            )
+            .await?;
+            print_cli_tool_result(&body)
+        }
+        Commands::List {
+            path_prefix,
+            limit,
+            include_archived,
+        } => {
+            let mut args = serde_json::Map::new();
+            args.insert("path_prefix".into(), json!(path_prefix));
+            args.insert("limit".into(), json!(limit));
+            if include_archived {
+                args.insert("include_archived".into(), json!(true));
+            }
+
+            let body = dispatch_cli_tool(
+                "list_memories",
+                args,
+                db_path,
+                project_db_path,
+                app_home,
+                |server, args_map| {
+                    Box::pin(async move {
+                        let params: ListMemoriesParams =
+                            serde_json::from_value(serde_json::Value::Object(args_map))
+                                .map_err(|e| format!("invalid list_memories args: {e}"))?;
+                        crate::memory_ops::handle_list_memories(&server, params).await
+                    })
+                },
+            )
+            .await?;
+            print_cli_tool_result(&body)
+        }
+        Commands::Get {
+            id,
+            project,
+            include_archived,
+        } => {
+            let mut args = serde_json::Map::new();
+            args.insert("id".into(), json!(id));
+            if let Some(v) = &project {
+                args.insert("project".into(), json!(v));
+            }
+            if include_archived {
+                args.insert("include_archived".into(), json!(true));
+            }
+
+            let body = dispatch_cli_tool(
+                "get_memory",
+                args,
+                db_path,
+                project_db_path,
+                app_home,
+                |server, args_map| {
+                    Box::pin(async move {
+                        let params: GetMemoryParams =
+                            serde_json::from_value(serde_json::Value::Object(args_map))
+                                .map_err(|e| format!("invalid get_memory args: {e}"))?;
+                        crate::memory_ops::handle_get_memory(&server, params).await
+                    })
+                },
+            )
+            .await?;
+            print_cli_tool_result(&body)
+        }
+        Commands::Extract { text, source } => {
+            let mut args = serde_json::Map::new();
+            args.insert("text".into(), json!(text));
+            args.insert("source".into(), json!(source));
+
+            let body = dispatch_cli_tool(
+                "extract_facts",
+                args,
+                db_path,
+                project_db_path,
+                app_home,
+                |server, args_map| {
+                    Box::pin(async move {
+                        let params: ExtractFactsParams =
+                            serde_json::from_value(serde_json::Value::Object(args_map))
+                                .map_err(|e| format!("invalid extract_facts args: {e}"))?;
+                        crate::pipeline_ops::handle_extract_facts(&server, params).await
+                    })
+                },
+            )
+            .await?;
+            print_cli_tool_result(&body)
+        }
     }
+}
+
+/// Pretty-print a tool's JSON-string output. Falls back to raw text if the
+/// result is not valid JSON (defensive: handlers always return JSON today).
+fn print_cli_tool_result(body: &str) -> Result<(), Box<dyn std::error::Error>> {
+    match serde_json::from_str::<serde_json::Value>(body) {
+        Ok(v) => print_pretty_json(&v),
+        Err(_) => {
+            println!("{body}");
+            Ok(())
+        }
+    }
+}
+
+/// Dispatch a CLI tool invocation: try the running daemon first; on miss,
+/// build a transient in-process MemoryServer and call the handler directly.
+/// Either path returns the tool's JSON string body.
+async fn dispatch_cli_tool<F, Fut>(
+    tool_name: &str,
+    args: serde_json::Map<String, serde_json::Value>,
+    global_db: &PathBuf,
+    project_db: Option<&PathBuf>,
+    app_home: &PathBuf,
+    in_process: F,
+) -> Result<String, Box<dyn std::error::Error>>
+where
+    F: FnOnce(MemoryServer, serde_json::Map<String, serde_json::Value>) -> Fut,
+    Fut: std::future::Future<Output = Result<String, String>>,
+{
+    if let Some(info) = crate::cli_client::detect_daemon(app_home).await {
+        match crate::cli_client::call_daemon_tool(&info, tool_name, args.clone()).await {
+            Ok(body) => return Ok(body),
+            Err(e) => {
+                eprintln!(
+                    "[cli] daemon dispatch failed ({e}); falling back to in-process execution"
+                );
+            }
+        }
+    }
+    let server = crate::cli_client::build_in_process_server(global_db, project_db)?;
+    let body = in_process(server, args)
+        .await
+        .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
+    Ok(body)
 }
 
 pub(super) fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     tokio_main(cli)
 }
 
+/// Initialize the global tracing subscriber.
+///
+/// Sink resolution (PR7):
+///   1. `~/.tachi/logs/tachi.log` (created if missing) — append mode.
+///   2. `/tmp/tachi.log` fallback when (1) is unwritable (read-only HOME,
+///      sandboxed runtime, etc.).
+///   3. Pure stderr fallback when even /tmp is unwritable.
+///
+/// Filter level: `RUST_LOG` if set, else `info,memory_server=info,rmcp=warn`.
+///
+/// Sensitive-payload safety: this initializer ONLY wires the sink. It does not
+/// add any new instrumentation that would log API keys, secrets, or large user
+/// payloads. Existing call sites already redact sensitive params (cf. the
+/// `tool_audit` module). Adding `tracing::info!` calls that include user text
+/// is out of scope for PR7 — operators who need verbose payload logging must
+/// opt in explicitly via `RUST_LOG=trace`.
+///
+/// This function is idempotent in practice (only the FIRST call wins because
+/// `tracing::subscriber::set_global_default` returns Err on the second), and
+/// errors are intentionally swallowed: a missing log sink must never crash
+/// the daemon.
+fn init_tracing(home: &std::path::Path) {
+    use std::io::Write as _;
+    use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
+
+    let env_filter = EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| EnvFilter::new("info,memory_server=info,rmcp=warn"));
+
+    // Try the canonical location first, then /tmp, then bare stderr.
+    let log_dir = home.join(".tachi").join("logs");
+    let primary = log_dir.join("tachi.log");
+    let fallback = std::path::PathBuf::from("/tmp/tachi.log");
+
+    let opener = |path: &std::path::Path| -> Option<std::fs::File> {
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+            .ok()
+    };
+
+    let (writer, sink_label): (Box<dyn std::io::Write + Send + Sync>, String) =
+        if let Some(file) = opener(&primary) {
+            (Box::new(file), primary.display().to_string())
+        } else if let Some(file) = opener(&fallback) {
+            (Box::new(file), fallback.display().to_string())
+        } else {
+            (Box::new(std::io::stderr()), "stderr".to_string())
+        };
+
+    // Wrap the writer behind Mutex so MakeWriter can hand out shared refs.
+    let shared: std::sync::Arc<std::sync::Mutex<Box<dyn std::io::Write + Send + Sync>>> =
+        std::sync::Arc::new(std::sync::Mutex::new(writer));
+
+    struct SharedWriter(std::sync::Arc<std::sync::Mutex<Box<dyn std::io::Write + Send + Sync>>>);
+    impl std::io::Write for SharedWriter {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().write(buf)
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            self.0.lock().unwrap().flush()
+        }
+    }
+
+    let make_writer = move || SharedWriter(shared.clone());
+
+    let file_layer = fmt::Layer::new()
+        .with_writer(make_writer)
+        .with_ansi(false)
+        .with_target(true);
+
+    // Best-effort registration. A second call (e.g. from a test) becomes a
+    // no-op because `set_global_default` was already set.
+    let _ = tracing_subscriber::registry()
+        .with(env_filter)
+        .with(file_layer)
+        .try_init();
+
+    // Mirror the sink choice to stderr so operators can find their logs.
+    let _ = writeln!(std::io::stderr(), "tachi: logging to {sink_label}");
+}
+
 #[tokio::main]
 async fn tokio_main(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
+    // PR7 — install the tracing sink before doing anything else so early errors
+    // (config load, manifest resolution, daemon bind) are captured.
+    let home_for_logs = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
+    init_tracing(&home_for_logs);
+    tracing::info!(version = env!("CARGO_PKG_VERSION"), "tachi memory-server starting");
+
     // Load config from dotenv files (same as before)
     let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
     let expand_user_path = |raw: &str| {
@@ -1735,6 +2161,67 @@ async fn tokio_main(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             }
         }
         default_global
+    };
+
+    // ─── Manifest-driven resolution (PR5) ───────────────────────────────────
+    //
+    // The manifest (`~/.tachi/manifest.json`, populated by `tachi doctor` /
+    // `tachi manifest refresh`) is the durable source of truth for "which
+    // memory.db file is the global one". Heuristic discovery above can pick a
+    // freshly created empty DB when the user actually has data living at a
+    // non-standard path. Consult the manifest:
+    //
+    //   * No CLI override + manifest has a global entry  → switch to manifest path.
+    //   * Explicit --global-db / MEMORY_DB_PATH that disagrees with the manifest
+    //     → honor the override but warn loudly so the user can spot misconfig.
+    //   * Manifest entry exists but is marked non-writable (last_classification
+    //     other than "healthy") → refuse with an actionable hint.
+    //
+    // Failure to read the manifest is non-fatal: we proceed with the heuristic
+    // result so first-run installs still work without `tachi doctor`.
+    let manifest_path = crate::manifest::Manifest::default_path(&home);
+    let manifest_opt = if manifest_path.exists() {
+        crate::manifest::Manifest::load(&manifest_path).ok()
+    } else {
+        None
+    };
+    let global_db_path = if let Some(m) = manifest_opt.as_ref() {
+        if let Some(entry) = m.global() {
+            let manifest_global = PathBuf::from(&entry.path);
+            let user_overrode = cli.global_db.is_some() || std::env::var_os("MEMORY_DB_PATH").is_some();
+            if user_overrode {
+                if global_db_path != manifest_global {
+                    eprintln!(
+                        "warning: --global-db ({}) does not match manifest global ({}). \
+                         Honoring CLI override; run `tachi manifest refresh` to update the manifest.",
+                        global_db_path.display(),
+                        manifest_global.display()
+                    );
+                }
+                global_db_path
+            } else {
+                // No override → trust the manifest.
+                if let Err(err) = m.check_writable(&entry.path) {
+                    return Err(format!(
+                        "manifest global DB is not writable: {err}. \
+                         Run `tachi doctor` to inspect, then `tachi manifest refresh` once resolved."
+                    )
+                    .into());
+                }
+                if global_db_path != manifest_global {
+                    eprintln!(
+                        "info: using manifest global DB ({}) instead of heuristic default ({}).",
+                        manifest_global.display(),
+                        global_db_path.display()
+                    );
+                }
+                manifest_global
+            }
+        } else {
+            global_db_path
+        }
+    } else {
+        global_db_path
     };
 
     if let Some(parent) = global_db_path.parent() {
@@ -1891,7 +2378,13 @@ async fn tokio_main(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     }
 
     if !matches!(command, Commands::Serve) {
-        return run_cli_command(command, &global_db_path).await;
+        return run_cli_command(
+            command,
+            &global_db_path,
+            project_db_path.as_ref(),
+            &app_home,
+        )
+        .await;
     }
 
     // Ensure parent dirs exist
@@ -1958,7 +2451,9 @@ async fn tokio_main(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 interval.tick().await;
                 eprintln!("[gc] Running scheduled garbage collection...");
                 match gc_server.with_global_store(|store: &mut MemoryStore| {
-                    let mut gc = store.gc_tables(&memory_core::GcConfig::default()).map_err(|e| format!("{e}"))?;
+                    let mut gc = store
+                        .gc_tables(&memory_core::GcConfig::default())
+                        .map_err(|e| format!("{e}"))?;
                     let kanban_deleted =
                         gc_expired_kanban_cards(store, DEFAULT_KANBAN_GC_MAX_AGE_DAYS)?;
                     if let Some(object) = gc.as_object_mut() {
@@ -1987,7 +2482,9 @@ async fn tokio_main(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 }
                 if gc_server.has_project_db() {
                     match gc_server.with_project_store(|store: &mut MemoryStore| {
-                        let mut gc = store.gc_tables(&memory_core::GcConfig::default()).map_err(|e| format!("{e}"))?;
+                        let mut gc = store
+                            .gc_tables(&memory_core::GcConfig::default())
+                            .map_err(|e| format!("{e}"))?;
                         let kanban_deleted =
                             gc_expired_kanban_cards(store, DEFAULT_KANBAN_GC_MAX_AGE_DAYS)?;
                         if let Some(object) = gc.as_object_mut() {
@@ -2259,6 +2756,36 @@ async fn tokio_main(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
 
         eprintln!("Tachi daemon listening on http://{bind_addr}");
 
+        // Write daemon discovery file so CLI invocations can forward writes
+        // to the running daemon instead of contending for the DB write lock.
+        let pid_path = app_home.join("daemon.pid");
+        let pid_payload = serde_json::json!({
+            "pid": std::process::id(),
+            "port": port,
+            "url": format!("http://{bind_addr}/mcp"),
+            "global_db": global_db_path.display().to_string(),
+            "project_db": project_db_path
+                .as_ref()
+                .map(|p| p.display().to_string()),
+            "started_at": Utc::now().to_rfc3339(),
+            "version": env!("CARGO_PKG_VERSION"),
+        });
+        if let Some(parent) = pid_path.parent() {
+            let _ = tokio::fs::create_dir_all(parent).await;
+        }
+        if let Err(e) = tokio::fs::write(
+            &pid_path,
+            serde_json::to_string_pretty(&pid_payload).unwrap_or_default(),
+        )
+        .await
+        {
+            eprintln!(
+                "warning: failed to write daemon discovery file {}: {e}",
+                pid_path.display()
+            );
+        }
+        let pid_path_cleanup = pid_path.clone();
+
         tokio::select! {
             result = axum::serve(listener, router)
                 .with_graceful_shutdown(async move { ct_shutdown.cancelled_owned().await }) => {
@@ -2271,6 +2798,9 @@ async fn tokio_main(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 ct.cancel();
             }
         }
+
+        // Best-effort cleanup of daemon discovery file
+        let _ = tokio::fs::remove_file(&pid_path_cleanup).await;
     } else {
         // stdio mode (default)
         let transport = (stdin(), stdout());
@@ -2466,7 +2996,10 @@ async fn run_backfill_fts(
     println!("Total:   {total}");
     println!("FTS:     {with_fts}");
     println!("Missing: {missing}");
-    println!("Mode:    {}", if full { "full rebuild" } else { "incremental" });
+    println!(
+        "Mode:    {}",
+        if full { "full rebuild" } else { "incremental" }
+    );
 
     if !full && missing == 0 {
         println!("\n✅ All entries have FTS index!");

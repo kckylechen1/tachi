@@ -67,6 +67,12 @@ pub(crate) async fn handle_hub_register(
             );
         }
         resp.insert("discovery".into(), json!("deferred"));
+        // PR6: surface a structured eligibility signal so `hub_quick_add` can
+        // safely auto-approve trusted-command MCP registrations without ever
+        // bypassing the allowlist for untrusted commands. SSE/HTTP transports
+        // (`auto_enabled = true` because there is no local exec risk) are also
+        // marked eligible.
+        resp.insert("auto_approval_eligible".into(), json!(auto_enabled));
 
         cap_definition = serde_json::to_string(&def)
             .map_err(|e| format!("Failed to serialize MCP definition: {e}"))?;

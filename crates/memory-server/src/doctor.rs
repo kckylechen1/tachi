@@ -106,7 +106,7 @@ pub struct DoctorFinding {
 #[derive(Debug, Clone, Serialize)]
 pub struct AutoFixAction {
     pub path: String,
-    pub action: String, // quarantine_placeholder | checkpoint_wal_copy
+    pub action: String,  // quarantine_placeholder | checkpoint_wal_copy
     pub outcome: String, // ok | error
     pub note: String,
     pub destination: Option<String>,
@@ -244,7 +244,10 @@ pub fn classify_one(path: &Path) -> DoctorFinding {
     let file_size = fs::metadata(path).map(|m| m.len()).unwrap_or(0);
     let wal_path = sidecar(path, "-wal");
     let shm_path = sidecar(path, "-shm");
-    let has_wal = wal_path.exists() && fs::metadata(&wal_path).map(|m| m.len() > 0).unwrap_or(false);
+    let has_wal = wal_path.exists()
+        && fs::metadata(&wal_path)
+            .map(|m| m.len() > 0)
+            .unwrap_or(false);
     let has_shm = shm_path.exists();
 
     let basename = path
@@ -478,7 +481,10 @@ pub fn classify_one(path: &Path) -> DoctorFinding {
 fn make_immutable_uri(path: &Path) -> String {
     // sqlite URI percent-encoding: only ?, #, and space need handling for typical paths.
     let s = path.to_string_lossy().to_string();
-    let encoded = s.replace('?', "%3f").replace('#', "%23").replace(' ', "%20");
+    let encoded = s
+        .replace('?', "%3f")
+        .replace('#', "%23")
+        .replace(' ', "%20");
     format!("file:{encoded}?mode=ro&immutable=1")
 }
 
@@ -566,10 +572,7 @@ fn scope_hint_for(path: &Path) -> String {
 
 /// Apply the SAFE auto-fix categories: quarantine placeholders, copy-checkpoint
 /// WAL orphans. Returns the action log. `quarantine_root` is created if needed.
-pub fn auto_fix_safe(
-    findings: &[DoctorFinding],
-    quarantine_root: &Path,
-) -> Vec<AutoFixAction> {
+pub fn auto_fix_safe(findings: &[DoctorFinding], quarantine_root: &Path) -> Vec<AutoFixAction> {
     let mut actions = Vec::new();
     let ts = Utc::now().format("%Y%m%dT%H%M%SZ").to_string();
 
@@ -723,11 +726,7 @@ impl Default for ScanOptions {
     }
 }
 
-pub fn scan(
-    roots: &[PathBuf],
-    quarantine_root: &Path,
-    options: ScanOptions,
-) -> DoctorReport {
+pub fn scan(roots: &[PathBuf], quarantine_root: &Path, options: ScanOptions) -> DoctorReport {
     let candidates = collect_candidates(roots, options.max_depth);
     let findings: Vec<DoctorFinding> = candidates.iter().map(|p| classify_one(p)).collect();
 
@@ -771,12 +770,13 @@ pub fn render_report(report: &DoctorReport) -> String {
     let mut lines = Vec::new();
     lines.push("tachi doctor v2".to_string());
     lines.push(format!("generated_at: {}", report.generated_at));
-    lines.push(format!("scanned_roots: {}", report.scanned_roots.join(", ")));
+    lines.push(format!(
+        "scanned_roots: {}",
+        report.scanned_roots.join(", ")
+    ));
     lines.push(format!(
         "summary: {} dbs, {} memories, {} jobs",
-        report.summary.total_databases,
-        report.summary.total_memories,
-        report.summary.total_jobs,
+        report.summary.total_databases, report.summary.total_memories, report.summary.total_jobs,
     ));
     lines.push(format!(
         "  ✅ healthy={} 🟡 vec_missing={} 🟠 wal_orphan={} 🔴 corrupt={} 🟣 legacy={} ⚪ placeholder={} 📦 backup={}",
@@ -927,7 +927,11 @@ mod tests {
     fn classify_corrupt() {
         let dir = tempdir().unwrap();
         let p = dir.path().join("memory.db");
-        fs::write(&p, b"this is not a sqlite database, just some junk bytes for testing 1234567890").unwrap();
+        fs::write(
+            &p,
+            b"this is not a sqlite database, just some junk bytes for testing 1234567890",
+        )
+        .unwrap();
         let f = classify_one(&p);
         assert_eq!(f.classification, DbClassification::Corrupt);
         assert!(f.error.is_some());

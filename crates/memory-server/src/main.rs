@@ -9,6 +9,7 @@ mod capability_ops;
 mod capture_gate;
 mod clawdoctor;
 mod cli;
+mod cli_client;
 mod copilot_ops;
 mod dlq_ops;
 mod doctor;
@@ -83,7 +84,8 @@ use crate::hub_helpers::{
 };
 use crate::hub_ops::{
     handle_distill_trajectory, handle_export_skills, handle_hub_call, handle_hub_disconnect,
-    handle_hub_discover, handle_hub_feedback, handle_hub_get, handle_hub_register,
+    handle_hub_discover, handle_hub_feedback, handle_hub_get, handle_hub_quick_add,
+    handle_hub_register,
     handle_hub_review, handle_hub_set_active_version, handle_hub_set_enabled, handle_hub_stats,
     handle_run_skill, handle_skill_evolve, handle_tachi_audit_log, handle_vc_bind, handle_vc_list,
     handle_vc_register, handle_vc_resolve,
@@ -103,7 +105,8 @@ use crate::memory_ops::{
     handle_memory_stats, handle_register_domain,
 };
 use crate::memory_search_ops::{
-    handle_find_similar_memory, handle_save_memory, handle_search_memory, search_memory_rows,
+    handle_find_similar_memory, handle_remember, handle_save_memory, handle_search_memory,
+    search_memory_rows,
 };
 use crate::pack_ops::{
     handle_pack_get, handle_pack_list, handle_pack_project, handle_pack_register,
@@ -120,7 +123,8 @@ use crate::sandbox_ops::{
     handle_sandbox_list_policies, handle_sandbox_set_policy, handle_sandbox_set_rule,
 };
 use crate::shared_defs::{
-    categorize_error, slim_entry, slim_l0_rule, slim_search_result, DeadLetter, DLQ_MAX_ENTRIES,
+    categorize_error, slim_entry, slim_entry_with_enrichment, slim_l0_rule, slim_search_result,
+    DeadLetter, DLQ_MAX_ENTRIES,
     DLQ_TTL_SECS,
 };
 use crate::skill_chain_ops::handle_chain_skills;
@@ -202,6 +206,12 @@ const RATE_LIMIT_BURST_WINDOW: Duration = Duration::from_secs(60);
 const RATE_LIMIT_MAX_SESSIONS: usize = 1024;
 /// Maximum tracked burst keys in rate limiter before stale eviction
 const RATE_LIMIT_MAX_BURST_KEYS: usize = 4096;
+/// Soft warning threshold: when a tool+args is repeated this many times within
+/// `RATE_LIMIT_BURST_WINDOW`, the call still succeeds but an extra TextContent
+/// block is appended to the result advising the agent to call
+/// `tachi_progress_check` / `tachi_wiki_search` before continuing. Hard block
+/// still kicks in at `effective_burst` (default `DEFAULT_RATE_LIMIT_BURST`).
+const STUCK_SOFT_WARN_THRESHOLD: u64 = 3;
 
 // ─── Channel Backpressure ────────────────────────────────────────────────────
 /// Bounded channel capacity for enrichment batcher
@@ -245,12 +255,14 @@ const CACHEABLE_TOOLS: &[&str] = &[
 const CACHE_INVALIDATING_TOOLS: &[&str] = &[
     "save_memory",
     "cyberbrain_write",
+    "remember",
     "extract_facts",
     "ingest",
     "ingest_event",
     "ingest_source",
     "set_state",
     "hub_register",
+    "hub_quick_add",
     "hub_review",
     "section9_review",
     "hub_set_active_version",
@@ -647,6 +659,16 @@ impl MemoryServer {
     }
 
     #[tool(
+        description = "Low-friction shortcut to save a note. Only `text` is required; path defaults to /notes/{YYYY-MM-DD}, category to \"fact\", importance to 0.6, scope to \"project\". Use save_memory directly when you need full control over path, importance, retention, vector, or auto-link."
+    )]
+    async fn remember(
+        &self,
+        Parameters(params): Parameters<RememberParams>,
+    ) -> Result<String, String> {
+        handle_remember(self, params).await
+    }
+
+    #[tool(
         description = "Search memory entries using hybrid search (vector + FTS + symbolic). Returns ranked results with scores."
     )]
     async fn search_memory(
@@ -1007,6 +1029,18 @@ impl MemoryServer {
         Parameters(params): Parameters<HubRegisterParams>,
     ) -> Result<String, String> {
         handle_hub_register(self, params).await
+    }
+
+    #[tool(
+        description = "Composite: hub_register followed by an optional hub_review approve+enable. \
+                       Honors the trusted-command allowlist — auto_approve is silently dropped \
+                       (with a warning) for untrusted stdio MCP commands."
+    )]
+    async fn hub_quick_add(
+        &self,
+        Parameters(params): Parameters<HubQuickAddParams>,
+    ) -> Result<String, String> {
+        handle_hub_quick_add(self, params).await
     }
 
     #[tool(
