@@ -76,6 +76,53 @@ pub(super) fn slim_entry(e: &MemoryEntry, db: DbScope) -> serde_json::Value {
     serde_json::Value::Object(obj)
 }
 
+/// Like `slim_entry` but additionally surfaces enrichment status fields:
+///   - `embedding_pending`: true when no vector has been written yet
+///   - `summary_pending`:   true when no summary has been written yet
+///   - `foundry_jobs`:      array of `{id, kind, status, created_at}` for any
+///     foundry jobs currently touching this memory id (queued/running first,
+///     omitted when empty)
+///
+/// Used by `get_memory` so agents can tell whether async post-write enrichment
+/// is still in flight versus complete. Intentionally NOT used by `list_memories`
+/// or search results to avoid an N+1 lookup against `foundry_jobs`.
+pub(super) fn slim_entry_with_enrichment(
+    server: &MemoryServer,
+    e: &MemoryEntry,
+    db: DbScope,
+    named_project: Option<&str>,
+) -> serde_json::Value {
+    let mut obj = match slim_entry(e, db) {
+        serde_json::Value::Object(m) => m,
+        _ => serde_json::Map::new(),
+    };
+
+    obj.insert("embedding_pending".into(), json!(e.vector.is_none()));
+    obj.insert("summary_pending".into(), json!(e.summary.is_empty()));
+
+    // Foundry job lookup runs against the same store the entry came from. Any
+    // failure (table missing, transient lock, …) is non-fatal — we simply omit
+    // the field so callers can rely on the entry payload itself.
+    let lookup = |store: &mut MemoryStore| -> Result<Vec<memory_core::FoundryJobSummary>, String> {
+        memory_core::find_foundry_jobs_for_memory(store.connection(), &e.id)
+            .map_err(|err| err.to_string())
+    };
+
+    let jobs_res = match (db, named_project) {
+        (DbScope::Project, Some(name)) => server.with_named_project_store_read(name, lookup),
+        (DbScope::Project, None) => server.with_project_store_read(lookup),
+        (DbScope::Global, _) => server.with_global_store_read(lookup),
+    };
+
+    if let Ok(jobs) = jobs_res {
+        if !jobs.is_empty() {
+            obj.insert("foundry_jobs".into(), json!(jobs));
+        }
+    }
+
+    serde_json::Value::Object(obj)
+}
+
 pub(super) fn slim_search_result(
     result: &memory_core::SearchResult,
     db: DbScope,

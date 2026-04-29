@@ -151,38 +151,47 @@ fn cmd_list(
     sql.push_str(" ORDER BY type, name");
 
     let mut stmt = conn.prepare(&sql)?;
-    let rows: Vec<(String, String, String, i64, String, i32, String, String, i64)> =
-        if let Some(t) = type_filter {
-            stmt.query_map([t], |r| {
-                Ok((
-                    r.get(0)?,
-                    r.get(1)?,
-                    r.get(2)?,
-                    r.get(3)?,
-                    r.get(4)?,
-                    r.get(5)?,
-                    r.get(6)?,
-                    r.get(7)?,
-                    r.get(8)?,
-                ))
-            })?
-            .collect::<rusqlite::Result<Vec<_>>>()?
-        } else {
-            stmt.query_map([], |r| {
-                Ok((
-                    r.get(0)?,
-                    r.get(1)?,
-                    r.get(2)?,
-                    r.get(3)?,
-                    r.get(4)?,
-                    r.get(5)?,
-                    r.get(6)?,
-                    r.get(7)?,
-                    r.get(8)?,
-                ))
-            })?
-            .collect::<rusqlite::Result<Vec<_>>>()?
-        };
+    let rows: Vec<(
+        String,
+        String,
+        String,
+        i64,
+        String,
+        i32,
+        String,
+        String,
+        i64,
+    )> = if let Some(t) = type_filter {
+        stmt.query_map([t], |r| {
+            Ok((
+                r.get(0)?,
+                r.get(1)?,
+                r.get(2)?,
+                r.get(3)?,
+                r.get(4)?,
+                r.get(5)?,
+                r.get(6)?,
+                r.get(7)?,
+                r.get(8)?,
+            ))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?
+    } else {
+        stmt.query_map([], |r| {
+            Ok((
+                r.get(0)?,
+                r.get(1)?,
+                r.get(2)?,
+                r.get(3)?,
+                r.get(4)?,
+                r.get(5)?,
+                r.get(6)?,
+                r.get(7)?,
+                r.get(8)?,
+            ))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?
+    };
 
     if rows.is_empty() {
         println!("(no capabilities)");
@@ -258,8 +267,14 @@ fn cmd_show(db: &PathBuf, id: &str) -> Result<(), Box<dyn std::error::Error>> {
     println!("╭─ {} ────────────────────────────────────────", cap_id);
     println!("│ name         : {name}");
     println!("│ type         : {ty}");
-    println!("│ version      : {ver} (active={})", active_version.as_deref().unwrap_or("-"));
-    println!("│ enabled      : {}", if enabled != 0 { "yes" } else { "no" });
+    println!(
+        "│ version      : {ver} (active={})",
+        active_version.as_deref().unwrap_or("-")
+    );
+    println!(
+        "│ enabled      : {}",
+        if enabled != 0 { "yes" } else { "no" }
+    );
     println!("│ review       : {review}");
     println!("│ health       : {health}");
     println!("│ exposure     : {exposure}");
@@ -395,7 +410,8 @@ fn cmd_stats(db: &PathBuf) -> Result<(), Box<dyn std::error::Error>> {
     let memories = count("SELECT COUNT(*) FROM memories").unwrap_or(0);
     let edges = count("SELECT COUNT(*) FROM edges").unwrap_or(0);
     let caps_total = count("SELECT COUNT(*) FROM hub_capabilities").unwrap_or(0);
-    let caps_enabled = count("SELECT COUNT(*) FROM hub_capabilities WHERE enabled = 1").unwrap_or(0);
+    let caps_enabled =
+        count("SELECT COUNT(*) FROM hub_capabilities WHERE enabled = 1").unwrap_or(0);
     let skills = count("SELECT COUNT(*) FROM hub_capabilities WHERE type='skill'").unwrap_or(0);
     let plugins = count("SELECT COUNT(*) FROM hub_capabilities WHERE type='plugin'").unwrap_or(0);
     let mcps = count("SELECT COUNT(*) FROM hub_capabilities WHERE type='mcp'").unwrap_or(0);
@@ -443,10 +459,7 @@ fn cmd_doctor(fix: bool) -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
 
-    let required_cols: &[(&str, &str)] = &[
-        ("retention_policy", "TEXT"),
-        ("domain", "TEXT"),
-    ];
+    let required_cols: &[(&str, &str)] = &[("retention_policy", "TEXT"), ("domain", "TEXT")];
 
     let mut total_issues = 0;
     for db in &dbs {
@@ -517,7 +530,11 @@ fn cmd_doctor(fix: bool) -> Result<(), Box<dyn std::error::Error>> {
     if total_issues == 0 {
         println!("doctor: all clear ({} DBs scanned)", dbs.len());
     } else if fix {
-        println!("doctor: {} drift issues addressed across {} DBs", total_issues, dbs.len());
+        println!(
+            "doctor: {} drift issues addressed across {} DBs",
+            total_issues,
+            dbs.len()
+        );
     } else {
         println!(
             "doctor: {} schema drift issues across {} DBs — re-run with --fix to apply",

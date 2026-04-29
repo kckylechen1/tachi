@@ -218,6 +218,55 @@ pub fn load_pending_foundry_jobs(
     Ok(jobs)
 }
 
+/// Lightweight per-memory job summary for status surfacing in `get_memory`.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct FoundryJobSummary {
+    pub id: String,
+    pub kind: String,
+    pub status: String,
+    pub created_at: String,
+}
+
+/// Find all Foundry jobs whose `memory_ids` JSON array contains `memory_id`.
+///
+/// Implemented with a substring `LIKE` over the JSON column. SQLite has no
+/// JSON1-array index, but a per-memory call is bounded by the small number of
+/// jobs ever queued for one id (typically 0–3). Pending/active jobs first.
+pub fn find_foundry_jobs_for_memory(
+    conn: &Connection,
+    memory_id: &str,
+) -> Result<Vec<FoundryJobSummary>, MemoryError> {
+    let needle = format!("%\"{}\"%", memory_id.replace('"', "\\\""));
+    let mut stmt = conn.prepare(
+        "SELECT id, kind, status, created_at
+         FROM foundry_jobs
+         WHERE memory_ids LIKE ?1
+         ORDER BY CASE status
+                    WHEN 'running'   THEN 0
+                    WHEN 'queued'    THEN 1
+                    WHEN 'planned'   THEN 2
+                    WHEN 'failed'    THEN 3
+                    WHEN 'completed' THEN 4
+                    WHEN 'skipped'   THEN 5
+                    ELSE 6
+                  END,
+                  created_at DESC",
+    )?;
+    let rows = stmt.query_map(params![needle], |row| {
+        Ok(FoundryJobSummary {
+            id: row.get(0)?,
+            kind: row.get(1)?,
+            status: row.get(2)?,
+            created_at: row.get(3)?,
+        })
+    })?;
+    let mut out = Vec::new();
+    for row in rows {
+        out.push(row?);
+    }
+    Ok(out)
+}
+
 /// Delete completed/failed/skipped jobs older than `days` days.
 pub fn gc_foundry_jobs(conn: &Connection, days: i64) -> Result<usize, MemoryError> {
     let cutoff = (chrono::Utc::now() - chrono::Duration::days(days)).to_rfc3339();

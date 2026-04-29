@@ -169,6 +169,127 @@ pub(crate) enum Commands {
         #[command(subcommand)]
         action: RescueAction,
     },
+    /// Quick-capture a memory note. Mirrors the `remember` MCP tool.
+    /// Forwards to a running daemon if one is detected; otherwise runs in-process.
+    Remember {
+        /// Full text content to remember.
+        text: String,
+        /// Optional comma-separated tags (forwarded as keywords).
+        #[arg(long, value_delimiter = ',')]
+        tags: Vec<String>,
+        /// Scope: "user" | "project" | "general". Defaults to "project".
+        #[arg(long)]
+        scope: Option<String>,
+        /// Optional named project DB target (e.g. "hyperion", "wiki").
+        #[arg(long)]
+        project: Option<String>,
+        /// Optional path override. Defaults to /notes/YYYY-MM-DD.
+        #[arg(long)]
+        path: Option<String>,
+        /// Importance score 0.0–1.0. Defaults to 0.6.
+        #[arg(long)]
+        importance: Option<f64>,
+        /// Optional category override. Defaults to "fact".
+        #[arg(long)]
+        category: Option<String>,
+        /// Optional topic / subject area.
+        #[arg(long)]
+        topic: Option<String>,
+        /// Optional domain (e.g. "finance", "code-review").
+        #[arg(long)]
+        domain: Option<String>,
+        /// Optional retention policy.
+        #[arg(long)]
+        retention_policy: Option<String>,
+        /// Optional ≤100-char summary.
+        #[arg(long)]
+        summary: Option<String>,
+        /// Bypass noise filter.
+        #[arg(long)]
+        force: bool,
+    },
+    /// Search the wiki bucket. Mirrors the `tachi_wiki_search` MCP tool.
+    WikiSearch {
+        /// Search query.
+        query: String,
+        /// Wiki category filter (e.g. "quant" or "/wiki/engineering").
+        #[arg(long)]
+        category: Option<String>,
+        /// Number of results to return.
+        #[arg(long, default_value_t = 10)]
+        top_k: usize,
+        /// Optional named project DB.
+        #[arg(long)]
+        project: Option<String>,
+    },
+    /// Write a wiki entry. Mirrors the `tachi_wiki_write` MCP tool.
+    WikiWrite {
+        /// Short title for the wiki entry.
+        title: String,
+        /// Full wiki entry body.
+        text: String,
+        /// Optional explicit /wiki path.
+        #[arg(long)]
+        path: Option<String>,
+        /// Optional topic.
+        #[arg(long)]
+        topic: Option<String>,
+        /// Short summary.
+        #[arg(long)]
+        summary: Option<String>,
+        /// Comma-separated keyword tags.
+        #[arg(long, value_delimiter = ',')]
+        keywords: Vec<String>,
+        /// Comma-separated entity names.
+        #[arg(long, value_delimiter = ',')]
+        entities: Vec<String>,
+        /// Importance score (default: 0.85).
+        #[arg(long)]
+        importance: Option<f64>,
+        /// Scope (default: "global" for wiki).
+        #[arg(long)]
+        scope: Option<String>,
+        /// Optional named project DB.
+        #[arg(long)]
+        project: Option<String>,
+        /// Optional domain.
+        #[arg(long)]
+        domain: Option<String>,
+        /// Bypass noise filter.
+        #[arg(long)]
+        force: bool,
+    },
+    /// List memories under a path prefix. Mirrors the `list_memories` MCP tool.
+    List {
+        /// Path prefix filter. Defaults to "/".
+        #[arg(long, default_value = "/")]
+        path_prefix: String,
+        /// Maximum number of entries to return.
+        #[arg(long, default_value_t = 100)]
+        limit: usize,
+        /// Include archived entries.
+        #[arg(long)]
+        include_archived: bool,
+    },
+    /// Get a single memory by ID. Mirrors the `get_memory` MCP tool.
+    Get {
+        /// Memory entry ID.
+        id: String,
+        /// Optional named project DB to search first.
+        #[arg(long)]
+        project: Option<String>,
+        /// Include archived entries.
+        #[arg(long)]
+        include_archived: bool,
+    },
+    /// Extract structured facts from text. Mirrors the `extract_facts` MCP tool.
+    Extract {
+        /// Text to extract facts from.
+        text: String,
+        /// Source identifier for the extraction.
+        #[arg(long, default_value = "cli")]
+        source: String,
+    },
 }
 
 #[derive(Subcommand, Debug, Clone)]

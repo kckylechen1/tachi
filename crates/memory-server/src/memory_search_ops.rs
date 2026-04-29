@@ -108,13 +108,13 @@ pub(super) async fn handle_save_memory(
         server.with_named_project_store(project_name, |store| {
             store
                 .upsert(&entry)
-                .map_err(|e| format!("Failed to save memory to '{}': {}", project_name, e))
+                .map_err(|e| format_save_error(server, target_db, Some(project_name), &e))
         })?;
     } else {
         server.with_store_for_scope(target_db, |store| {
             store
                 .upsert(&entry)
-                .map_err(|e| format!("Failed to save memory: {}", e))
+                .map_err(|e| format_save_error(server, target_db, None, &e))
         })?;
     }
 
@@ -217,6 +217,48 @@ pub(super) async fn handle_save_memory(
 
     serde_json::to_string(&serde_json::Value::Object(response))
         .map_err(|e| format!("Failed to serialize response: {}", e))
+}
+
+/// Low-friction shortcut over `handle_save_memory`. Infers `path`, `category`,
+/// and `importance` so callers only need to pass `text` (and optionally
+/// `tags`). Internally constructs `SaveMemoryParams` and delegates, so noise
+/// filter, capture gate, provenance injection, auto-link, and the enrichment
+/// batcher all run identically to a direct save_memory call.
+pub(super) async fn handle_remember(
+    server: &MemoryServer,
+    params: RememberParams,
+) -> Result<String, String> {
+    // Default path = /notes/{YYYY-MM-DD} so quick captures land in a
+    // predictable, browsable bucket without forcing the caller to choose one.
+    let inferred_path = params.path.unwrap_or_else(|| {
+        let date = Utc::now().format("%Y-%m-%d");
+        format!("/notes/{date}")
+    });
+
+    let save_params = SaveMemoryParams {
+        text: params.text,
+        summary: params.summary,
+        path: inferred_path,
+        importance: params.importance.unwrap_or(0.6).clamp(0.0, 1.0),
+        category: params.category.unwrap_or_else(|| "fact".to_string()),
+        topic: params.topic,
+        keywords: params.tags,
+        persons: Vec::new(),
+        entities: Vec::new(),
+        location: String::new(),
+        scope: params.scope.unwrap_or_else(|| "project".to_string()),
+        vector: None,
+        id: None,
+        force: params.force,
+        auto_link: true,
+        project: params.project,
+        retention_policy: params.retention_policy,
+        domain: params.domain,
+        timestamp: None,
+        metadata: Some(json!({ "shortcut": "remember" })),
+    };
+
+    handle_save_memory(server, save_params).await
 }
 
 pub(super) async fn search_memory_rows(
@@ -474,4 +516,62 @@ pub(super) async fn handle_find_similar_memory(
     }
 
     serde_json::to_string(&output).map_err(|e| format!("Failed to serialize response: {}", e))
+}
+
+/// Format a save-path error string. When the underlying SQLite error indicates
+/// a readonly database, attach the resolved DB path, the active scope/profile,
+/// and a concrete remediation hint. Non-readonly errors fall through to the
+/// previous one-line format so existing callers (and tests) keep working.
+fn format_save_error(
+    server: &MemoryServer,
+    target_db: DbScope,
+    named_project: Option<&str>,
+    err: &dyn std::fmt::Display,
+) -> String {
+    let err_str = err.to_string();
+    let lower = err_str.to_ascii_lowercase();
+    let is_readonly = lower.contains("readonly")
+        || lower.contains("read-only")
+        || lower.contains("read only")
+        || lower.contains("attempt to write a readonly database");
+
+    if !is_readonly {
+        return match named_project {
+            Some(name) => format!("Failed to save memory to '{}': {}", name, err_str),
+            None => format!("Failed to save memory: {}", err_str),
+        };
+    }
+
+    let db_path = match named_project {
+        Some(name) => crate::MemoryServer::resolve_named_project_db_path(name)
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|_| format!("<named project: {name}>")),
+        None => match target_db {
+            DbScope::Global => server.global_db_path.display().to_string(),
+            DbScope::Project => server
+                .project_db_path
+                .as_ref()
+                .map(|p| p.display().to_string())
+                .unwrap_or_else(|| "<no project DB configured>".to_string()),
+        },
+    };
+
+    let profile_label = server
+        .active_tool_profile()
+        .map(|p| p.as_str())
+        .unwrap_or_else(|| "admin".to_string());
+
+    format!(
+        "Failed to save memory: database is read-only.\n  \
+         db_path: {db_path}\n  \
+         scope: {scope}\n  \
+         profile: {profile_label}\n  \
+         hints:\n    \
+         - Another process may hold an exclusive lock; check for stale `tachi` daemons.\n    \
+         - File permissions may be wrong; ensure the user owns the DB file and parent dir.\n    \
+         - The DB may have been opened read-only by an earlier CLI command — restart the daemon.\n    \
+         - If targeting the wrong DB, pass --global-db / --project-db (or `project=` on the call).\n  \
+         underlying: {err_str}",
+        scope = target_db.as_str(),
+    )
 }

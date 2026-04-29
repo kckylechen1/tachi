@@ -76,7 +76,8 @@ impl Manifest {
         Self {
             schema_version: MANIFEST_SCHEMA_VERSION,
             generated_at: Utc::now().to_rfc3339(),
-            comment: "Tachi-owned memory DBs. Managed by `tachi doctor` / `tachi manifest`.".to_string(),
+            comment: "Tachi-owned memory DBs. Managed by `tachi doctor` / `tachi manifest`."
+                .to_string(),
             dbs: Vec::new(),
         }
     }
@@ -88,7 +89,10 @@ impl Manifest {
     pub fn load(path: &Path) -> std::io::Result<Self> {
         let bytes = fs::read(path)?;
         let m: Manifest = serde_json::from_slice(&bytes).map_err(|e| {
-            std::io::Error::new(std::io::ErrorKind::InvalidData, format!("manifest parse: {e}"))
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("manifest parse: {e}"),
+            )
         })?;
         Ok(m)
     }
@@ -102,7 +106,10 @@ impl Manifest {
             fs::create_dir_all(parent)?;
         }
         let json = serde_json::to_string_pretty(self).map_err(|e| {
-            std::io::Error::new(std::io::ErrorKind::Other, format!("manifest serialize: {e}"))
+            std::io::Error::new(
+                std::io::ErrorKind::Other,
+                format!("manifest serialize: {e}"),
+            )
         })?;
         // Atomic-ish write via tmp + rename.
         let tmp = path.with_extension("json.tmp");
@@ -186,8 +193,13 @@ impl Manifest {
 
 #[derive(Debug, Clone)]
 pub enum ManifestGuardError {
-    NotInManifest { path: String },
-    WriteForbidden { path: String, last_classification: String },
+    NotInManifest {
+        path: String,
+    },
+    WriteForbidden {
+        path: String,
+        last_classification: String,
+    },
 }
 
 impl std::fmt::Display for ManifestGuardError {
@@ -301,14 +313,15 @@ pub fn plan_sweep(
             .unwrap_or_else(|| "db".into());
         let mut candidate = format!("swept-{}", base);
         let mut n = 1;
-        while used_names.contains(&candidate)
-            || quarantine_dir.join(&candidate).exists()
-        {
+        while used_names.contains(&candidate) || quarantine_dir.join(&candidate).exists() {
             candidate = format!("swept-{}.{}", base, n);
             n += 1;
         }
         used_names.insert(candidate.clone());
-        let qpath = quarantine_dir.join(&candidate).to_string_lossy().to_string();
+        let qpath = quarantine_dir
+            .join(&candidate)
+            .to_string_lossy()
+            .to_string();
 
         planned.push(SweepAction {
             path: f.path.clone(),
@@ -318,7 +331,11 @@ pub fn plan_sweep(
         });
     }
 
-    SweepReport { planned, applied: Vec::new(), skipped }
+    SweepReport {
+        planned,
+        applied: Vec::new(),
+        skipped,
+    }
 }
 
 /// Execute a sweep plan: move each planned file to its quarantine target.
@@ -473,16 +490,43 @@ mod tests {
     fn populate_filters_and_classifies_roles() {
         let mut m = Manifest::empty();
         let report = mk_report(vec![
-            mk_finding("/u/.tachi/global/memory.db", DbClassification::Healthy, "global"),
-            mk_finding("/u/.tachi/projects/quant/memory.db", DbClassification::Healthy, "project:quant"),
-            mk_finding("/u/.openclaw/extensions/tachi/data/agents/main/memory.db", DbClassification::Healthy, "openclaw-agent:main"),
-            mk_finding("/u/.tachi/junk.db", DbClassification::Placeholder, "tachi-other"),
-            mk_finding("/u/.tachi/foo.db.bak", DbClassification::Backup, "tachi-other"),
-            mk_finding("/u/.tachi/dead.db", DbClassification::Corrupt, "tachi-other"),
+            mk_finding(
+                "/u/.tachi/global/memory.db",
+                DbClassification::Healthy,
+                "global",
+            ),
+            mk_finding(
+                "/u/.tachi/projects/quant/memory.db",
+                DbClassification::Healthy,
+                "project:quant",
+            ),
+            mk_finding(
+                "/u/.openclaw/extensions/tachi/data/agents/main/memory.db",
+                DbClassification::Healthy,
+                "openclaw-agent:main",
+            ),
+            mk_finding(
+                "/u/.tachi/junk.db",
+                DbClassification::Placeholder,
+                "tachi-other",
+            ),
+            mk_finding(
+                "/u/.tachi/foo.db.bak",
+                DbClassification::Backup,
+                "tachi-other",
+            ),
+            mk_finding(
+                "/u/.tachi/dead.db",
+                DbClassification::Corrupt,
+                "tachi-other",
+            ),
         ]);
         m.populate_from_doctor(&report);
         assert_eq!(m.dbs.len(), 3, "only healthy/wal/legacy should be recorded");
-        assert_eq!(m.global().map(|e| e.path.as_str()), Some("/u/.tachi/global/memory.db"));
+        assert_eq!(
+            m.global().map(|e| e.path.as_str()),
+            Some("/u/.tachi/global/memory.db")
+        );
         assert_eq!(m.by_role(DbRole::Project).len(), 1);
         assert_eq!(m.by_role(DbRole::Agent).len(), 1);
         let agent = m.by_role(DbRole::Agent)[0];
@@ -524,8 +568,11 @@ mod tests {
             mk_finding("/u/b.db", DbClassification::WalOrphan, "project:b"),
             mk_finding("/u/c.db", DbClassification::LegacySchema, "project:c"),
         ]));
-        let by_path: std::collections::HashMap<_, _> =
-            m.dbs.iter().map(|e| (e.path.clone(), e.allow_write)).collect();
+        let by_path: std::collections::HashMap<_, _> = m
+            .dbs
+            .iter()
+            .map(|e| (e.path.clone(), e.allow_write))
+            .collect();
         assert_eq!(by_path["/u/a.db"], true);
         assert_eq!(by_path["/u/b.db"], false);
         assert_eq!(by_path["/u/c.db"], false);
@@ -571,14 +618,34 @@ mod tests {
         )]));
         // doctor sees: 1 owned (must be skipped), 1 placeholder, 1 backup, 1 corrupt (ignored)
         let report = mk_report(vec![
-            mk_finding("/u/.tachi/global/memory.db", DbClassification::Healthy, "global"),
-            mk_finding("/u/.tachi/junk.db", DbClassification::Placeholder, "tachi-other"),
-            mk_finding("/u/.tachi/foo.db.bak", DbClassification::Backup, "tachi-other"),
-            mk_finding("/u/.tachi/dead.db", DbClassification::Corrupt, "tachi-other"),
+            mk_finding(
+                "/u/.tachi/global/memory.db",
+                DbClassification::Healthy,
+                "global",
+            ),
+            mk_finding(
+                "/u/.tachi/junk.db",
+                DbClassification::Placeholder,
+                "tachi-other",
+            ),
+            mk_finding(
+                "/u/.tachi/foo.db.bak",
+                DbClassification::Backup,
+                "tachi-other",
+            ),
+            mk_finding(
+                "/u/.tachi/dead.db",
+                DbClassification::Corrupt,
+                "tachi-other",
+            ),
         ]);
         let qdir = std::path::Path::new("/tmp/q");
         let plan = plan_sweep(&report, &m, qdir);
-        assert_eq!(plan.planned.len(), 2, "placeholder + backup should be planned");
+        assert_eq!(
+            plan.planned.len(),
+            2,
+            "placeholder + backup should be planned"
+        );
         let paths: Vec<_> = plan.planned.iter().map(|a| a.path.as_str()).collect();
         assert!(paths.contains(&"/u/.tachi/junk.db"));
         assert!(paths.contains(&"/u/.tachi/foo.db.bak"));
@@ -598,24 +665,57 @@ mod tests {
         // Doctor sees a placeholder INSIDE a Tachi root → should plan,
         // and another placeholder OUTSIDE Tachi roots → should skip.
         let report = mk_report(vec![
-            mk_finding("/home/user/.tachi/junk.db", DbClassification::Placeholder, "tachi-other"),
-            mk_finding("/home/user/Desktop/Project/data/cache.db", DbClassification::Placeholder, "tachi-other"),
+            mk_finding(
+                "/home/user/.tachi/junk.db",
+                DbClassification::Placeholder,
+                "tachi-other",
+            ),
+            mk_finding(
+                "/home/user/Desktop/Project/data/cache.db",
+                DbClassification::Placeholder,
+                "tachi-other",
+            ),
         ]);
         let plan = plan_sweep(&report, &m, std::path::Path::new("/tmp/q"));
-        assert_eq!(plan.planned.len(), 1, "only the in-Tachi-root file should be planned");
+        assert_eq!(
+            plan.planned.len(),
+            1,
+            "only the in-Tachi-root file should be planned"
+        );
         assert_eq!(plan.planned[0].path, "/home/user/.tachi/junk.db");
-        let outside_skip = plan.skipped.iter().find(|a| a.path == "/home/user/Desktop/Project/data/cache.db");
-        assert!(outside_skip.is_some(), "outside-roots file must be skipped, not planned");
-        assert!(outside_skip.unwrap().note.contains("outside Tachi-owned roots"));
+        let outside_skip = plan
+            .skipped
+            .iter()
+            .find(|a| a.path == "/home/user/Desktop/Project/data/cache.db");
+        assert!(
+            outside_skip.is_some(),
+            "outside-roots file must be skipped, not planned"
+        );
+        assert!(outside_skip
+            .unwrap()
+            .note
+            .contains("outside Tachi-owned roots"));
     }
 
     #[test]
     fn plan_sweep_assigns_unique_quarantine_names_for_collisions() {
         let m = Manifest::empty();
         let report = mk_report(vec![
-            mk_finding("/home/user/.tachi/a/dup.db", DbClassification::Placeholder, "tachi-other"),
-            mk_finding("/home/user/.tachi/b/dup.db", DbClassification::Placeholder, "tachi-other"),
-            mk_finding("/home/user/.tachi/c/dup.db", DbClassification::Placeholder, "tachi-other"),
+            mk_finding(
+                "/home/user/.tachi/a/dup.db",
+                DbClassification::Placeholder,
+                "tachi-other",
+            ),
+            mk_finding(
+                "/home/user/.tachi/b/dup.db",
+                DbClassification::Placeholder,
+                "tachi-other",
+            ),
+            mk_finding(
+                "/home/user/.tachi/c/dup.db",
+                DbClassification::Placeholder,
+                "tachi-other",
+            ),
         ]);
         let dir = tempdir().unwrap();
         let plan = plan_sweep(&report, &m, dir.path());
@@ -645,7 +745,11 @@ mod tests {
             "tachi-other",
         )]);
         let plan = plan_sweep(&report, &m, &qdir);
-        assert_eq!(plan.planned.len(), 1, "placeholder under .tachi should be planned");
+        assert_eq!(
+            plan.planned.len(),
+            1,
+            "placeholder under .tachi should be planned"
+        );
         let result = apply_sweep(plan, &qdir);
         assert_eq!(result.applied.len(), 1, "placeholder should be moved");
         assert!(!bad.exists(), "original placeholder gone");

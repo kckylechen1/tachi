@@ -792,18 +792,24 @@ impl MemoryServer {
     // ─── Rate Limiter ────────────────────────────────────────────────────────
 
     /// Check rate limits before dispatching a tool call.
-    /// Returns `Ok(())` if the call is allowed, or `Err(ErrorData)` if rate limited.
+    ///
+    /// Returns:
+    /// - `Ok(None)`             — call is allowed, no warning
+    /// - `Ok(Some(warning))`    — call is allowed but at/above soft-warn threshold
+    ///                             (caller should append the warning to the tool result)
+    /// - `Err(ErrorData)`       — hard rate-limit / loop block, do not dispatch
     ///
     /// Two independent checks:
     /// 1. **RPM limit**: sliding window of all calls per session (if RATE_LIMIT_RPM > 0)
     /// 2. **Burst limit**: detects repeated identical calls (same tool+args) within a
-    ///    60-second window, indicating an agent is stuck in a loop
+    ///    60-second window, indicating an agent is stuck in a loop. Soft warning at
+    ///    `STUCK_SOFT_WARN_THRESHOLD`, hard block at `effective_burst`.
     pub(super) fn check_rate_limit(
         &self,
         tool_name: &str,
         args_hash: &str,
         session_id: &str,
-    ) -> Result<(), rmcp::ErrorData> {
+    ) -> Result<Option<String>, rmcp::ErrorData> {
         let now = Instant::now();
 
         // Read agent profile overrides (if registered)
@@ -864,6 +870,7 @@ impl MemoryServer {
         }
 
         // ── Burst / loop detection ───────────────────────────────────────
+        let mut soft_warning: Option<String> = None;
         if effective_burst > 0 {
             let burst_key = format!("{}:{}:{}", session_id, tool_name, args_hash);
             let mut bursts = self
@@ -904,9 +911,25 @@ impl MemoryServer {
                 ));
             }
 
+            // Soft warning: this call (about to be recorded as #stamps.len()+1)
+            // crosses the soft threshold but is still below the hard block.
+            // Emit on every repeat from threshold up to (effective_burst - 1).
+            let upcoming_count = stamps.len() as u64 + 1;
+            if upcoming_count >= STUCK_SOFT_WARN_THRESHOLD && upcoming_count < effective_burst {
+                soft_warning = Some(format!(
+                    "⚠️ stuck-detection: tool '{}' has been called {} times with identical arguments within {}s. \
+                     Hard block triggers at {} repeats. Consider calling tachi_progress_check with the current task / attempts / latest error, \
+                     or searching prior solutions via tachi_wiki_search / tachi_task_brief before retrying the same path.",
+                    tool_name,
+                    upcoming_count,
+                    RATE_LIMIT_BURST_WINDOW.as_secs(),
+                    effective_burst
+                ));
+            }
+
             stamps.push_back(now);
         }
 
-        Ok(())
+        Ok(soft_warning)
     }
 }
