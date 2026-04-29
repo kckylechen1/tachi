@@ -2201,12 +2201,35 @@ async fn tokio_main(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 global_db_path
             } else {
                 // No override → trust the manifest.
-                if let Err(err) = m.check_writable(&entry.path) {
-                    return Err(format!(
-                        "manifest global DB is not writable: {err}. \
-                         Run `tachi doctor` to inspect, then `tachi manifest refresh` once resolved."
-                    )
-                    .into());
+                // Escape hatch: TACHI_BYPASS_MANIFEST=1 lets users (and the
+                // daemon itself when restarting after a crash) skip the
+                // manifest write guard so a misclassified-but-healthy DB
+                // does not self-lock the CLI. Doctor / manifest commands
+                // never go through this path.
+                let bypass = std::env::var("TACHI_BYPASS_MANIFEST")
+                    .ok()
+                    .map(|v| matches!(v.trim(), "1" | "true" | "TRUE" | "yes"))
+                    .unwrap_or(false);
+                if !bypass {
+                    if let Err(err) = m.check_writable(&entry.path) {
+                        // Before failing hard, check if a live daemon is already
+                        // holding this DB — that is the most common cause of a
+                        // false-positive WalOrphan classification.
+                        let daemon_alive =
+                            crate::cli_client::detect_daemon(&home).await.is_some();
+                        if !daemon_alive {
+                            return Err(format!(
+                                "manifest global DB is not writable: {err}. \
+                                 Run `tachi doctor` to inspect, then `tachi manifest refresh` once resolved. \
+                                 To force-bypass: TACHI_BYPASS_MANIFEST=1"
+                            )
+                            .into());
+                        }
+                        eprintln!(
+                            "info: manifest reports {} as not writable, but live daemon detected — proceeding.",
+                            entry.path
+                        );
+                    }
                 }
                 if global_db_path != manifest_global {
                     eprintln!(
