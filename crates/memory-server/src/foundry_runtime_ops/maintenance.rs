@@ -4,6 +4,22 @@ use super::*;
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::Ordering;
 
+/// Outcome of a memory-distill job. Carries a structured skip reason so
+/// foundry_jobs.metadata.skip_reason answers "why didn't this run?" instead
+/// of the previous opaque "worker reported no-op".
+pub(crate) enum DistillOutcome {
+    Wrote(#[allow(dead_code)] String),
+    Skipped(String),
+}
+
+// ---- Foundry distill skip-reason codes (stable, surfaced in DB metadata) ----
+/// All source memories filtered out (archived or already a distill output).
+pub(crate) const SKIP_NO_SOURCE_ENTRIES: &str = "no_source_entries";
+/// No coherent topic/entity bucket among the source memories.
+pub(crate) const SKIP_NO_COHERENT_BUCKET: &str = "no_coherent_bucket";
+/// LLM returned an empty payload (post-trim).
+pub(crate) const SKIP_EMPTY_LLM_OUTPUT: &str = "empty_llm_output";
+
 fn foundry_requested_by(server: &MemoryServer) -> Option<String> {
     read_or_recover(&server.agent_profile, "agent_profile")
         .as_ref()
@@ -663,7 +679,7 @@ pub(super) fn coherent_distill_buckets(
 async fn process_memory_distill_job(
     server: &MemoryServer,
     item: &FoundryMaintenanceItem,
-) -> Result<Option<String>, String> {
+) -> Result<DistillOutcome, String> {
     let source_entries = with_foundry_store_read(server, item, |store| {
         let mut entries = Vec::new();
         for memory_id in &item.memory_ids {
@@ -682,7 +698,7 @@ async fn process_memory_distill_job(
         .filter(|entry| !entry.archived && entry.source != FOUNDRY_DISTILL_SOURCE)
         .collect::<Vec<_>>();
     if raw_entries.is_empty() {
-        return Ok(None);
+        return Ok(DistillOutcome::Skipped(SKIP_NO_SOURCE_ENTRIES.to_string()));
     }
 
     let preferred_coherence_key = item
@@ -698,9 +714,12 @@ async fn process_memory_distill_job(
     // legacy contract (one distill output per job).
     let mut buckets = coherent_distill_buckets(raw_entries);
     if buckets.is_empty() {
-        return Ok(None);
+        return Ok(DistillOutcome::Skipped(
+            SKIP_NO_COHERENT_BUCKET.to_string(),
+        ));
     }
-    let (bucket_key, source_entries) = if let Some(preferred_key) = preferred_coherence_key {
+    let (bucket_key, source_entries) = if let Some(preferred_key) = preferred_coherence_key.clone()
+    {
         let preferred_bucket_key = format!("{}#{preferred_key}", item.path_prefix);
         if let Some(index) = buckets
             .iter()
@@ -708,6 +727,12 @@ async fn process_memory_distill_job(
         {
             buckets.swap_remove(index)
         } else {
+            // Preferred key was requested but no bucket matched. Log so this
+            // doesn't silently diverge from the scheduler's intent.
+            eprintln!(
+                "[foundry/distill] preferred_coherence_key={preferred_key:?} not found in buckets ({} buckets); falling back to largest",
+                buckets.len()
+            );
             buckets.sort_by(|a, b| b.1.len().cmp(&a.1.len()));
             buckets.into_iter().next().expect("non-empty")
         }
@@ -718,7 +743,13 @@ async fn process_memory_distill_job(
 
     let quality_flags = distill_quality_flags(&source_entries);
     if !quality_flags.is_empty() {
-        return Ok(None);
+        // Quality flags are exactly the skip reason — surface them so
+        // operators can see "min_batch_not_met" vs "mixed_namespace" vs
+        // "legacy_incoherent_distill" in foundry_jobs.metadata.
+        return Ok(DistillOutcome::Skipped(format!(
+            "quality_flags:{}",
+            quality_flags.join(",")
+        )));
     }
 
     let (namespace_key, coherence_key) = bucket_key
@@ -732,7 +763,7 @@ async fn process_memory_distill_job(
         .await
         .map_err(|e| format!("Foundry distill summary failed: {e}"))?;
     if distill_text.trim().is_empty() {
-        return Ok(None);
+        return Ok(DistillOutcome::Skipped(SKIP_EMPTY_LLM_OUTPUT.to_string()));
     }
 
     let agent_id = item
@@ -817,7 +848,7 @@ async fn process_memory_distill_job(
         None,
     );
 
-    Ok(Some(memory_id))
+    Ok(DistillOutcome::Wrote(memory_id))
 }
 
 fn process_forget_sweep_job(
@@ -887,20 +918,21 @@ async fn handle_foundry_maintenance_item(
     let result = match item.job.kind {
         memory_core::FoundryJobKind::MemoryRerank => process_memory_rerank_job(server, item)
             .await
-            .map(|_| memory_core::FoundryJobStatus::Completed),
+            .map(|_| (memory_core::FoundryJobStatus::Completed, None)),
         memory_core::FoundryJobKind::MemoryDistill => process_memory_distill_job(server, item)
             .await
-            .map(|memory_id| {
-                if memory_id.is_some() {
-                    memory_core::FoundryJobStatus::Completed
-                } else {
-                    memory_core::FoundryJobStatus::Skipped
+            .map(|outcome| match outcome {
+                DistillOutcome::Wrote(_) => (memory_core::FoundryJobStatus::Completed, None),
+                DistillOutcome::Skipped(reason) => {
+                    (memory_core::FoundryJobStatus::Skipped, Some(reason))
                 }
             }),
-        memory_core::FoundryJobKind::ForgetSweep => {
-            process_forget_sweep_job(server, item).map(|_| memory_core::FoundryJobStatus::Completed)
-        }
-        _ => Ok(memory_core::FoundryJobStatus::Skipped),
+        memory_core::FoundryJobKind::ForgetSweep => process_forget_sweep_job(server, item)
+            .map(|_| (memory_core::FoundryJobStatus::Completed, None)),
+        _ => Ok((
+            memory_core::FoundryJobStatus::Skipped,
+            Some("unknown_job_kind".to_string()),
+        )),
     };
 
     if let Err(err) = &result {
@@ -912,7 +944,38 @@ async fn handle_foundry_maintenance_item(
         return Err(err.clone());
     }
 
-    result
+    result.map(|(status, reason)| {
+        // Stash skip reason in the job metadata so the worker loop can write
+        // it without re-deriving. Tag uses a thread-local-style return tuple
+        // — not pretty but contained to the boundary.
+        if let Some(r) = reason {
+            // Best-effort: stash on a static lookup keyed by job id.
+            distill_skip_reason_stash()
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .insert(item.job.id.clone(), r);
+        }
+        status
+    })
+}
+
+/// Per-job stash so handle_foundry_maintenance_item can return the stable
+/// FoundryJobStatus enum (unchanged ABI) while still delivering a structured
+/// skip reason to run_foundry_maintenance_worker. Entries are consumed
+/// (removed) when the worker writes the terminal status to DB.
+fn distill_skip_reason_stash(
+) -> &'static std::sync::Mutex<std::collections::HashMap<String, String>> {
+    static STASH: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<String, String>>,
+    > = std::sync::OnceLock::new();
+    STASH.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
+pub(crate) fn take_distill_skip_reason(job_id: &str) -> Option<String> {
+    distill_skip_reason_stash()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .remove(job_id)
 }
 
 pub(crate) async fn run_foundry_maintenance_worker(
@@ -930,13 +993,30 @@ pub(crate) async fn run_foundry_maintenance_worker(
         // Branch #5: capture a structured reason for non-completed terminal
         // transitions so `tachi doctor --jobs` and post-mortems can surface
         // *why* a job skipped/failed instead of just the bare status.
+        // PR-C: prefer the structured per-job stash populated by the
+        // distill worker (covers no_source_entries / no_coherent_bucket /
+        // quality_flags:* / empty_llm_output). Falls back to a generic
+        // string only when the worker did not stash a code (e.g. rerank /
+        // forget_sweep / unknown_job_kind).
         let (status_str, reason): (&str, Option<String>) = match &result {
-            Ok(memory_core::FoundryJobStatus::Skipped) => (
-                "skipped",
-                Some("worker reported no-op (no qualifying inputs)".to_string()),
-            ),
-            Ok(_) => ("completed", None),
-            Err(e) => ("failed", Some(e.clone())),
+            Ok(memory_core::FoundryJobStatus::Skipped) => {
+                let stashed = take_distill_skip_reason(&item.job.id);
+                (
+                    "skipped",
+                    Some(stashed.unwrap_or_else(|| {
+                        "worker reported no-op (no qualifying inputs)".to_string()
+                    })),
+                )
+            }
+            Ok(_) => {
+                // Drain any residual stash for this job to keep the map bounded.
+                let _ = take_distill_skip_reason(&item.job.id);
+                ("completed", None)
+            }
+            Err(e) => {
+                let _ = take_distill_skip_reason(&item.job.id);
+                ("failed", Some(e.clone()))
+            }
         };
         let _ = with_foundry_store(&server, &item, |store| {
             memory_core::update_foundry_job_status_with_reason(
